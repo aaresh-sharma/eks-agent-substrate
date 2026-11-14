@@ -16,6 +16,7 @@ import (
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/efs"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 )
 
 const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -423,19 +424,7 @@ func TestHooksRefuseUnpinnedOverridesBeforeTheCluster(t *testing.T) {
 // setup-aws, Deploy and Verify), is touched. With the pinned defaults Run
 // goes on to the cluster (review of 86ba13f, finding 3).
 func TestRunRefusesABadOverrideBeforeAnyChild(t *testing.T) {
-	tree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("module x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", SetupAWS: "/setup-aws",
-		Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}}
-	for _, k := range imageVars {
-		t.Setenv(k, "")
-	}
-	// What each action starts first once it is past the check: deploy reads
-	// the record, verify builds kubectl-ate for efs's Verify.
-	first := map[string]string{plugin.ActionDeploy: "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins",
-		plugin.ActionVerify: "go build -o "}
+	o, first := runOptions(t)
 	for _, action := range []string{plugin.ActionDeploy, plugin.ActionVerify} {
 		t.Setenv("OPENCLAW_ACTOR_IMAGE", actorRepo+":v1:v2"+digest)
 		log := recordExec(t)
@@ -451,6 +440,110 @@ func TestRunRefusesABadOverrideBeforeAnyChild(t *testing.T) {
 		_ = plugin.Run(context.Background(), io.Discard, action, []string{ID}, o)
 		if len(*log) == 0 || !strings.HasPrefix((*log)[0], first[action]) {
 			t.Errorf("%s, the pinned defaults: first child %q, want %s", action, *log, first[action])
+		}
+	}
+}
+
+// runOptions are Options for plugin.Run with a kubectl-ate tree, every
+// openclaw setting empty, and what each action starts first once it is past
+// the settings check: deploy reads the record, verify builds kubectl-ate for
+// efs's Verify.
+func runOptions(t *testing.T) (plugin.Options, map[string]string) {
+	t.Helper()
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range settingVars {
+		t.Setenv(k, "")
+	}
+	return plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", SetupAWS: "/setup-aws",
+			Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}},
+		map[string]string{plugin.ActionDeploy: "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins",
+			plugin.ActionVerify: "go build -o "}
+}
+
+var settingVars = append(slices.Clone(imageVars), "WHATSAPP_PEER", "OPENCLAW_WORKERS")
+
+// The settings openclaw's Check covers besides the images: each malformed
+// value with the variable it names, and values that are fine. Each bad
+// value is distinctive, so finding it in an error means it was printed.
+var (
+	badSettings = []struct{ key, value string }{
+		{"WHATSAPP_PEER", "15555550123"}, {"WHATSAPP_PEER", "+1234"}, {"OPENCLAW_WORKERS", "-7"}, {"OPENCLAW_WORKERS", "seven"},
+	}
+	goodSettings = []struct{ key, value string }{
+		{"WHATSAPP_PEER", "+15555550123"}, {"OPENCLAW_WORKERS", "5"}, {"WHATSAPP_PEER", ""}, {"OPENCLAW_WORKERS", ""},
+	}
+)
+
+// openclaw's Check covers every setting Deploy reads, so a malformed
+// WHATSAPP_PEER or OPENCLAW_WORKERS stops a run before any child, as a bad
+// image does. The refusal names the variable but never prints the value:
+// WHATSAPP_PEER is a phone number, and Review shows Check errors. Valid and
+// empty values go on (review of deb95a7, RISK A).
+func TestRunRefusesABadPeerOrWorkersBeforeAnyChild(t *testing.T) {
+	o, first := runOptions(t)
+	for _, action := range []string{plugin.ActionDeploy, plugin.ActionVerify} {
+		for _, s := range badSettings {
+			t.Setenv(s.key, s.value)
+			log := recordExec(t)
+			err := plugin.Run(context.Background(), io.Discard, action, []string{ID}, o)
+			if err == nil || !strings.Contains(err.Error(), "plugin openclaw: ") || !strings.Contains(err.Error(), s.key) || strings.Contains(err.Error(), s.value) {
+				t.Errorf("%s, %s=%s: want a refusal naming %s without its value, got %v", action, s.key, s.value, s.key, err)
+			}
+			if len(*log) > 0 {
+				t.Errorf("%s, %s=%s: started %q before refusing", action, s.key, s.value, *log)
+			}
+			t.Setenv(s.key, "")
+		}
+		for _, s := range goodSettings {
+			t.Setenv(s.key, s.value)
+			log := recordExec(t)
+			_ = plugin.Run(context.Background(), io.Discard, action, []string{ID}, o)
+			if len(*log) == 0 || !strings.HasPrefix((*log)[0], first[action]) {
+				t.Errorf("%s, %s=%q: first child %q, want %s", action, s.key, s.value, *log, first[action])
+			}
+			t.Setenv(s.key, "")
+		}
+	}
+}
+
+// The same refusal from the call Review makes before it lets y start the
+// install (ui's settingsErr: plugin.CheckSettings on the chosen plugins with
+// state.Config.Lookup), with each value only in config.local.env.
+func TestReviewsLookupRefusesABadPeerOrWorkers(t *testing.T) {
+	for _, k := range settingVars {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps, err := plugin.Resolve([]string{ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(key, value string) error {
+		dir := t.TempDir()
+		for name, body := range map[string]string{"config.env": "", "config.local.env": key + "=" + value + "\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg, err := state.LoadConfig(dir, os.LookupEnv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plugin.CheckSettings(ps, cfg.Lookup)
+	}
+	for _, s := range badSettings {
+		if err := check(s.key, s.value); err == nil || !strings.Contains(err.Error(), s.key) || strings.Contains(err.Error(), s.value) {
+			t.Errorf("%s=%s in config.local.env: want a refusal naming %s without its value, got %v", s.key, s.value, s.key, err)
+		}
+	}
+	for _, s := range goodSettings {
+		if err := check(s.key, s.value); err != nil {
+			t.Errorf("%s=%q in config.local.env: %v", s.key, s.value, err)
 		}
 	}
 }

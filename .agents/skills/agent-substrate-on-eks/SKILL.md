@@ -61,8 +61,8 @@ from `native/`, in the background with a log file, and read the tail. Set
 - Plugins: `llm-gateway` (default), `efs`, `s3files` (needs `efs`),
   `credprovider-aws`, `db-rotation` (needs RDS), `openclaw` (needs `efs`;
   its public images are pinned by digest, and `OPENCLAW_*_IMAGE` replace
-  them, pinned too), `mode3`, `mode3-iso` (needs `mode3` and Auto Mode). `efs` and `s3files` build on the counter
-  demo: deploy the demo first.
+  them, pinned too), `mode3`, `mode3-iso` (needs `mode3` and Auto Mode).
+  `efs` and `s3files` build on the counter demo: deploy the demo first.
 - `--plan` on a `setup-aws` command reports what it would do and writes
   nothing.
 - A step that outlives the AWS session waits up to 30 minutes for refreshed

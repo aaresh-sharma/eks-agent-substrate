@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -118,7 +119,7 @@ func init() {
 		Minutes:  15,
 		Requires: []string{efs.ID},
 		Needs:    plugin.Needs{IngressIDs: []string{GatewayID, DashboardID}},
-		Check:    func(lookup func(string) (string, bool)) error { _, err := pinnedImages(lookup); return err },
+		Check:    check,
 		Deploy:   deploy,
 		Verify:   verify,
 		Remove:   remove,
@@ -156,8 +157,8 @@ type images struct{ gateway, actor, dashboard, worker string }
 
 // pinnedImages are the gateway, actor and dashboard refs: the pinned
 // defaults, or the OPENCLAW_*_IMAGE overrides as lookup reads them, or one
-// error naming every override that is not pinned by digest. It is the
-// plugin's Check, which the installer runs before any AWS or kubectl call
+// error naming every override that is not pinned by digest. The plugin's
+// Check (check) runs it before any AWS or kubectl call
 // (plugin.CheckSettings); Deploy and Verify call it again on the
 // environment before they touch the cluster.
 func pinnedImages(lookup func(string) (string, bool)) (images, error) {
@@ -189,6 +190,40 @@ func withWorker(ctx context.Context, o plugin.Options, im images) (images, error
 	return im, err
 }
 
+// check is the plugin's Check: every setting Deploy reads, as lookup reads
+// it, through the validation Deploy uses (pinnedImages, whatsappFor,
+// workerReplicas). It names every refused variable and prints no value.
+func check(lookup func(string) (string, bool)) error {
+	var refused []string
+	if _, err := pinnedImages(lookup); err != nil {
+		refused = append(refused, err.Error())
+	}
+	peer, _ := lookup("WHATSAPP_PEER")
+	if _, err := whatsappFor(peer); err != nil {
+		refused = append(refused, err.Error())
+	}
+	workers, _ := lookup("OPENCLAW_WORKERS")
+	if _, err := workerReplicas(workers); err != nil {
+		refused = append(refused, err.Error())
+	}
+	if len(refused) > 0 {
+		return errors.New(strings.Join(refused, "; "))
+	}
+	return nil
+}
+
+// workerReplicas is OPENCLAW_WORKERS, the gVisor worker pool's size: 3 when
+// empty, else a positive number.
+func workerReplicas(v string) (string, error) {
+	if v == "" {
+		return "3", nil
+	}
+	if n, err := strconv.Atoi(v); err != nil || n < 1 {
+		return "", errors.New("OPENCLAW_WORKERS must be a positive number")
+	}
+	return v, nil
+}
+
 // whatsapp is the WhatsApp binding: WHATSAPP_PEER is one E.164 number
 // allowed to message the agent; empty, no WhatsApp.
 type whatsapp struct {
@@ -203,7 +238,9 @@ func whatsappFor(peer string) (whatsapp, error) {
 		return whatsapp{pluginsAllow: `["substrate"]`, bindings: `[]`, ch: `{}`}, nil
 	}
 	if !e164.MatchString(peer) {
-		return whatsapp{}, fmt.Errorf("WHATSAPP_PEER %q is not an E.164 number (+15555550100)", peer)
+		// Never the value: it is a phone number, and this reaches the log
+		// and the Review screen.
+		return whatsapp{}, errors.New("WHATSAPP_PEER is not an E.164 number (like +15555550100)")
 	}
 	b, _ := json.Marshal([]any{map[string]any{"type": "acp", "agentId": "main",
 		"match": map[string]any{"channel": "whatsapp", "accountId": "default", "peer": map[string]any{"kind": "direct", "id": peer}},
@@ -349,12 +386,9 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err != nil {
 		return err
 	}
-	replicas := os.Getenv("OPENCLAW_WORKERS")
-	if replicas == "" {
-		replicas = "3"
-	}
-	if n, err := strconv.Atoi(replicas); err != nil || n < 1 {
-		return fmt.Errorf("OPENCLAW_WORKERS must be a positive number, got %q", replicas)
+	replicas, err := workerReplicas(os.Getenv("OPENCLAW_WORKERS"))
+	if err != nil {
+		return err
 	}
 	if err := storage(ctx, w, o); err != nil {
 		return err
