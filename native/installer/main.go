@@ -331,6 +331,18 @@ func runPlugins(ctx context.Context, action string, ids []string, o plugin.Optio
 	if action != plugin.ActionRemove && len(ids) == 0 {
 		return fmt.Errorf("--plugin-action %s needs --plugins", action)
 	}
+	if action != plugin.ActionRemove {
+		// Before the cluster is described or read: Run checks again, after
+		// clusterRelease's EKS and kubectl calls (review of 86ba13f,
+		// finding 3).
+		ps, err := plugin.Resolve(ids)
+		if err != nil {
+			return err
+		}
+		if err := plugin.CheckSettings(ps, os.LookupEnv); err != nil {
+			return err
+		}
+	}
 	po, err := clusterRelease(ctx, o, ids, action == plugin.ActionDeploy)
 	if err != nil {
 		return err
