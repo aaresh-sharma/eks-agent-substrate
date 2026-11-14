@@ -426,11 +426,14 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := tagGatewayAccessPoint(ctx, w, o); err != nil {
 		return err
 	}
+	// The gateway UI asks for the gateway token: say how to read it, never
+	// print it.
 	fmt.Fprintf(w, `Everything is ClusterIP; reach it with port-forwards:
   gateway UI:  kubectl --kubeconfig %[1]s -n %[2]s port-forward svc/openclaw-gateway 18789:18789   (http://localhost:18789)
+  its token:   kubectl --kubeconfig %[1]s -n %[2]s get secret %[5]s -o jsonpath='{.data.gateway-token}' | base64 -d
   dashboard:   kubectl --kubeconfig %[1]s -n %[2]s port-forward svc/openclaw-dashboard 8090:8090    (http://localhost:8090)
   the actor:   kubectl ate --kubeconfig %[1]s proxy actor %[3]s -a %[4]s 8000:80
-`, o.Kubeconfig, Namespace, Actor, Atespace)
+`, o.Kubeconfig, Namespace, Actor, Atespace, secretName)
 	return nil
 }
 

@@ -2,9 +2,13 @@ package openclaw
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -272,6 +276,48 @@ func TestExposure(t *testing.T) {
 		"kubectl --kubeconfig /kc -n openclaw get ingress": "ingress.networking.k8s.io/open\n"})
 	if err := exposure(context.Background(), o); err == nil || !strings.Contains(err.Error(), "Ingress") {
 		t.Errorf("an Ingress: %v", err)
+	}
+}
+
+// A whole deploy against a cluster that already holds the gateway token
+// ends by saying how to read that token for the gateway UI, which asks for
+// it, and prints the token itself nowhere (review of 86ba13f, finding 2).
+func TestDeploySaysHowToReadTheGatewayToken(t *testing.T) {
+	const tok = "tok-0123456789abcdef"
+	for _, k := range append(slices.Clone(imageVars), "WHATSAPP_PEER", "OPENCLAW_WORKERS") {
+		t.Setenv(k, "")
+	}
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevPin := pinImage
+	pinImage = func(_ context.Context, tagged string) (string, error) { return tagged + digest, nil }
+	t.Cleanup(func() { pinImage = prevPin })
+	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc",
+		Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}}
+	kc, ate := "kubectl --kubeconfig /kc ", efs.KubectlAtePath(o.Tag)+" "
+	fakeExec(t, map[string]string{
+		kc + "-n ate-system get deployment ate-api-server":                              "deployment.apps/ate-api-server",
+		kc + "get storageclass " + efs.StorageClass + " --ignore-not-found -o jsonpath": "fs-0123",
+		kc + "-n openclaw get secret openclaw-secrets":                                  base64.StdEncoding.EncodeToString([]byte(tok)),
+		kc + "-n openclaw get workerpool openclaw":                                      "3",
+		kc + "-n openclaw get pvc openclaw-gateway-pvc -o jsonpath":                     "Bound efs-openclaw pv-1",
+		kc + "get pv pv-1":        "efs.csi.aws.com fs-0123::fsap-0abc",
+		ate + "get access-policy": `{"bindings":[{"role":"editor","members":["` + gatewayPrincipal + `"]}]}`,
+		ate + "get actor-template": fmt.Sprintf(`{"containers":[{"image":%q,"env":[{"name":"OPENCLAW_GATEWAY_TOKEN","value":%q}]}],`+
+			`"status":{"goldenSnapshotStatus":{"goldenTag":{"name":"g1"}}}}`, ActorImage, tok),
+	})
+	var out strings.Builder
+	if err := deploy(context.Background(), &out, o); err != nil {
+		t.Fatalf("deploy: %v\n%s", err, out.String())
+	}
+	want := "  its token:   kubectl --kubeconfig /kc -n openclaw get secret openclaw-secrets -o jsonpath='{.data.gateway-token}' | base64 -d\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the output does not say how to read the token, %q:\n%s", want, out.String())
+	}
+	if strings.Contains(out.String(), tok) {
+		t.Errorf("the output holds the gateway token:\n%s", out.String())
 	}
 }
 
