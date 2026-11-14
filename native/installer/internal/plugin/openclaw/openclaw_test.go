@@ -219,12 +219,68 @@ func TestKeepTemplate(t *testing.T) {
 	if keep, why := keepTemplate(tmpl(img, "tok", ""), img, "tok"); !keep {
 		t.Errorf("the same template: %s", why)
 	}
+	// The same image spelled with and without a tag keeps the template, its
+	// golden snapshot and its actors (review of 86ba13f, finding 4).
+	if keep, why := keepTemplate(tmpl(img, "tok", ""), actorRepo+":eks-5bf95fa9017b"+digest, "tok"); !keep {
+		t.Errorf("the same digest, tagged: %s", why)
+	}
 	for why, t2 := range map[string][]byte{
 		"another image": tmpl(actorRepo+"@sha256:"+strings.Repeat("f", 64), "tok", ""), "another gateway token": tmpl(img, "old", ""),
 		"its golden snapshot failed": tmpl(img, "tok", "boom"),
 	} {
 		if keep, got := keepTemplate(t2, img, "tok"); keep || got != why {
 			t.Errorf("%s: keep=%v why=%q", why, keep, got)
+		}
+	}
+}
+
+// sameImage is one repository and digest, a tag or none, and nothing else.
+func TestSameImage(t *testing.T) {
+	other := "@sha256:" + strings.Repeat("f", 64)
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{actorRepo + digest, actorRepo + ":v1" + digest, true},
+		{actorRepo + ":v1" + digest, actorRepo + ":v2" + digest, true},
+		{"nginx" + digest, "index.docker.io/library/nginx" + digest, true},
+		{actorRepo + digest, actorRepo + other, false},
+		{actorRepo + digest, gatewayRepo + digest, false},
+		{actorRepo + ":v1", actorRepo + ":v1", false}, // not pinned: no digest to compare
+	} {
+		if got := sameImage(c.a, c.b); got != c.want {
+			t.Errorf("sameImage(%s, %s) = %v", c.a, c.b, got)
+		}
+	}
+}
+
+// Verify accepts a deployment that runs the pinned image spelled another
+// way (with a tag where the setting has none), and still refuses another
+// digest (review of 86ba13f, finding 4).
+func TestVerifyComparesImagesByDigest(t *testing.T) {
+	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc"}
+	kc := "kubectl --kubeconfig /kc "
+	for _, c := range []struct {
+		running string
+		pass    bool
+	}{{gatewayRepo + ":eks-5bf95fa9017b" + digest, true}, {gatewayRepo + "@sha256:" + strings.Repeat("f", 64), false}} {
+		t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+digest)
+		t.Setenv("OPENCLAW_DASHBOARD_IMAGE", dashboardRepo+digest)
+		t.Setenv("OPENCLAW_ACTOR_IMAGE", "")
+		fakeExec(t, map[string]string{
+			kc + "-n ate-system get deployment atenet-router":                GatewayID + " " + DashboardID,
+			kc + "-n openclaw get services":                                  `{"items":[{"metadata":{"name":"s0"},"spec":{"type":"ClusterIP"}}]}`,
+			kc + "-n openclaw get deployment openclaw-gateway -o jsonpath":   c.running,
+			kc + "-n openclaw get deployment openclaw-dashboard -o jsonpath": dashboardRepo + ":v1" + digest,
+		})
+		var out strings.Builder
+		err := verify(context.Background(), &out, o)
+		if passed := strings.Contains(out.String(), "PASS: the gateway and dashboard run the pinned images"); passed != c.pass {
+			t.Errorf("gateway runs %s: passed the image check %v, want %v: %v\n%s", c.running, passed, c.pass, err, out.String())
+		}
+		// Refused by the image check itself, not by an earlier one.
+		if !c.pass && (err == nil || !strings.Contains(err.Error(), "not the pinned "+gatewayRepo+digest)) {
+			t.Errorf("gateway runs %s: %v", c.running, err)
 		}
 	}
 }

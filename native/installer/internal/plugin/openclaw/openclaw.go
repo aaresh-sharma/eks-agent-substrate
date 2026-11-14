@@ -142,6 +142,15 @@ func image(lookup func(string) (string, bool), env, def string) (string, error) 
 	return ref, nil
 }
 
+// sameImage reports whether a and b name one image: the same repository and
+// digest, with or without a tag (repo:tag@D and repo@D are one image). A ref
+// that is not pinned by digest is no image's.
+func sameImage(a, b string) bool {
+	da, errA := name.NewDigest(a)
+	db, errB := name.NewDigest(b)
+	return errA == nil && errB == nil && da.Context().Name() == db.Context().Name() && da.DigestStr() == db.DigestStr()
+}
+
 // images are the gateway, actor and dashboard refs.
 type images struct{ gateway, actor, dashboard, worker string }
 
@@ -610,7 +619,7 @@ func keepTemplate(t []byte, img, tok string) (bool, string) {
 		return false, "it does not read"
 	}
 	c := tm.Containers[0]
-	if c.Image != img {
+	if !sameImage(c.Image, img) {
 		return false, "another image"
 	}
 	for _, e := range c.Env {
@@ -821,7 +830,7 @@ func verify(ctx context.Context, w io.Writer, o plugin.Options) error {
 		if err != nil {
 			return err
 		}
-		if !slices.Contains(strings.Fields(got), d.image) {
+		if !slices.ContainsFunc(strings.Fields(got), func(g string) bool { return sameImage(g, d.image) }) {
 			return fmt.Errorf("deployment %s/%s runs %q, not the pinned %s: deploy the plugin again", Namespace, d.name, got, d.image)
 		}
 	}
