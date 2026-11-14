@@ -13,23 +13,48 @@ import (
 
 const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// Overrides in the tests: the published repositories with another digest.
+const (
+	gatewayRepo   = "ghcr.io/csantanapr/always-on-agent/openclaw-gateway"
+	actorRepo     = "ghcr.io/csantanapr/always-on-agent/openclaw-actor"
+	dashboardRepo = "ghcr.io/csantanapr/always-on-agent/openclaw-dashboard"
+)
+
 func testImages() images {
-	return images{gateway: GatewayImage + digest, actor: ActorImage + digest, dashboard: DashboardImage + digest,
+	return images{gateway: gatewayRepo + digest, actor: actorRepo + digest, dashboard: dashboardRepo + digest,
 		worker: "ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0" + digest}
 }
 
+// The defaults are the published images, each pinned by digest, all from
+// one build (the eks-5bf95fa9017b tag).
+func TestDefaultImagesArePinned(t *testing.T) {
+	for repo, ref := range map[string]string{gatewayRepo: GatewayImage, actorRepo: ActorImage, dashboardRepo: DashboardImage} {
+		if !digestRef.MatchString(ref) || !strings.HasPrefix(ref, repo+":eks-5bf95fa9017b@sha256:") {
+			t.Errorf("default %s is not %s:eks-5bf95fa9017b pinned by digest", ref, repo)
+		}
+	}
+}
+
 func TestImageMustBePinned(t *testing.T) {
+	// Unset: the pinned default.
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
+	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != GatewayImage {
+		t.Errorf("the default: %q, %v", ref, err)
+	}
+	// An override without a digest is refused, even over a pinned default.
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":v1")
 	if _, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
-		t.Errorf("an unpinned default: %v", err)
+		t.Errorf("an override pinned by tag only: %v", err)
 	}
-	t.Setenv("OPENCLAW_GATEWAY_IMAGE", GatewayImage+":v1")
-	if _, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage+digest); err == nil {
-		t.Error("accepted an override pinned by tag only")
-	}
-	t.Setenv("OPENCLAW_GATEWAY_IMAGE", GatewayImage+":v1"+digest)
-	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != GatewayImage+":v1"+digest {
+	// A pinned override wins.
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":v1"+digest)
+	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":v1"+digest {
 		t.Errorf("a pinned override: %q, %v", ref, err)
+	}
+	// An unpinned default is refused too (a later edit of the constants).
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
+	if _, err := image("OPENCLAW_GATEWAY_IMAGE", gatewayRepo); err == nil {
+		t.Error("accepted an unpinned default")
 	}
 }
 
@@ -48,9 +73,9 @@ func TestRenderAll(t *testing.T) {
 		want []string
 	}{
 		"workerpool":     {m.workerPool, []string{"replicas: 3", "  workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:v1.0.0" + digest}},
-		"gateway":        {m.gateway, []string{"image: " + GatewayImage + digest, "storageClassName: " + StorageClass, m.configSHA, `value: "false"`, "type: ClusterIP"}},
-		"dashboard":      {m.dashboard, []string{"image: " + DashboardImage + digest, "type: ClusterIP"}},
-		"actor template": {m.actorTemplate, []string{"image: " + ActorImage + digest, `value: "tok-0123456789abcdef"`}},
+		"gateway":        {m.gateway, []string{"image: " + gatewayRepo + digest, "storageClassName: " + StorageClass, m.configSHA, `value: "false"`, "type: ClusterIP"}},
+		"dashboard":      {m.dashboard, []string{"image: " + dashboardRepo + digest, "type: ClusterIP"}},
+		"actor template": {m.actorTemplate, []string{"image: " + actorRepo + digest, `value: "tok-0123456789abcdef"`}},
 		"config":         {m.gatewayConfig, []string{`"allow": ["substrate"]`, `"bindings": []`, `"egressPolicy": {"rules":[{"http":`}},
 	} {
 		for _, w := range c.want {
@@ -104,7 +129,7 @@ func TestGrantEditor(t *testing.T) {
 }
 
 func TestKeepTemplate(t *testing.T) {
-	img := ActorImage + digest
+	img := actorRepo + digest
 	tmpl := func(image, tok, gerr string) []byte {
 		return []byte(fmt.Sprintf(`{"containers":[{"image":%q,"env":[{"name":"OPENCLAW_GATEWAY_TOKEN","value":%q}]}],"status":{"goldenSnapshotStatus":{"errorMessage":%q}}}`, image, tok, gerr))
 	}
@@ -112,7 +137,7 @@ func TestKeepTemplate(t *testing.T) {
 		t.Errorf("the same template: %s", why)
 	}
 	for why, t2 := range map[string][]byte{
-		"another image": tmpl(ActorImage+"@sha256:"+strings.Repeat("f", 64), "tok", ""), "another gateway token": tmpl(img, "old", ""),
+		"another image": tmpl(actorRepo+"@sha256:"+strings.Repeat("f", 64), "tok", ""), "another gateway token": tmpl(img, "old", ""),
 		"its golden snapshot failed": tmpl(img, "tok", "boom"),
 	} {
 		if keep, got := keepTemplate(t2, img, "tok"); keep || got != why {
@@ -186,12 +211,12 @@ func recordExec(t *testing.T) *[]string {
 
 var imageVars = []string{"OPENCLAW_GATEWAY_IMAGE", "OPENCLAW_ACTOR_IMAGE", "OPENCLAW_DASHBOARD_IMAGE"}
 
-// Without the digests, Deploy and Verify refuse naming all three variables
-// and start no child: the cluster is never reached.
-func TestHooksRefuseUnpinnedImagesBeforeTheCluster(t *testing.T) {
-	for _, e := range imageVars {
-		t.Setenv(e, "")
-	}
+// Overrides without a digest make Deploy and Verify refuse, naming every
+// such variable, and start no child: the cluster is never reached.
+func TestHooksRefuseUnpinnedOverridesBeforeTheCluster(t *testing.T) {
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":v1")
+	t.Setenv("OPENCLAW_ACTOR_IMAGE", actorRepo+":v1")
+	t.Setenv("OPENCLAW_DASHBOARD_IMAGE", dashboardRepo)
 	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate"}}
 	for name, hook := range map[string]func(context.Context, io.Writer, plugin.Options) error{"deploy": deploy, "verify": verify} {
 		log := recordExec(t)
@@ -203,31 +228,45 @@ func TestHooksRefuseUnpinnedImagesBeforeTheCluster(t *testing.T) {
 			t.Errorf("%s ran %v before refusing", name, *log)
 		}
 	}
-	// One left unpinned is named alone.
-	t.Setenv("OPENCLAW_GATEWAY_IMAGE", GatewayImage+digest)
-	t.Setenv("OPENCLAW_DASHBOARD_IMAGE", DashboardImage+digest)
+	// One bad override is named alone; the other two take their defaults.
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
+	t.Setenv("OPENCLAW_DASHBOARD_IMAGE", "")
 	if _, err := pinnedImages(); err == nil || !strings.Contains(err.Error(), "set OPENCLAW_ACTOR_IMAGE to") {
-		t.Errorf("one missing: %v", err)
+		t.Errorf("one unpinned: %v", err)
 	}
 }
 
-// With the three set, Deploy and Verify go on to the cluster.
+// With nothing set (the pinned defaults), and with pinned overrides,
+// Deploy and Verify go on to the cluster, with those images.
 func TestHooksProceedWithPinnedImages(t *testing.T) {
-	t.Setenv("OPENCLAW_GATEWAY_IMAGE", GatewayImage+digest)
-	t.Setenv("OPENCLAW_ACTOR_IMAGE", ActorImage+digest)
-	t.Setenv("OPENCLAW_DASHBOARD_IMAGE", DashboardImage+digest)
 	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate"}}
-	for name, first := range map[string]string{
-		"deploy": "kubectl --kubeconfig /kc -n ate-system get deployment ate-api-server",
-		"verify": "kubectl --kubeconfig /kc -n ate-system get deployment atenet-router",
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want images
+	}{
+		{"defaults", []string{"", "", ""}, images{gateway: GatewayImage, actor: ActorImage, dashboard: DashboardImage}},
+		{"overrides", []string{gatewayRepo + digest, actorRepo + digest, dashboardRepo + digest}, testImages()},
 	} {
-		log := recordExec(t)
-		hook := map[string]func(context.Context, io.Writer, plugin.Options) error{"deploy": deploy, "verify": verify}[name]
-		if err := hook(context.Background(), io.Discard, o); err == nil || strings.Contains(err.Error(), "not pinned") {
-			t.Errorf("%s: %v", name, err)
+		for i, e := range imageVars {
+			t.Setenv(e, tc.env[i])
 		}
-		if len(*log) == 0 || !strings.HasPrefix((*log)[0], first) {
-			t.Errorf("%s: first child %v, want %s", name, *log, first)
+		im, err := pinnedImages()
+		if err != nil || im.gateway != tc.want.gateway || im.actor != tc.want.actor || im.dashboard != tc.want.dashboard {
+			t.Errorf("%s: %+v, %v", tc.name, im, err)
+		}
+		for name, first := range map[string]string{
+			"deploy": "kubectl --kubeconfig /kc -n ate-system get deployment ate-api-server",
+			"verify": "kubectl --kubeconfig /kc -n ate-system get deployment atenet-router",
+		} {
+			log := recordExec(t)
+			hook := map[string]func(context.Context, io.Writer, plugin.Options) error{"deploy": deploy, "verify": verify}[name]
+			if err := hook(context.Background(), io.Discard, o); err == nil || strings.Contains(err.Error(), "not pinned") {
+				t.Errorf("%s %s: %v", tc.name, name, err)
+			}
+			if len(*log) == 0 || !strings.HasPrefix((*log)[0], first) {
+				t.Errorf("%s %s: first child %v, want %s", tc.name, name, *log, first)
+			}
 		}
 	}
 }

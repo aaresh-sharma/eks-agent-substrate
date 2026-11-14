@@ -47,15 +47,18 @@ const (
 	secretName = "openclaw-secrets"
 )
 
-// The demo's images, published from csantanapr/always-on-agent for
-// linux/amd64 and pinned by digest (actor snapshots require a pinned image).
-// OPENCLAW_GATEWAY_IMAGE, OPENCLAW_ACTOR_IMAGE and OPENCLAW_DASHBOARD_IMAGE
-// replace them. The actor image is built with
-// ACTOR_CONFIG=build/actor/openclaw.eks.json.
+// The demo's images, pinned by digest (actor snapshots require a pinned
+// image). They are public on GHCR, each one linux/amd64 manifest, built by
+// the images workflow of github.com/csantanapr/always-on-agent at eks
+// 5bf95fa: cfca878 plus only that workflow, so from the same sources as the
+// embedded manifests. The actor image is built with
+// ACTOR_CONFIG=build/actor/openclaw.eks.json. OPENCLAW_GATEWAY_IMAGE,
+// OPENCLAW_ACTOR_IMAGE and OPENCLAW_DASHBOARD_IMAGE replace them; a
+// replacement must be pinned by digest too.
 const (
-	GatewayImage   = "ghcr.io/csantanapr/always-on-agent/openclaw-gateway"
-	ActorImage     = "ghcr.io/csantanapr/always-on-agent/openclaw-actor"
-	DashboardImage = "ghcr.io/csantanapr/always-on-agent/openclaw-dashboard"
+	GatewayImage   = "ghcr.io/csantanapr/always-on-agent/openclaw-gateway:eks-5bf95fa9017b@sha256:874ed6d8430641df22da07ea9a4e06a5d7b5fc8c34039416fec5f9b3c134326b"
+	ActorImage     = "ghcr.io/csantanapr/always-on-agent/openclaw-actor:eks-5bf95fa9017b@sha256:ac65215a9f5979d8828306251bea28c51de88c310d1875ae6d2315509f55eaa5"
+	DashboardImage = "ghcr.io/csantanapr/always-on-agent/openclaw-dashboard:eks-5bf95fa9017b@sha256:c1cbcf76ecb3ea6c66863eddaa74a61a83d6e2e557fd907f34ec833c2d647064"
 )
 
 // The manifests of github.com/csantanapr/always-on-agent, manifests/eks at
@@ -107,8 +110,7 @@ func init() {
 		ID:    ID,
 		Title: "OpenClaw always-on agent",
 		Summary: "An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle " +
-			"and resumes on the next message. Reached with kubectl port-forward only. Needs its gateway, actor and dashboard images " +
-			"pinned by digest (OPENCLAW_GATEWAY_IMAGE, OPENCLAW_ACTOR_IMAGE, OPENCLAW_DASHBOARD_IMAGE).",
+			"and resumes on the next message. Reached with kubectl port-forward only. Prebuilt public images, pinned by digest.",
 		Order:    40,
 		Minutes:  15,
 		Requires: []string{efs.ID},
@@ -136,8 +138,9 @@ func image(env, def string) (string, error) {
 // images are the gateway, actor and dashboard refs.
 type images struct{ gateway, actor, dashboard, worker string }
 
-// pinnedImages are the gateway, actor and dashboard refs, or one error
-// naming every variable still to set. Deploy and Verify call it before
+// pinnedImages are the gateway, actor and dashboard refs: the pinned
+// defaults, or the OPENCLAW_*_IMAGE overrides, or one error naming every
+// override that is not pinned by digest. Deploy and Verify call it before
 // they touch the cluster.
 func pinnedImages() (images, error) {
 	var im images
@@ -154,8 +157,8 @@ func pinnedImages() (images, error) {
 		*x.ref = ref
 	}
 	if len(missing) > 0 {
-		return im, fmt.Errorf("the OpenClaw images are not pinned by digest: set %s to <image>@sha256:<digest> "+
-			"(the gateway, actor and dashboard images published from csantanapr/always-on-agent)", strings.Join(missing, ", "))
+		return im, fmt.Errorf("the OpenClaw images are not pinned by digest: set %s to <image>@sha256:<digest>, "+
+			"or leave it empty for the pinned default", strings.Join(missing, ", "))
 	}
 	return im, nil
 }
