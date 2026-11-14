@@ -13,6 +13,16 @@ calls AWS through the AWS SDK and installs Agent Substrate with upstream's
 [substrate-gke](https://github.com/ai-on-gke/substrate-gke)'s installer, and
 no install step runs a shell script.
 
+This is v2, a breaking change: it removes the shell-script install
+(`create-cluster.sh`, `deploy.sh`, `clean.sh`, `delete-cluster.sh`, the
+scripts under `aws/`, `substrate/` and `demos/`, and the `installer/` TUI).
+To keep using the scripts, check out tag
+[`v1.0.0`](https://github.com/csantanapr/eks-agent-substrate/tree/v1.0.0);
+fixes for v1 go on branch
+[`release-1.0`](https://github.com/csantanapr/eks-agent-substrate/tree/release-1.0).
+These are this repository's versions. The Agent Substrate release it installs
+is set on its own, by `SUBSTRATE_TAG` (v1.0.0 by default).
+
 No application is exposed: every Service is ClusterIP, the database and
 buckets are private, and you reach the demos with port forwards. The
 Kubernetes API endpoint is public and IAM authenticated, limited to the
