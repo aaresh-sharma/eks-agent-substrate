@@ -50,8 +50,9 @@ const (
 // The demo's images, pinned by digest (actor snapshots require a pinned
 // image). They are public on GHCR, each one linux/amd64 manifest, built by
 // the images workflow of github.com/csantanapr/always-on-agent at eks
-// 5bf95fa: cfca878 plus only that workflow, so from the same sources as the
-// embedded manifests. The actor image is built with
+// 5bf95fa: cfca878 plus only that workflow. The embedded manifests' commit
+// adds only a manifests/ change to 5bf95fa, outside that workflow's paths, so
+// the images are from the same sources. The actor image is built with
 // ACTOR_CONFIG=build/actor/openclaw.eks.json. OPENCLAW_GATEWAY_IMAGE,
 // OPENCLAW_ACTOR_IMAGE and OPENCLAW_DASHBOARD_IMAGE replace them; a
 // replacement must be pinned by digest too.
@@ -62,7 +63,9 @@ const (
 )
 
 // The manifests of github.com/csantanapr/always-on-agent, manifests/eks at
-// commit cfca8780fbf029e6a7283a31ae2e6ce1bb9ec907, unchanged: the plugin
+// commit 5537fee5ce0ae6503a25b0276ecbd464a6ad5eb8 (5bf95fa plus
+// gateway.auth.token "${OPENCLAW_GATEWAY_TOKEN}" in gateway-config.yaml),
+// unchanged but for their comments: the plugin
 // renders their REPLACE_WITH_ placeholders itself, as the repository's
 // demo/eks/deploy-demo.sh does after its image build.
 var (
