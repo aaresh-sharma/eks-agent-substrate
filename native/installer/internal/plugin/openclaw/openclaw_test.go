@@ -2,10 +2,13 @@ package openclaw
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/kustomize/kyaml/yaml"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/efs"
@@ -109,6 +112,69 @@ func TestRenderRefusesAPlaceholderLeft(t *testing.T) {
 	}
 	if err := validConfig([]byte("apiVersion: v1\nkind: ConfigMap\ndata:\n  openclaw.json: |\n    {\"a\": [1,}\n")); err == nil {
 		t.Error("accepted a config that is not JSON")
+	}
+}
+
+// authTokenProblem says what is wrong with the gateway's auth in a rendered
+// gateway ConfigMap, or "" when gateway.auth.token is the env SecretRef
+// ${OPENCLAW_GATEWAY_TOKEN} and the token value tok is nowhere in it.
+func authTokenProblem(cm []byte, tok string) string {
+	n, err := yaml.Parse(string(cm))
+	if err != nil {
+		return err.Error()
+	}
+	var c struct {
+		Gateway struct{ Auth struct{ Mode, Token string } }
+	}
+	if err := json.Unmarshal([]byte(n.GetDataMap()["openclaw.json"]), &c); err != nil {
+		return err.Error()
+	}
+	switch {
+	case c.Gateway.Auth.Mode != "token":
+		return fmt.Sprintf("gateway.auth.mode is %q", c.Gateway.Auth.Mode)
+	case c.Gateway.Auth.Token != "${OPENCLAW_GATEWAY_TOKEN}":
+		return fmt.Sprintf("gateway.auth.token is %q", c.Gateway.Auth.Token)
+	case strings.Contains(string(cm), tok):
+		return "the token value is in the ConfigMap"
+	}
+	return ""
+}
+
+// T27: the gateway's HTTP API and Control UI accept the openclaw-secrets
+// token only when gateway.auth.token resolves to it from the environment.
+// With no token there, the init container's `doctor --fix` writes a random
+// one into the state config, and the gateway prefers it. The check is proved
+// both ways on fixtures first.
+func TestGatewayAuthTokenIsTheEnvSecretRef(t *testing.T) {
+	const tok = "tok-0123456789abcdef"
+	cm := func(gateway string) []byte {
+		return []byte("apiVersion: v1\nkind: ConfigMap\ndata:\n  openclaw.json: |\n    {\"gateway\": " + gateway + "}\n")
+	}
+	for gateway, want := range map[string]string{
+		`{"auth": {"mode": "token"}}`:                                                           "gateway.auth.token",
+		`{"auth": {"mode": "token", "token": "` + tok + `"}}`:                                   "gateway.auth.token",
+		`{"auth": {"mode": "none", "token": "${OPENCLAW_GATEWAY_TOKEN}"}}`:                      "gateway.auth.mode",
+		`{"auth": {"mode": "token", "token": "${OPENCLAW_GATEWAY_TOKEN}"}, "x": "` + tok + `"}`: "the token value",
+	} {
+		if p := authTokenProblem(cm(gateway), tok); !strings.HasPrefix(p, want) {
+			t.Errorf("the check on %s: got %q, want %q", gateway, p, want)
+		}
+	}
+	if p := authTokenProblem(cm(`{"auth": {"mode": "token", "token": "${OPENCLAW_GATEWAY_TOKEN}"}}`), tok); p != "" {
+		t.Fatalf("the check refused a correct config: %s", p)
+	}
+	for _, peer := range []string{"", "+15555550100"} {
+		wa, err := whatsappFor(peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := renderAll(testImages(), tok, "3", wa)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := authTokenProblem(m.gatewayConfig, tok); p != "" {
+			t.Errorf("WHATSAPP_PEER=%q: %s", peer, p)
+		}
 	}
 }
 
