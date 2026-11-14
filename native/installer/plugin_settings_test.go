@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 )
@@ -77,6 +78,52 @@ func TestPluginActionReadsPluginSettingsFromTheConfigFiles(t *testing.T) {
 		if err != nil || !strings.Contains(out, tc.want) || !strings.Contains(out, `probe EFS_ADDON_VERSION="v9.9.9-eksbuild.1"`) ||
 			!strings.Contains(out, "Plugin ready: settings-probe") {
 			t.Errorf("%s: %v, want %s and config.env's EFS_ADDON_VERSION:\n%s", tc.name, err, tc.want, out)
+		}
+	}
+}
+
+// Both ways, through main(): --plugin-action refuses a setting a plugin's
+// Check rejects, here an OPENCLAW_GATEWAY_IMAGE without a digest only in
+// config.local.env, before it describes the cluster or writes its
+// kubeconfig; with the setting empty it goes on to the cluster (review of
+// 86ba13f, finding 3).
+func TestPluginActionChecksSettingsBeforeTheCluster(t *testing.T) {
+	for _, k := range state.PluginKeys {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overlay, err := filepath.Abs("../deploy/eks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		local   string
+		refused bool
+	}{{"OPENCLAW_GATEWAY_IMAGE=ghcr.io/a/b:v1\n", true}, {"OPENCLAW_GATEWAY_IMAGE=\n", false}} {
+		checkout := t.TempDir()
+		for name, body := range map[string]string{
+			"native/tools/setup-aws/go.mod": "module example.invalid/setup-aws\n",
+			"config.env":                    "OPENCLAW_GATEWAY_IMAGE=\n",
+			"config.local.env":              tc.local,
+		} {
+			p := filepath.Join(checkout, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err, out := runMainIn(t, checkout, nil, cluster("", "v1.0.0"),
+			"--plugin-action", "deploy", "--plugins", "openclaw", "--eks-overlay", overlay)
+		reached := strings.Contains(out, controlplane.KubeconfLine)
+		if tc.refused && (err == nil || !strings.Contains(out, "plugin openclaw: ") || !strings.Contains(out, "set OPENCLAW_GATEWAY_IMAGE to") || reached) {
+			t.Errorf("%q: %v, reached the cluster %v:\n%s", tc.local, err, reached, out)
+		}
+		if !tc.refused && !reached {
+			t.Errorf("%q: never reached the cluster: %v\n%s", tc.local, err, out)
 		}
 	}
 }

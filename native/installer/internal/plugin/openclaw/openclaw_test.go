@@ -45,17 +45,17 @@ func TestDefaultImagesArePinned(t *testing.T) {
 func TestImageMustBePinned(t *testing.T) {
 	// Unset: the pinned default.
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
-	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != GatewayImage {
+	if ref, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != GatewayImage {
 		t.Errorf("the default: %q, %v", ref, err)
 	}
 	// An override without a digest is refused, even over a pinned default.
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":v1")
-	if _, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
+	if _, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
 		t.Errorf("an override pinned by tag only: %v", err)
 	}
 	// A pinned override wins.
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":v1"+digest)
-	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":v1"+digest {
+	if ref, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":v1"+digest {
 		t.Errorf("a pinned override: %q, %v", ref, err)
 	}
 	// A malformed ref is refused though it ends in a digest, so it never
@@ -63,17 +63,17 @@ func TestImageMustBePinned(t *testing.T) {
 	// (review of 86ba13f, finding 1).
 	for _, bad := range []string{gatewayRepo + ":v1:v2" + digest, ":" + digest} {
 		t.Setenv("OPENCLAW_GATEWAY_IMAGE", bad)
-		if _, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
+		if _, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
 			t.Errorf("a malformed override %s: %v", bad, err)
 		}
 	}
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":V1"+digest)
-	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":V1"+digest {
+	if ref, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":V1"+digest {
 		t.Errorf("an upper-case tag: %q, %v", ref, err)
 	}
 	// An unpinned default is refused too (a later edit of the constants).
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
-	if _, err := image("OPENCLAW_GATEWAY_IMAGE", gatewayRepo); err == nil {
+	if _, err := image(os.LookupEnv, "OPENCLAW_GATEWAY_IMAGE", gatewayRepo); err == nil {
 		t.Error("accepted an unpinned default")
 	}
 }
@@ -356,8 +356,46 @@ func TestHooksRefuseUnpinnedOverridesBeforeTheCluster(t *testing.T) {
 	// One bad override is named alone; the other two take their defaults.
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
 	t.Setenv("OPENCLAW_DASHBOARD_IMAGE", "")
-	if _, err := pinnedImages(); err == nil || !strings.Contains(err.Error(), "set OPENCLAW_ACTOR_IMAGE to") {
+	if _, err := pinnedImages(os.LookupEnv); err == nil || !strings.Contains(err.Error(), "set OPENCLAW_ACTOR_IMAGE to") {
 		t.Errorf("one unpinned: %v", err)
+	}
+}
+
+// Through plugin.Run, as --plugin-action runs it: a bad override stops a
+// deploy or verify of openclaw before any child starts, so neither the
+// record nor efs, which openclaw requires and which goes first (its
+// setup-aws, Deploy and Verify), is touched. With the pinned defaults Run
+// goes on to the cluster (review of 86ba13f, finding 3).
+func TestRunRefusesABadOverrideBeforeAnyChild(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "go.mod"), []byte("module x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", SetupAWS: "/setup-aws",
+		Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}}
+	for _, k := range imageVars {
+		t.Setenv(k, "")
+	}
+	// What each action starts first once it is past the check: deploy reads
+	// the record, verify builds kubectl-ate for efs's Verify.
+	first := map[string]string{plugin.ActionDeploy: "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins",
+		plugin.ActionVerify: "go build -o "}
+	for _, action := range []string{plugin.ActionDeploy, plugin.ActionVerify} {
+		t.Setenv("OPENCLAW_ACTOR_IMAGE", actorRepo+":v1:v2"+digest)
+		log := recordExec(t)
+		err := plugin.Run(context.Background(), io.Discard, action, []string{ID}, o)
+		if err == nil || !strings.Contains(err.Error(), "plugin openclaw: ") || !strings.Contains(err.Error(), "set OPENCLAW_ACTOR_IMAGE to") {
+			t.Errorf("%s, a bad override: %v", action, err)
+		}
+		if len(*log) > 0 {
+			t.Errorf("%s, a bad override: started %q before refusing", action, *log)
+		}
+		t.Setenv("OPENCLAW_ACTOR_IMAGE", "")
+		log = recordExec(t)
+		_ = plugin.Run(context.Background(), io.Discard, action, []string{ID}, o)
+		if len(*log) == 0 || !strings.HasPrefix((*log)[0], first[action]) {
+			t.Errorf("%s, the pinned defaults: first child %q, want %s", action, *log, first[action])
+		}
 	}
 }
 
@@ -376,7 +414,7 @@ func TestHooksProceedWithPinnedImages(t *testing.T) {
 		for i, e := range imageVars {
 			t.Setenv(e, tc.env[i])
 		}
-		im, err := pinnedImages()
+		im, err := pinnedImages(os.LookupEnv)
 		if err != nil || im.gateway != tc.want.gateway || im.actor != tc.want.actor || im.dashboard != tc.want.dashboard {
 			t.Errorf("%s: %+v, %v", tc.name, im, err)
 		}

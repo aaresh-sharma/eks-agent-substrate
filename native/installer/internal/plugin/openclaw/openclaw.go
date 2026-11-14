@@ -118,6 +118,7 @@ func init() {
 		Minutes:  15,
 		Requires: []string{efs.ID},
 		Needs:    plugin.Needs{IngressIDs: []string{GatewayID, DashboardID}},
+		Check:    func(lookup func(string) (string, bool)) error { _, err := pinnedImages(lookup); return err },
 		Deploy:   deploy,
 		Verify:   verify,
 		Remove:   remove,
@@ -126,12 +127,13 @@ func init() {
 
 var digestRef = regexp.MustCompile(`^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
 
-// image is the pinned ref of one of the demo's images: env, or def. It must
-// end in a sha256 digest and parse as an image reference, so a malformed one
-// (repo:v1:v2@sha256:...) is refused here rather than by the cluster.
-func image(env, def string) (string, error) {
+// image is the pinned ref of one of the demo's images: env as lookup reads
+// it, or def. It must end in a sha256 digest and parse as an image
+// reference, so a malformed one (repo:v1:v2@sha256:...) is refused here
+// rather than by the cluster.
+func image(lookup func(string) (string, bool), env, def string) (string, error) {
 	ref := def
-	if v := os.Getenv(env); v != "" {
+	if v, _ := lookup(env); v != "" {
 		ref = v
 	}
 	if _, err := name.NewDigest(ref); err != nil || !digestRef.MatchString(ref) {
@@ -144,10 +146,12 @@ func image(env, def string) (string, error) {
 type images struct{ gateway, actor, dashboard, worker string }
 
 // pinnedImages are the gateway, actor and dashboard refs: the pinned
-// defaults, or the OPENCLAW_*_IMAGE overrides, or one error naming every
-// override that is not pinned by digest. Deploy and Verify call it before
-// they touch the cluster.
-func pinnedImages() (images, error) {
+// defaults, or the OPENCLAW_*_IMAGE overrides as lookup reads them, or one
+// error naming every override that is not pinned by digest. It is the
+// plugin's Check, which the installer runs before any AWS or kubectl call
+// (plugin.CheckSettings); Deploy and Verify call it again on the
+// environment before they touch the cluster.
+func pinnedImages(lookup func(string) (string, bool)) (images, error) {
 	var im images
 	var missing []string
 	for _, x := range []struct {
@@ -155,7 +159,7 @@ func pinnedImages() (images, error) {
 		env, def string
 	}{{&im.gateway, "OPENCLAW_GATEWAY_IMAGE", GatewayImage}, {&im.actor, "OPENCLAW_ACTOR_IMAGE", ActorImage},
 		{&im.dashboard, "OPENCLAW_DASHBOARD_IMAGE", DashboardImage}} {
-		ref, err := image(x.env, x.def)
+		ref, err := image(lookup, x.env, x.def)
 		if err != nil {
 			missing = append(missing, x.env)
 		}
@@ -322,7 +326,7 @@ func prerequisites(ctx context.Context, w io.Writer, o plugin.Options) error {
 }
 
 func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
-	im, err := pinnedImages()
+	im, err := pinnedImages(os.LookupEnv)
 	if err != nil {
 		return err
 	}
@@ -788,7 +792,7 @@ if (r.status !== 200) process.exit(1);
 // the gateway reaches the demo actor through atenet-router. It sends no
 // model turn, so it needs no LLM gateway.
 func verify(ctx context.Context, w io.Writer, o plugin.Options) error {
-	im, err := pinnedImages()
+	im, err := pinnedImages(os.LookupEnv)
 	if err != nil {
 		return err
 	}

@@ -26,7 +26,13 @@ import (
 func init() {
 	for _, p := range []plugin.Plugin{
 		{ID: "t-gateway", Title: "LLM gateway", Summary: "A gateway to Amazon Bedrock.", Order: 10, Minutes: 3, Default: true},
-		{ID: "t-efs", Title: "EFS volumes", Summary: "Amazon EFS volumes per actor.", Order: 20, Minutes: 6, HourlyUSD: 0.04, SetupAWS: true},
+		{ID: "t-efs", Title: "EFS volumes", Summary: "Amazon EFS volumes per actor.", Order: 20, Minutes: 6, HourlyUSD: 0.04, SetupAWS: true,
+			Check: func(lookup func(string) (string, bool)) error {
+				if v, _ := lookup("T_EFS_IMAGE"); v != "" && !strings.Contains(v, "@sha256:") {
+					return errors.New("set T_EFS_IMAGE to <image>@sha256:<digest>")
+				}
+				return nil
+			}},
 		{ID: "t-s3files", Title: "S3 Files volumes", Summary: "S3 Files volumes per actor.", Order: 30, Minutes: 7, HourlyUSD: 0.05, Requires: []string{"t-efs"}, SetupAWS: true},
 		{ID: "mode3-iso", Title: "Mode 3 on isolated sandboxes", Summary: "Worker Pods in Nitro sandboxes.", Order: 40, Minutes: 4,
 			NeedsAutoMode: "needs EKS Auto Mode: its isolated-sandbox RuntimeClass and NodePool come from Auto Mode"},
@@ -407,6 +413,48 @@ func TestReviewSavesTheSettingsBeforeStarting(t *testing.T) {
 		}
 		if fail && !strings.Contains(m.View(), "not written, nothing started") {
 			t.Errorf("no refusal:\n%s", m.View())
+		}
+	}
+}
+
+// A setting a chosen plugin's Check refuses stops the install on Review,
+// before anything is written or created: here it is only in
+// config.local.env, and on t-efs, which the chosen t-s3files requires. The
+// screen names it and y starts nothing; a good value starts (review of
+// 86ba13f, finding 3).
+func TestReviewRefusesAPluginSettingBeforeAnything(t *testing.T) {
+	for _, tc := range []struct {
+		value   string
+		refused bool
+	}{{"repo:v1", true}, {"repo@sha256:" + strings.Repeat("0", 64), false}} {
+		dir := t.TempDir()
+		for name, body := range map[string]string{"config.env": "T_EFS_IMAGE=\n", "config.local.env": "T_EFS_IMAGE=" + tc.value + "\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg, err := state.LoadConfig(dir, func(string) (string, bool) { return "", false })
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &recorder{}
+		d := testDeps(r)
+		d.Config = cfg
+		saved := 0
+		d.SaveConfig = func(*state.Setup) (string, error) { saved++; return "/x/config.local.env", nil }
+		s := newSetup("new")
+		s.Plugins = []string{"t-s3files"}
+		m := toStep(t, New(d, s), state.Review)
+		named := strings.Contains(m.View(), "Nothing can start: plugin t-efs: set T_EFS_IMAGE to")
+		m = press(m, "y")
+		if tc.refused {
+			if !named || m.m.Current() != state.Review || len(r.ran()) != 0 || saved != 0 || !strings.Contains(m.View(), "nothing started: plugin t-efs") {
+				t.Errorf("%s: named=%v, at %s, ran %q, saved %d:\n%s", tc.value, named, m.m.Current().Title(), r.ran(), saved, m.View())
+			}
+			continue
+		}
+		if named || m.m.Current() == state.Review || len(r.ran()) == 0 || saved != 1 {
+			t.Errorf("%s: named=%v, at %s, ran %q, saved %d", tc.value, named, m.m.Current().Title(), r.ran(), saved)
 		}
 	}
 }

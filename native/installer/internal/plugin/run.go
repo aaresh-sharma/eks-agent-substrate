@@ -160,7 +160,9 @@ func hasNeeds(p Plugin) bool {
 	return len(n.Preview)+len(n.CredentialProviders)+len(n.IngressIDs) > 0 || n.Source != nil
 }
 
-// Run deploys, checks or removes plugins on o's cluster.
+// Run deploys, checks or removes plugins on o's cluster. A deploy or verify
+// first runs every resolved plugin's Check on the environment, and a
+// refusal stops it before any child starts.
 //
 //   - deploy: ids and what they require, in order. Each plugin's AWS half
 //     (`setup-aws plugin <id>`), then Deploy, then Verify; then it is
@@ -188,6 +190,12 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 			if p.NeedsAutoMode != "" && !o.AutoMode {
 				return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
 			}
+		}
+		// Before the record is read and before any plugin's AWS half or
+		// hooks: a setting one of them cannot work with stops the run with
+		// nothing done (review of 86ba13f, finding 3).
+		if err := CheckSettings(ps, os.LookupEnv); err != nil {
+			return err
 		}
 		if action == ActionVerify {
 			for _, p := range ps {

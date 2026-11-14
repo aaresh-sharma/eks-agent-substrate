@@ -129,9 +129,22 @@ func costLine(plan []planStep, region string) (headline, cost string) {
 	return headline, s + ", " + priceRegion + "."
 }
 
+// settingsErr is the first setting a chosen plugin refuses (its Check), read
+// as the plugins step will read it: the environment, then config.local.env,
+// then config.env. The plugins step runs after the cluster and the control
+// plane, so the install is stopped here instead (review of 86ba13f,
+// finding 3).
+func (m Model) settingsErr() error {
+	return plugin.CheckSettings(resolved(m.s.Plugins), m.d.Config.Lookup)
+}
+
 func (m *Model) reviewKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "y":
+		if err := m.settingsErr(); err != nil {
+			m.notice = "nothing started: " + err.Error()
+			return nil
+		}
 		if m.d.SaveConfig != nil {
 			path, err := m.d.SaveConfig(m.s)
 			if err != nil {
@@ -238,13 +251,17 @@ func (m Model) reviewView(h int) string {
 		where = "y writes the settings to " + tildify(m.d.Config.LocalPath()) + " (mode 0600), then starts."
 	}
 	headline, cost := costLine(plan, s.Region)
+	start := "Press " + theme.Key.Render("y") + " to start."
+	if err := m.settingsErr(); err != nil {
+		start = theme.Warning.Render("Nothing can start: " + err.Error())
+	}
 	view := func(body []string) string {
 		foot := []string{"",
 			theme.Subtle.Render(fmt.Sprintf("About %d minutes in all. Each step is idempotent: a failed one is rerun with enter.", total)),
 			lipgloss.NewStyle().Bold(true).Render(headline),
 			cost,
 			theme.Subtle.Render(where),
-			"Press " + theme.Key.Render("y") + " to start.",
+			start,
 		}
 		return lipgloss.NewStyle().Width(w).Render(strings.Join(append(append(head, body...), foot...), "\n"))
 	}

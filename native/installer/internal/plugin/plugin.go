@@ -252,12 +252,34 @@ type Plugin struct {
 	// HourlyUSD is the rough on-demand cost the plugin adds, for the Review
 	// screen (0 when it is only Kubernetes objects).
 	HourlyUSD float64
+	// Check, when set, refuses settings Deploy and Verify cannot work with
+	// (an OPENCLAW_*_IMAGE that is not pinned by digest), reading each with
+	// lookup. It starts no child. CheckSettings runs it: Run before anything
+	// else, the --plugin-action subcommand before it reads the cluster, and
+	// the wizard when y on Review would start the install, with the config
+	// files' values, so a bad setting stops a run before any AWS or kubectl
+	// call.
+	Check func(lookup func(key string) (string, bool)) error
 	// Deploy makes the plugin's Kubernetes objects, Verify checks it works
 	// (a quick check fit for the install), Remove deletes its Kubernetes
 	// objects (Run then deletes its AWS resources with `setup-aws plugin <id>
 	// --delete`). All must be idempotent, start every child from an argv
 	// (Exec), and print no secret.
 	Deploy, Verify, Remove func(ctx context.Context, w io.Writer, o Options) error
+}
+
+// CheckSettings runs Check for each of ps (Resolve's, so what they require
+// too) with lookup, and returns the first refusal, naming its plugin.
+func CheckSettings(ps []Plugin, lookup func(string) (string, bool)) error {
+	for _, p := range ps {
+		if p.Check == nil {
+			continue
+		}
+		if err := p.Check(lookup); err != nil {
+			return fmt.Errorf("plugin %s: %w", p.ID, err)
+		}
+	}
+	return nil
 }
 
 var registry = map[string]Plugin{}
