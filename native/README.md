@@ -173,7 +173,7 @@ control plane deploy keeps their needs.
 | `s3files` | `efs`, the counter demo | an S3 Files access point per actor, synced to a private, versioned S3 bucket, and `counter-s3files` |
 | `credprovider-aws` | | egress credential injection from AWS Secrets Manager |
 | `db-rotation` | the RDS database | Secrets Manager rotation of the two RDS logins, synced by External Secrets, with the ESO Reloader rolling ate-api-server |
-| `openclaw` | `efs`; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE`, `OPENCLAW_DASHBOARD_IMAGE` pinned by digest | an always-on OpenClaw gateway; each conversation's agent is an actor |
+| `openclaw` | `efs` | an always-on OpenClaw gateway; each conversation's agent is an actor. Its public images are pinned by digest; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE` and `OPENCLAW_DASHBOARD_IMAGE` replace them, pinned by digest too |
 | `mode3` | | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
 | `mode3-iso` | `mode3`, EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
 

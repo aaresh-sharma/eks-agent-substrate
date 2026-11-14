@@ -178,7 +178,7 @@ keeps them.
 | `s3files` | Amazon S3 Files volumes for actors | Each actor gets its own S3 Files access point, its files synced to a private, versioned S3 bucket. Needs `efs`. Adds `counter-s3files`. |
 | `credprovider-aws` | Secrets Manager credential provider | Egress credential injection: an actor sends a placeholder header, and the egress gateway swaps in the secret its EgressPolicy names. |
 | `db-rotation` | Secrets Manager login rotation | Rotates the two RDS logins with alternating users; External Secrets syncs them and the ESO Reloader rolls ate-api-server. Needs the RDS database. |
-| `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs` and its images pinned by digest. |
+| `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs`; its public images are pinned by digest. |
 | `mode3` | Mode 3 on Kata | Worker Pods are Kata microVMs on the microvm nodes, with gVisor actors inside. |
 | `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs `mode3` and Auto Mode. |
 

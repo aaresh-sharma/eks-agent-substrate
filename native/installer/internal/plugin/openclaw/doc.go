@@ -9,7 +9,7 @@
 // can move to any system node. Nothing is exposed: its Services are
 // ClusterIP, reached with kubectl port-forward.
 //
-// Everything is Go: the images are prebuilt and pinned by digest, the
+// Everything is Go: the images are prebuilt, public and pinned by digest, the
 // repository's manifests are embedded (manifests/, at the commit openclaw.go
 // names) and rendered here, and the rest of deploy-demo.sh (the worker
 // image pin, atespace and access policy, actor template, golden wait, demo
