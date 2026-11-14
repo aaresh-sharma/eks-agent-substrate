@@ -54,6 +54,19 @@ func TestImageMustBePinned(t *testing.T) {
 	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":v1"+digest {
 		t.Errorf("a pinned override: %q, %v", ref, err)
 	}
+	// A malformed ref is refused though it ends in a digest, so it never
+	// reaches the cluster; an upper-case tag, which OCI allows, is accepted
+	// (review of 86ba13f, finding 1).
+	for _, bad := range []string{gatewayRepo + ":v1:v2" + digest, ":" + digest} {
+		t.Setenv("OPENCLAW_GATEWAY_IMAGE", bad)
+		if _, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err == nil || !strings.Contains(err.Error(), "OPENCLAW_GATEWAY_IMAGE=<image>@sha256:") {
+			t.Errorf("a malformed override %s: %v", bad, err)
+		}
+	}
+	t.Setenv("OPENCLAW_GATEWAY_IMAGE", gatewayRepo+":V1"+digest)
+	if ref, err := image("OPENCLAW_GATEWAY_IMAGE", GatewayImage); err != nil || ref != gatewayRepo+":V1"+digest {
+		t.Errorf("an upper-case tag: %q, %v", ref, err)
+	}
 	// An unpinned default is refused too (a later edit of the constants).
 	t.Setenv("OPENCLAW_GATEWAY_IMAGE", "")
 	if _, err := image("OPENCLAW_GATEWAY_IMAGE", gatewayRepo); err == nil {

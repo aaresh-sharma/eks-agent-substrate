@@ -124,15 +124,17 @@ func init() {
 	})
 }
 
-var digestRef = regexp.MustCompile(`^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
+var digestRef = regexp.MustCompile(`^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$`)
 
-// image is the pinned ref of one of the demo's images: env, or def.
+// image is the pinned ref of one of the demo's images: env, or def. It must
+// end in a sha256 digest and parse as an image reference, so a malformed one
+// (repo:v1:v2@sha256:...) is refused here rather than by the cluster.
 func image(env, def string) (string, error) {
 	ref := def
 	if v := os.Getenv(env); v != "" {
 		ref = v
 	}
-	if !digestRef.MatchString(ref) {
+	if _, err := name.NewDigest(ref); err != nil || !digestRef.MatchString(ref) {
 		return "", fmt.Errorf("image %s is not pinned by digest: set %s=<image>@sha256:<digest>", ref, env)
 	}
 	return ref, nil
