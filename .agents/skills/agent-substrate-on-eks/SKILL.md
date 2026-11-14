@@ -59,10 +59,9 @@ from `native/`, in the background with a log file, and read the tail. Set
   ConfigMap `kube-system/substrate-eks-plugins`, and later control plane
   deploys keep it.
 - Plugins: `llm-gateway` (default), `efs`, `s3files` (needs `efs`),
-  `credprovider-aws`, `db-rotation` (needs RDS), `openclaw` (needs `efs` and
-  its images pinned by digest in `OPENCLAW_GATEWAY_IMAGE`,
-  `OPENCLAW_ACTOR_IMAGE`, `OPENCLAW_DASHBOARD_IMAGE`), `mode3`, `mode3-iso`
-  (needs `mode3` and Auto Mode). `efs` and `s3files` build on the counter
+  `credprovider-aws`, `db-rotation` (needs RDS), `openclaw` (needs `efs`;
+  its public images are pinned by digest, and `OPENCLAW_*_IMAGE` replace
+  them, pinned too), `mode3`, `mode3-iso` (needs `mode3` and Auto Mode). `efs` and `s3files` build on the counter
   demo: deploy the demo first.
 - `--plan` on a `setup-aws` command reports what it would do and writes
   nothing.
