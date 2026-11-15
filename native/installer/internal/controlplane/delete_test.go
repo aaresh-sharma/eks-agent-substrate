@@ -144,7 +144,9 @@ func TestDeleteRunsAteSetupWaitsAndRemovesTheKubeconfig(t *testing.T) {
 // refusal moved out of resolvePlugins.
 func TestDeleteRemovesARecordedAutoModePlugin(t *testing.T) {
 	o, calls, _ := deleteEnv(t, nil, nil)
-	readRecord = func(context.Context, io.Writer, plugin.Options) ([]string, error) { return []string{"cp-test-auto"}, nil }
+	readRecord = func(context.Context, io.Writer, plugin.Options) ([]string, error) {
+		return []string{"cp-test-auto"}, nil
+	}
 	if err := Delete(context.Background(), io.Discard, o); err != nil {
 		t.Fatal(err)
 	}
