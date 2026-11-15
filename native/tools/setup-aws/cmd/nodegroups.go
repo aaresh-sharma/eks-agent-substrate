@@ -28,8 +28,8 @@ type nodeGroupSpec struct {
 }
 
 // groups are the node groups NODE_GROUPS names, of the system, gvisor and
-// microvm ones (allGroups), in that order: none on an Auto Mode cluster
-// whose sandboxes are all Auto Mode's (nodegroups.Check is the rule).
+// microvm ones (allGroups), in that order: on an Auto Mode cluster any of
+// them, or none (nodegroups.Check is the rule).
 func (r *clusterRun) groups() []nodeGroupSpec {
 	var out []nodeGroupSpec
 	for _, g := range r.allGroups() {

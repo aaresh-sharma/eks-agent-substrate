@@ -237,6 +237,10 @@ type Options struct {
 	// read by the caller: the node groups a plugin's Nodes are checked
 	// against.
 	Pools []string
+	// BundledDatabase is a control plane on ate-setup's bundled PostgreSQL
+	// (BundledDatabase), read by the caller: Run refuses a plugin with
+	// NeedsRDS there.
+	BundledDatabase bool
 }
 
 // PoolLabel is the label of the node groups' nodes: system, gvisor or
@@ -285,8 +289,10 @@ type Plugin struct {
 	Order int
 	// Minutes is the rough time Deploy plus Verify take, for the Review screen.
 	Minutes int
-	// Default plugins are preselected in the wizard (the LLM gateway, which
-	// every install has).
+	// Default plugins are preselected in the wizard (the LLM gateway), but
+	// not on a cluster the run creates when choosing one would add a node
+	// group: the gateway's system group on Auto Mode with the bundled
+	// PostgreSQL or the AWS Nitro sandbox alone.
 	Default bool
 	// Requires are plugin IDs that must be installed first (OpenClaw keeps
 	// its gateway state on EFS).
@@ -297,6 +303,12 @@ type Plugin struct {
 	// wizard offers it only on an Auto Mode cluster, and Run refuses to
 	// deploy it on any other.
 	NeedsAutoMode string
+	// NeedsRDS, when set, is why the plugin needs the RDS database (login
+	// rotation rotates its logins): the wizard offers it only with RDS, and
+	// Run refuses to deploy or check it, before any child, on a cluster
+	// whose control plane uses the bundled PostgreSQL
+	// (Options.BundledDatabase).
+	NeedsRDS string
 	// NeedsDemo reports that Deploy builds on the counter demo (its actor
 	// templates): choosing it in the wizard turns the demo on, and the demo
 	// runs before the plugins. Deploy itself refuses when the demo is
@@ -306,7 +318,8 @@ type Plugin struct {
 	// ate.dev/pool label (system, gvisor, microvm). The wizard offers it
 	// only when the run makes those groups or the cluster has their nodes,
 	// and Run refuses to deploy or check it on a cluster whose nodes
-	// (Options.Pools) lack one.
+	// (Options.Pools) lack one. Choosing one with system makes the system
+	// group on a cluster the run creates (nodegroups.For).
 	Nodes []string
 	// AddsNodes: choosing it makes its Nodes' gvisor and microvm groups on a
 	// cluster the run creates, as their sandbox classes do (mode3 makes the

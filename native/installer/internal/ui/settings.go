@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,9 +87,12 @@ func settingsFields(newCluster bool, groups []string) []field {
 
 // classesHelp is what every class's help ends with: the classes decide the
 // node groups.
-const classesHelp = " The classes decide a new cluster's node groups: gVisor and microVM make theirs, " +
-	"the system group comes with either, and with neither an Auto Mode cluster gets no node group at all " +
-	"(the control plane, the bundled PostgreSQL and every controller run on Auto Mode nodes). Press m for that minimal profile."
+const classesHelp = " The classes decide a new cluster's node groups: gVisor and microVM make theirs. " +
+	"The system group comes without Auto Mode, with either of them and RDS (the control plane is pinned there), " +
+	"and with a plugin that runs on it. With neither class, an Auto Mode cluster gets a node group only from a plugin: " +
+	"mode 3 adds the microvm group (and with RDS the system group), and a plugin that runs on the system group " +
+	"(the LLM gateway, EFS, login rotation, the credential provider) adds that one. Without such a plugin it gets none: " +
+	"the control plane, the bundled PostgreSQL and every controller run on Auto Mode nodes. Press m for that minimal profile."
 
 // help is a setting's explanation when config.env has no comment above it.
 var help = map[string]string{
@@ -103,7 +107,9 @@ var help = map[string]string{
 	state.ClassNitro: "The AWS Nitro sandbox makes each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox) " +
 		"on nodes Auto Mode launches for it, so it needs Auto Mode and makes no node group. It installs the fork's release " +
 		"(one release per install), and is set up and checked in its own step after the control plane." + classesHelp,
-	dbKey:                   "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster.",
+	dbKey: "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster. " +
+		"On a new Auto Mode cluster with a gVisor or microVM group, RDS pins the control plane to the system node group, which is made for it; " +
+		"with the bundled PostgreSQL the control plane runs on Auto Mode nodes, and the system group is made only for a plugin that runs on it.",
 	"SYSTEM_INSTANCE_TYPE":  "The system node group runs the controllers pinned to it: the control plane with RDS on Auto Mode, and the plugins' controllers.",
 	"GVISOR_INSTANCE_TYPE":  "The gvisor node group runs gVisor actors.",
 	"MICROVM_INSTANCE_TYPE": "The microvm node group runs microVM actors; its instance type needs nested virtualization (m8i, c8i, r8i).",
@@ -151,7 +157,7 @@ func (m *Model) settingsAutoMode() bool {
 // settingsGroups are the node groups of the cluster as Settings has it now.
 func (m *Model) settingsGroups() []string {
 	if m.s.ClusterIsNew {
-		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[classKey], m.s.Plugins)
+		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[dbKey], m.set.values[classKey], m.s.Plugins)
 	}
 	return m.s.NodeGroups()
 }
@@ -199,7 +205,8 @@ func (m *Model) toggleClass(c string) string {
 
 // minimal is the m key: the minimal profile, Auto Mode with the AWS Nitro
 // sandbox class only and the bundled PostgreSQL. A new cluster then gets no
-// node group, and everything runs on Auto Mode nodes.
+// node group, and everything runs on Auto Mode nodes: a chosen plugin that
+// would add one is cleared, and the notice names it.
 func (m *Model) minimal() string {
 	st := m.set
 	if m.s.ClusterIsNew {
@@ -208,10 +215,44 @@ func (m *Model) minimal() string {
 		return "The minimal profile needs EKS Auto Mode, and " + m.s.ClusterName + " has it off."
 	}
 	st.values[classKey], st.values[dbKey] = state.ClassNitro, state.DatabaseBundled
-	if m.s.ClusterIsNew {
-		return "Minimal profile: EKS Auto Mode, the AWS Nitro sandbox only, the bundled PostgreSQL; no node group."
+	if !m.s.ClusterIsNew {
+		return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
 	}
-	return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
+	if cleared := m.clearGroupPlugins(); len(cleared) > 0 {
+		return "Cleared " + andList(cleared) + " for the minimal profile (no node group); choose again on the Plugins screen to keep the group"
+	}
+	return "Minimal profile: EKS Auto Mode, the AWS Nitro sandbox only, the bundled PostgreSQL; no node group."
+}
+
+// clearGroupPlugins clears every chosen plugin that would give the minimal
+// profile's new cluster a node group (mode 3's microvm group, the system
+// group of a plugin that runs on it), so the profile keeps its promise, and
+// returns their IDs. Plugins that add no group stay chosen. A selection the
+// Plugins screen has not made yet is only the defaults, which it then
+// preselects for the minimal profile's settings (enterPlugins).
+func (m *Model) clearGroupPlugins() []string {
+	ids := m.s.Plugins
+	if m.pl.shown {
+		ids = m.chosenIDs()
+	}
+	var cleared []string
+	for _, id := range ids {
+		if len(state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, []string{id})) > 0 {
+			cleared = append(cleared, id)
+		}
+	}
+	if len(cleared) == 0 {
+		return nil
+	}
+	if m.pl.shown {
+		for _, id := range cleared {
+			m.setPlugin(id, false)
+		}
+		m.s.Plugins = m.chosenIDs()
+	} else {
+		m.s.Plugins = slices.DeleteFunc(slices.Clone(m.s.Plugins), func(id string) bool { return slices.Contains(cleared, id) })
+	}
+	return cleared
 }
 
 // checkSettings validates every value, for the screen and for n: the config

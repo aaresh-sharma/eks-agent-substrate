@@ -450,6 +450,11 @@ func clusterRelease(ctx context.Context, o plugin.Options, chosen []string, depl
 	if o.Pools, err = plugin.NodePools(ctx, os.Stdout, o); err != nil {
 		return o, err
 	}
+	// And the database: plugin.Run refuses one that needs RDS on the
+	// bundled PostgreSQL.
+	if o.BundledDatabase, err = plugin.BundledDatabase(ctx, os.Stdout, o); err != nil {
+		return o, err
+	}
 	if o.Release, err = plugin.ReadRelease(ctx, os.Stdout, o, chosen); err != nil {
 		return o, err
 	}

@@ -139,15 +139,18 @@ cluster's Kubernetes version, Auto Mode and API access ranges, the sandbox
 classes (gVisor, microVM and the AWS Nitro sandbox), the node groups those
 classes make (only those are listed), the tags on every AWS resource, the
 release and its image repository, and the database. The right side explains
-the setting under the cursor. `m` picks the minimal profile, `n` moves on.
+the setting under the cursor. `m` picks the minimal profile (and clears a
+chosen plugin that would add a node group, naming it), `n` moves on.
 
 ![Settings: the new cluster, its node groups, the tags, and the Agent Substrate release, sandbox classes and database](native/installer/docs/settings.png)
 
 **Choose plugins** lists the optional parts with their time and hourly cost.
 `space` picks one, and the plugins it needs with it. A plugin is refused,
-with the reason, when it needs Auto Mode on a cluster without it, or runs on
-a node group the cluster will not have (the LLM gateway on the `system`
-group, OpenClaw on `gvisor`).
+with the reason, when it needs Auto Mode on a cluster without it, needs the
+RDS database on a run with the bundled PostgreSQL (login rotation), or runs
+on a sandbox node group whose class is off (OpenClaw on `gvisor`) or that a
+cluster you connect lacks. One that runs on the `system` group makes that
+group on a new cluster, and the screen says so.
 
 ![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata](native/installer/docs/plugins.png)
 
@@ -228,13 +231,17 @@ and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
 
 | Selection | Node groups created |
 |---|---|
-| Default: Auto Mode, `gvisor,microvm` | `system`, `gvisor`, `microvm` (as before) |
+| Default: Auto Mode, RDS, `gvisor,microvm` | `system`, `gvisor`, `microvm` (as before) |
 | `gvisor` class | `gvisor` |
 | `microvm` class | `microvm` (nested virtualization) |
 | `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
 | `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
-| `system` | always without Auto Mode; with Auto Mode only when a `gvisor` or `microvm` group is created |
-| Auto Mode and only `nitro` (the minimal profile) | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
+| `system`, without Auto Mode | always (required) |
+| `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created: the control plane is pinned to it |
+| `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it: the control plane and PostgreSQL run on Auto Mode nodes |
+| A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database |
+| Auto Mode, the bundled PostgreSQL, `gvisor`, no such plugin | `gvisor` alone |
+| Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one that runs on `system`): the minimal profile | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
 | No Auto Mode | `system` and at least one of `gvisor` and `microvm`; `nitro` is refused |
 
 What else follows from the classes:
@@ -248,11 +255,13 @@ What else follows from the classes:
   `mode3-iso`, so teardown removes it.
 - The counter demo runs on `gvisor` and `microvm`; `--verify` checks `nitro`
   through its counter pool, `counter-iso`.
-- A plugin pinned to a node group is offered only when the cluster gets that
-  group: the LLM gateway, EFS (and so S3 Files and OpenClaw), login rotation
-  and the credential provider run on `system`, OpenClaw and the credential
-  provider's probe on `gvisor`. On the minimal profile the LLM gateway is
-  therefore not selected.
+- The LLM gateway, EFS (and so S3 Files and OpenClaw), login rotation and
+  the credential provider run on `system`: choosing one makes the `system`
+  group on a cluster the installer creates. OpenClaw and the credential
+  provider's probe run on `gvisor`, so they need the `gvisor` class. The LLM
+  gateway is preselected only where the cluster gets the `system` group
+  anyway: on Auto Mode with the bundled PostgreSQL, and on the minimal
+  profile, it is not, and the Plugins screen says it adds the group.
 - With RDS and no `system` group, nothing is cordoned: the database
   bootstrap Job and the control plane run on Auto Mode nodes.
 - On a cluster you connect, nothing is created: the node groups its nodes
@@ -455,9 +464,11 @@ demos on isolated sandboxes.
 With `AUTO_MODE=on` (the default), the cluster runs EKS Auto Mode next to
 its node groups, with its two built-in NodePools, `general-purpose` and
 `system`. The node groups only take the pods meant for them: `gvisor` and
-`microvm` the worker pods, `system` the Substrate control plane (pinned by
-`ate-setup --cordon-system-infra-components`) and the installer's system
-pods. The `system` group carries the taint
+`microvm` the worker pods, `system` the Substrate control plane with RDS
+(pinned by `ate-setup --cordon-system-infra-components`) and the plugins'
+controllers. With the bundled PostgreSQL the control plane runs on Auto
+Mode nodes, and the `system` group is made only for a plugin that runs on
+it. The `system` group carries the taint
 `ate.dev/workloadType=ate-system-infra:NoSchedule`, which those pods
 tolerate. Every other pod, with no nodeSelector or toleration, runs on a
 node Auto Mode launches for it:

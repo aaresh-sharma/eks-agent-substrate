@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/execx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
 
 // groupRows are the node groups Settings has rows for.
@@ -20,9 +22,10 @@ func groupRows(m Model) []string {
 }
 
 // Settings shows rows only for the node groups the new cluster gets, and
-// they follow the classes and Auto Mode as they are toggled: the default
-// three; gVisor alone, system and gvisor; the AWS Nitro sandbox alone on
-// Auto Mode, none, with the line that says so.
+// they follow the classes, the database and Auto Mode as they are toggled:
+// the default three; gVisor alone, system and gvisor with RDS and gvisor
+// alone with the bundled PostgreSQL; the AWS Nitro sandbox alone on Auto
+// Mode, none, with the line that says so.
 func TestSettingsShowsOnlyTheNodeGroupsTheClusterGets(t *testing.T) {
 	m := toSettings(t, testDeps(&recorder{}), newSetup("fresh"))
 	if got := groupRows(m); !slices.Equal(got, []string{"system", "gvisor", "microvm"}) {
@@ -32,6 +35,17 @@ func TestSettingsShowsOnlyTheNodeGroupsTheClusterGets(t *testing.T) {
 	m = press(m, "enter")
 	if got := groupRows(m); !slices.Equal(got, []string{"system", "gvisor"}) || strings.Contains(m.View(), "MICROVM") || strings.Contains(m.View(), "nested virt") {
 		t.Errorf("gVisor alone: rows %v\n%s", got, m.View())
+	}
+	// The bundled PostgreSQL takes the system row away on Auto Mode; RDS
+	// brings it back.
+	m = cursorTo(t, m, dbKey)
+	m = press(m, "enter")
+	if got := groupRows(m); !slices.Equal(got, []string{"gvisor"}) {
+		t.Errorf("gVisor alone, bundled: rows %v\n%s", got, m.View())
+	}
+	m = press(m, "enter")
+	if got := groupRows(m); !slices.Equal(got, []string{"system", "gvisor"}) {
+		t.Errorf("gVisor alone, RDS again: rows %v\n%s", got, m.View())
 	}
 	m = cursorTo(t, m, state.ClassNitro)
 	m = press(m, "enter")
@@ -79,50 +93,98 @@ func TestMinimalProfileMakesNoNodeGroup(t *testing.T) {
 	}
 }
 
-// The Plugins screen refuses, with the reason, a plugin pinned to a node
-// group the run does not make, and drops a preselected one: on the minimal
-// profile the default gateway runs on the system group, which comes only
-// with a gVisor or microVM group, so it is dropped; choosing t-kata, which
-// adds the microvm group (and so the system group), makes it available
-// again. t-claw's gvisor group needs the gVisor class.
+// pluginAt puts the Plugins screen's cursor on id.
+func pluginAt(m Model, id string) Model {
+	for i, p := range choosable() {
+		if p.ID == id {
+			m.pl.cursor = i
+		}
+	}
+	return m
+}
+
+// The Plugins screen refuses, with the reason, a plugin pinned to a sandbox
+// group whose class is off (t-claw on gvisor), and never one on the system
+// group: choosing it makes that group. On the minimal profile the default
+// gateway would add the system group, so it is not preselected, and the
+// screen says so; chosen, it makes the system group, and stays when t-kata
+// (the microvm group) comes and goes. Review then shows the system group.
 func TestPluginsScreenRefusesAPluginWhoseNodesTheRunDoesNotMake(t *testing.T) {
 	s := newSetup("fresh")
 	s.Plugins = nil // the defaults
 	m := toSettings(t, testDeps(&recorder{}), s)
 	m = press(m, "m", "n")
-	if v := m.View(); m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || !strings.Contains(v, "not selected: t-gateway") ||
-		!strings.Contains(v, "Not available: runs on the system node group") {
-		t.Fatalf("the default gateway kept on the minimal profile:\n%s", v)
+	if v := m.View(); m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.notice != "not preselected: t-gateway (adds the system node group)" ||
+		!strings.Contains(v, "Adds the system node group to the new cluster") || strings.Contains(v, "Not available") {
+		t.Fatalf("the default gateway on the minimal profile: notice %q\n%s", m.notice, v)
 	}
-	at := func(id string) Model {
-		for i, p := range choosable() {
-			if p.ID == id {
-				m.pl.cursor = i
-			}
-		}
-		return m
+	m = press(pluginAt(m, "t-gateway"), " ")
+	if !m.pl.chosen["t-gateway"] {
+		t.Errorf("gateway refused on the minimal profile:\n%s", m.View())
 	}
-	m = press(at("t-gateway"), " ")
-	if m.pl.chosen["t-gateway"] || !strings.Contains(m.notice, "an Auto Mode cluster gets only with the gVisor or microVM sandbox class") {
-		t.Errorf("gateway chosen without the system group:\n%s", m.View())
+	m = press(pluginAt(m, "t-kata"), " ")
+	m = press(pluginAt(m, "t-kata"), " ")
+	if m.pl.chosen["t-kata"] || !m.pl.chosen["t-gateway"] {
+		t.Errorf("t-kata on and off: %v", m.pl.chosen)
 	}
-	m = press(at("t-kata"), " ")
-	m = press(at("t-gateway"), " ")
-	if !m.pl.chosen["t-kata"] || !m.pl.chosen["t-gateway"] {
-		t.Errorf("with t-kata's microvm group the gateway is still refused: %v\n%s", m.pl.chosen, m.View())
-	}
-	// Clearing t-kata takes the system group away, and the gateway with it.
-	m = press(at("t-kata"), " ")
-	if m.pl.chosen["t-gateway"] {
-		t.Errorf("gateway kept after its node group went: %v", m.pl.chosen)
-	}
-	m = press(at("t-claw"), " ")
+	m = press(pluginAt(m, "t-claw"), " ")
 	if m.pl.chosen["t-claw"] || m.notice != "Claw agent runs on the gvisor node group: turn on its sandbox class in Settings" {
 		t.Errorf("t-claw chosen without the gvisor group:\n%s", m.View())
 	}
 	m = press(m, "enter")
-	if m.m.Current() != state.Review || len(s.Plugins) != 0 || len(s.NodeGroups()) != 0 {
-		t.Errorf("at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-gateway"}) || !slices.Equal(s.NodeGroups(), []string{"system"}) ||
+		!strings.Contains(m.View(), "Node groups: system 2×m8i.xlarge") {
+		t.Errorf("at %s, plugins %v, groups %v\n%s", m.m.Current().Title(), s.Plugins, s.NodeGroups(), m.View())
+	}
+}
+
+// The default gateway is preselected where the run makes the system group
+// anyway (the default: Auto Mode, RDS, gvisor and microvm), and not with the
+// bundled PostgreSQL and the gVisor class, which then make only the gvisor
+// group; Review shows exactly that group and its cost.
+func TestDefaultGatewayIsPreselectedOnlyWhereItAddsNoNodeGroup(t *testing.T) {
+	s := newSetup("fresh")
+	s.Plugins = nil
+	m := press(toSettings(t, testDeps(&recorder{}), s), "n")
+	if m.m.Current() != state.Plugins || !m.pl.chosen["t-gateway"] || strings.Contains(m.notice, "not preselected") ||
+		strings.Contains(m.View(), "Adds the system node group") {
+		t.Fatalf("default run, at %s: chosen %v, notice %q\n%s", m.m.Current().Title(), m.pl.chosen, m.notice, m.View())
+	}
+
+	s = newSetup("fresh")
+	s.Plugins = nil
+	m = toSettings(t, testDeps(&recorder{}), s)
+	m = cursorTo(t, m, state.ClassMicroVM)
+	m = press(m, "enter")
+	m = cursorTo(t, m, dbKey)
+	m = press(m, "enter")
+	if got := groupRows(m); !slices.Equal(got, []string{"gvisor"}) || m.set.values[dbKey] != state.DatabaseBundled {
+		t.Fatalf("bundled, gVisor: rows %v, database %q\n%s", got, m.set.values[dbKey], m.View())
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.notice != "not preselected: t-gateway (adds the system node group)" {
+		t.Fatalf("bundled, gVisor, at %s: chosen %v, notice %q\n%s", m.m.Current().Title(), m.pl.chosen, m.notice, m.View())
+	}
+	m = press(m, "enter")
+	v := m.View()
+	if m.m.Current() != state.Review || !slices.Equal(s.NodeGroups(), []string{"gvisor"}) || !strings.Contains(v, "Node groups: gvisor 2×m8i.2xlarge") ||
+		strings.Contains(v, "system 2×") {
+		t.Errorf("at %s, groups %v\n%s", m.m.Current().Title(), s.NodeGroups(), v)
+	}
+	if usd, _ := clusterHourly(s.NewClusterConfig, s.NodeGroups()); usd != eksHourly+natHourly+2*(ec2Price["m8i.2xlarge"]+200*gp3PerGBMonth/hoursPerMonth) {
+		t.Errorf("bundled, gVisor: $%.4f an hour", usd)
+	}
+
+	// A connected cluster gets no node group from the run: its system
+	// nodes are there, so the gateway is preselected, whatever the database
+	// and classes (a new cluster with these would make system and gvisor,
+	// not the three the cluster has).
+	r := &recorder{probes: map[string]string{"new": "SUBSTRATE_EKS_INSTALLED false pools=system,gvisor,microvm"}}
+	s = newSetup("new")
+	s.Plugins, s.Database, s.SandboxClasses = nil, state.DatabaseBundled, state.ClassGVisor
+	m = press(toStep(t, New(testDeps(r), s), state.Settings), "n")
+	if m.m.Current() != state.Plugins || !m.pl.chosen["t-gateway"] || strings.Contains(m.notice, "not preselected") {
+		t.Errorf("connected, at %s: chosen %v, notice %q", m.m.Current().Title(), m.pl.chosen, m.notice)
 	}
 }
 
@@ -155,5 +217,173 @@ func TestConnectedClusterRefusesWhatItsNodesLack(t *testing.T) {
 	m = press(m, " ")
 	if m.m.Current() != state.Plugins || m.pl.chosen["t-claw"] || m.notice != "Claw agent runs on the gvisor node group, which new does not have" {
 		t.Errorf("t-claw on a cluster without gvisor nodes:\n%s", m.View())
+	}
+}
+
+// The Create the cluster step names the node groups it makes, one group in
+// the singular: gvisor alone (Auto Mode, the bundled PostgreSQL), and
+// system and gvisor with RDS.
+func TestCreateClusterStepNamesItsNodeGroups(t *testing.T) {
+	for db, want := range map[string]string{
+		state.DatabaseBundled: "EKS cluster fresh and its gvisor node group ",
+		state.DatabaseRDS:     "EKS cluster fresh and its system and gvisor node groups ",
+	} {
+		s := newSetup("fresh")
+		s.SandboxClasses, s.Database = state.ClassGVisor, db
+		s.NewCluster("fresh")
+		m := sized(New(testDeps(&recorder{}), s))
+		m.jump(state.InstallOrder(s), state.CreateCluster)
+		m.tasks[state.CreateCluster] = newTask(execx.Spec{Label: "create cluster"}, steps.Cluster())
+		if v := stripANSI(m.View()); !strings.Contains(v, want) {
+			t.Errorf("%s: want %q in\n%s", db, want, v)
+		}
+	}
+}
+
+// Review NIT-4: Settings checks only the node groups it shows, so a group a
+// plugin chosen after it adds is checked when the Plugins screen moves on.
+// t-kata adds the microvm group to a gVisor-only run, and the gateway the
+// system group on Auto Mode with the bundled PostgreSQL. A bad setting of
+// that group keeps the run on the Plugins screen, naming the key; back in
+// Settings the group's row is shown with the error, and once it is fixed the
+// run reaches Review.
+func TestAGroupAPluginAddsIsValidated(t *testing.T) {
+	for _, tc := range []struct {
+		name, plugin, key string
+		bundled           bool
+		set               func(*state.ClusterConfig)
+	}{
+		{"mode 3's microvm group", "t-kata", "MICROVM_NODES", false, func(c *state.ClusterConfig) { c.MicroVMNodes = "abc" }},
+		{"the gateway's system group", "t-gateway", "SYSTEM_NODES", true, func(c *state.ClusterConfig) { c.SystemNodes = "0" }},
+	} {
+		s := newSetup("fresh")
+		tc.set(&s.NewClusterConfig)
+		m := toSettings(t, testDeps(&recorder{}), s)
+		m = cursorTo(t, m, state.ClassMicroVM)
+		m = press(m, "enter")
+		if tc.bundled {
+			m = cursorTo(t, m, dbKey)
+			m = press(m, "enter")
+		}
+		m = press(m, "n")
+		if m.m.Current() != state.Plugins {
+			t.Fatalf("%s: Settings refused a group it does not show: %v", tc.name, m.set.errs)
+		}
+		m = press(pluginAt(m, tc.plugin), " ", "enter")
+		if m.m.Current() != state.Plugins || !strings.HasPrefix(m.notice, tc.key+"=") || !strings.Contains(m.notice, "set it in Settings") {
+			t.Fatalf("%s: at %s, notice %q", tc.name, m.m.Current().Title(), m.notice)
+		}
+		m = press(m, "esc")
+		if _, bad := m.set.errs[tc.key]; m.m.Current() != state.Settings || !bad {
+			t.Fatalf("%s: back at %s, errors %v", tc.name, m.m.Current().Title(), m.set.errs)
+		}
+		m = setText(cursorTo(t, m, tc.key), "2")
+		m = press(m, "n", "enter")
+		if m.m.Current() != state.Review {
+			t.Errorf("%s: fixed, at %s, notice %q", tc.name, m.m.Current().Title(), m.notice)
+		}
+	}
+}
+
+// Review NIT-6: the help on every class row says when an Auto Mode cluster
+// with neither gVisor nor microVM gets a node group: only from a plugin,
+// mode 3's microvm group (with RDS the system group too), or the system
+// group for a plugin that runs on it; none without one. The rule agrees.
+func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
+	for _, c := range []struct {
+		db      string
+		plugins []string
+		want    []string
+	}{
+		{state.DatabaseBundled, nil, nil},
+		{state.DatabaseRDS, nil, nil},
+		{state.DatabaseBundled, []string{"t-kata"}, []string{"microvm"}},
+		{state.DatabaseRDS, []string{"t-kata"}, []string{"system", "microvm"}},
+		{state.DatabaseBundled, []string{"t-gateway"}, []string{"system"}},
+	} {
+		if got := state.NewNodeGroups(true, c.db, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
+			t.Errorf("Auto Mode, %s, nitro, %v: %v, want %v", c.db, c.plugins, got, c.want)
+		}
+	}
+	for _, c := range state.Classes {
+		for _, want := range []string{
+			"With neither class, an Auto Mode cluster gets a node group only from a plugin",
+			"mode 3 adds the microvm group (and with RDS the system group)",
+			"a plugin that runs on the system group",
+			"Without such a plugin it gets none",
+		} {
+			if !strings.Contains(help[c], want) {
+				t.Errorf("%s help lacks %q:\n%s", c, want, help[c])
+			}
+		}
+	}
+}
+
+// Both ways: login rotation (t-rot, db-rotation's shape) is refused on the
+// Plugins screen with the bundled PostgreSQL, with the reason and the row
+// note "needs RDS", so it can neither add the system group nor fail in the
+// plugins step; with RDS it is chosen.
+func TestPluginsScreenRefusesLoginRotationOnTheBundledDatabase(t *testing.T) {
+	for _, db := range []string{state.DatabaseBundled, state.DatabaseRDS} {
+		s := newSetup("fresh")
+		m := toSettings(t, testDeps(&recorder{}), s)
+		m = cursorTo(t, m, state.ClassMicroVM)
+		m = press(m, "enter")
+		if db == state.DatabaseBundled {
+			m = cursorTo(t, m, dbKey)
+			m = press(m, "enter")
+		}
+		m = press(m, "n")
+		m = press(pluginAt(m, "t-rot"), " ")
+		v := m.View()
+		if db == state.DatabaseBundled {
+			if m.pl.chosen["t-rot"] || m.notice != "Login rotation rotates the RDS logins, so it needs the RDS database; the run uses the bundled PostgreSQL (Settings: Database)" ||
+				!strings.Contains(v, "needs RDS") {
+				t.Errorf("bundled: chosen %v, notice %q\n%s", m.pl.chosen, m.notice, v)
+			}
+			m = press(m, "enter")
+			if m.m.Current() != state.Review || len(s.Plugins) != 0 || !slices.Equal(s.NodeGroups(), []string{"gvisor"}) {
+				t.Errorf("bundled: at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
+			}
+			continue
+		}
+		if !m.pl.chosen["t-rot"] || strings.Contains(v, "needs RDS") {
+			t.Errorf("RDS: chosen %v, notice %q\n%s", m.pl.chosen, m.notice, v)
+		}
+	}
+}
+
+// m after the Plugins screen: the chosen plugins that would add a node group
+// under the minimal profile, the default gateway (system) and t-kata
+// (microvm), are cleared and named; t-efs, which adds none, stays. The run
+// then makes no node group, as m says. Choosing one again on the Plugins
+// screen makes its group, as before.
+func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
+	s := newSetup("fresh")
+	s.Plugins = nil // the defaults: the gateway, which the default run's system group fits
+	m := press(toSettings(t, testDeps(&recorder{}), s), "n")
+	m = press(pluginAt(m, "t-kata"), " ")
+	m = press(pluginAt(m, "t-efs"), " ")
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-gateway", "t-efs", "t-kata"}) {
+		t.Fatalf("at %s, plugins %v", m.m.Current().Title(), s.Plugins)
+	}
+	m = press(m, "esc", "esc")
+	if m.m.Current() != state.Settings {
+		t.Fatalf("at %s", m.m.Current().Title())
+	}
+	m = press(m, "m")
+	if m.notice != "Cleared t-gateway and t-kata for the minimal profile (no node group); choose again on the Plugins screen to keep the group" ||
+		len(groupRows(m)) != 0 || !strings.Contains(m.View(), noGroupsLine) {
+		t.Fatalf("notice %q, rows %v\n%s", m.notice, groupRows(m), m.View())
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.pl.chosen["t-kata"] || !m.pl.chosen["t-efs"] {
+		t.Fatalf("at %s, chosen %v", m.m.Current().Title(), m.pl.chosen)
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 ||
+		!strings.Contains(m.View(), "No node groups: everything runs on EKS Auto Mode nodes") {
+		t.Errorf("at %s, plugins %v, groups %v\n%s", m.m.Current().Title(), s.Plugins, s.NodeGroups(), m.View())
 	}
 }
