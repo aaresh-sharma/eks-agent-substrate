@@ -101,7 +101,7 @@ func (n Needs) Release(tag, imageRepo string) Release {
 }
 
 // ReleaseOf is the release of an install carrying ps, the chosen and the
-// recorded plugins alike: the Source of the one plugin that sets one, else
+// recorded plugins alike: the Source the plugins that set one share, else
 // the --tag release (tag, imageRepo).
 func ReleaseOf(ps []Plugin, tag, imageRepo string) (Release, error) {
 	n, err := Merge(ps)
@@ -114,7 +114,7 @@ func ReleaseOf(ps []Plugin, tag, imageRepo string) (Release, error) {
 // ChosenRelease is ReleaseOf the plugins ids resolve to, for the wizard,
 // which shows it and passes the steps the --tag, --image-repo and --plugins
 // that decide it. IDs that do not resolve keep the --tag release: the wizard
-// offers only registered plugins, one Source among them.
+// offers only registered plugins, whose Sources are all one release.
 func ChosenRelease(ids []string, tag, imageRepo string) Release {
 	ps, err := Resolve(ids)
 	if err == nil {
@@ -184,7 +184,8 @@ type Needs struct {
 	// IngressIDs are SPIFFE IDs the ingress router admits, beyond
 	// spiffe://cluster.local/ns/ate-system/sa/atenet-client.
 	IngressIDs []string
-	// Source, when set, replaces the release. At most one plugin may set it.
+	// Source, when set, replaces the release. Plugins installed together
+	// must set the same one, or none (Merge).
 	Source *Source
 }
 
@@ -385,20 +386,24 @@ func Resolve(ids []string) ([]Plugin, error) {
 	return out, nil
 }
 
-// Merge is the union of ps' needs, each list sorted and without repeats. Two
-// plugins that set a Source are an error.
+// Merge is the union of ps' needs, each list sorted and without repeats.
+// Plugins may set the same Source (mode3 and mode3-iso both install the
+// fork); two different Sources are an error naming both plugins.
 func Merge(ps []Plugin) (Needs, error) {
 	var n Needs
+	from := ""
 	for _, p := range ps {
 		n.Preview = append(n.Preview, p.Needs.Preview...)
 		n.CredentialProviders = append(n.CredentialProviders, p.Needs.CredentialProviders...)
 		n.IngressIDs = append(n.IngressIDs, p.Needs.IngressIDs...)
-		if p.Needs.Source != nil {
-			if n.Source != nil {
-				return Needs{}, fmt.Errorf("two plugins replace the Substrate release; choose one (%s)", p.ID)
-			}
-			s := *p.Needs.Source
-			n.Source = &s
+		switch s := p.Needs.Source; {
+		case s == nil:
+		case n.Source == nil:
+			c := *s
+			n.Source, from = &c, p.ID
+		case *n.Source != *s:
+			return Needs{}, fmt.Errorf("plugins %s and %s install two different Substrate releases (%s and %s); choose one",
+				from, p.ID, n.Source.Tag, s.Tag)
 		}
 	}
 	for _, l := range []*[]string{&n.Preview, &n.CredentialProviders, &n.IngressIDs} {

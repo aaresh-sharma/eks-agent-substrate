@@ -52,7 +52,7 @@ func TestReadReleaseWithAndWithoutASource(t *testing.T) {
 	f := &fakeCluster{record: "fork"}
 	o := releaseFixture(t, f)
 	Register(Plugin{ID: "fork2", Order: 5, Needs: Needs{Source: &Source{Tag: "v9"}}})
-	if _, err := ReadRelease(context.Background(), io.Discard, o, []string{"fork2"}); err == nil || !strings.Contains(err.Error(), "two plugins replace") {
+	if _, err := ReadRelease(context.Background(), io.Discard, o, []string{"fork2"}); err == nil || !strings.Contains(err.Error(), "plugins fork and fork2 install two different Substrate releases") {
 		t.Errorf("two Sources: %v", err)
 	}
 }

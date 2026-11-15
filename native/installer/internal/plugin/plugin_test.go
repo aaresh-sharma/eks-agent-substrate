@@ -68,6 +68,34 @@ func TestMergeUnitesNeedsAndRefusesTwoSources(t *testing.T) {
 	}
 }
 
+// Both ways: plugins whose Sources are equal in every field (their own
+// copies, as mode3 and mode3-iso declare) merge into that one release; a
+// Source that differs in any one field is refused, naming both plugins.
+func TestMergeAcceptsOneSourceTwiceAndRefusesTwoDifferent(t *testing.T) {
+	src := Source{Repo: "https://example.invalid/fork.git", Commit: "9f36a0d7f2abca950f25fc7bd023752d3852504c", Tag: "v1.0.0-fork", ImageRepo: "ghcr.io/example/fork"}
+	same := src
+	a := Plugin{ID: "a", Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &src}}
+	b := Plugin{ID: "b", Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &same}}
+	n, err := Merge([]Plugin{a, {ID: "plain"}, b})
+	if err != nil || n.Source == nil || *n.Source != src || !slices.Equal(n.Preview, []string{"NetworkWorkers"}) {
+		t.Fatalf("one Source twice: %+v, %v", n, err)
+	}
+	for field, mut := range map[string]func(*Source){
+		"Repo":      func(s *Source) { s.Repo = "https://example.invalid/other.git" },
+		"Commit":    func(s *Source) { s.Commit = "0000000000000000000000000000000000000000" },
+		"Tag":       func(s *Source) { s.Tag = "v1.0.0-other" },
+		"ImageRepo": func(s *Source) { s.ImageRepo = "ghcr.io/example/other" },
+	} {
+		other := src
+		mut(&other)
+		c := Plugin{ID: "c", Needs: Needs{Source: &other}}
+		_, err := Merge([]Plugin{a, b, c})
+		if err == nil || !strings.Contains(err.Error(), "plugins a and c install two different Substrate releases") {
+			t.Errorf("another %s: %v", field, err)
+		}
+	}
+}
+
 func TestRecordRoundTrip(t *testing.T) {
 	if got := ParseRecord(" efs, ,llm-gateway,efs "); !slices.Equal(got, []string{"efs", "llm-gateway"}) {
 		t.Errorf("ParseRecord = %v", got)
