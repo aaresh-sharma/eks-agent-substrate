@@ -80,6 +80,9 @@ func runMainIn(t *testing.T, cwd string, extra []string, answers string, args ..
 		"AWS_PROFILE=", "AWS_CONFIG_FILE="+dir+"/none", "AWS_SHARED_CREDENTIALS_FILE="+dir+"/none",
 		"AWS_ACCESS_KEY_ID=placeholder", "AWS_SECRET_ACCESS_KEY=placeholder", "AWS_SESSION_TOKEN=",
 		"AWS_EC2_METADATA_DISABLED=true", "AWS_ENDPOINT_URL="+srv.URL, "XDG_CACHE_HOME="+dir,
+		// Empty is unset to main's conf(): --sandbox-classes defaults to
+		// gvisor,microvm whatever a checkout's config.local.env says.
+		"SANDBOX_CLASSES=",
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), kubectlAnswers+"="+answers)
 	cmd.Env, cmd.Dir = append(cmd.Env, extra...), cwd
 	var out bytes.Buffer
