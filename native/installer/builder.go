@@ -50,17 +50,18 @@ func (b builder) settings(keys []string) []string {
 }
 
 // findSetupAWS returns --setup-aws when given (a source directory or a
-// binary); else the setup-aws binary beside this executable, as a release
-// archive has it; else native/tools/setup-aws, searched above cwd and the
-// executable, like substrate-gke finds its tools/setup-gcp.
+// binary); else, when this executable is a release's (state.IsRelease), the
+// release's setup-aws binary beside it; else native/tools/setup-aws,
+// searched above cwd and the executable, like substrate-gke finds its
+// tools/setup-gcp. A source build always runs that source with `go run`,
+// even when a setup-aws binary was built beside it into native/bin, which
+// could be stale.
 func (b builder) findSetupAWS() string {
 	if b.setupAWS != "" {
 		return b.setupAWS
 	}
-	if b.exeDir != "" {
-		if bin := filepath.Join(b.exeDir, "setup-aws"); plugin.IsSetupAWSBinary(bin) {
-			return bin
-		}
+	if state.IsRelease(b.exeDir) {
+		return filepath.Join(b.exeDir, "setup-aws")
 	}
 	for _, start := range []string{b.cwd, b.exeDir} {
 		for dir := start; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {

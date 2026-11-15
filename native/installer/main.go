@@ -67,7 +67,7 @@ func main() {
 		demoMode   = flag.Bool("demo", false, "end the install with the counter demo on its sandbox classes, and check it")
 		teardown   = flag.Bool("teardown", false, "open the wizard on the teardown of --cluster: remove Substrate, then its AWS resources")
 		keepClust  = flag.Bool("keep-cluster", false, "with --teardown: remove Substrate and its AWS data but never offer to delete the cluster")
-		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws, or to a setup-aws binary (default: the setup-aws binary beside the executable, as a release has it, else native/tools/setup-aws found above the working directory or the executable)")
+		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws, or to a setup-aws binary (default: a release's setup-aws binary beside the executable, else native/tools/setup-aws found above the working directory or the executable)")
 		showVer    = flag.Bool("version", false, "print the installer's version and exit")
 		overlay    = flag.String("eks-overlay", "", "path to native/deploy/eks (default: a release's own deploy/eks, else found above the working directory or the executable)")
 		treeRoot   = flag.String("tree-root", controlplane.DefaultTreeRoot(), "where fetched Substrate trees are cached")
