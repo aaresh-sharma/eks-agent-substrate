@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,7 +105,7 @@ type part struct {
 }
 
 var (
-	puppetBlue = part{0, 2, []string{
+	puppetOrange = part{0, 2, []string{
 		"...kkk...",
 		"...kbk...",
 		"...kkk...",
@@ -189,37 +190,47 @@ var actors = []struct {
 	px  []string
 	col uint32
 }{
-	{[]string{"..c..", "ccccc", "ckckc", "ccccc"}, 0x62B2DA},
+	{[]string{"..c..", "ccccc", "ckckc", "ccccc"}, inkOrange},
 	{[]string{"c...c", "ccccc", "ckckc", "ccccc"}, 0xF0EA6E},
 	{[]string{"...c.", "ccccc", "ckckc", "ccccc"}, 0xE678B0},
 	{[]string{"..c..", "ccccc", "ckckc", "ccccc"}, 0x5FCF65},
 }
 
 var mascotColors = map[byte]uint32{
-	'k': 0x0C0C10, // outline
-	'h': 0x3A3640, // hood
-	'f': 0x28252D, // folds in the cloak
-	'i': 0x1A191E, // inside the hood
+	'k': 0x0C0C0C, // outline
+	'h': 0x383838, // hood
+	'f': 0x262626, // folds in the cloak
+	'i': 0x1A1A1A, // inside the hood
 	'g': 0x5FCF65, // skin
 	'l': 0x8EEC8C, // spots and cheeks
 	'd': 0x3C8C42, // skin in the hood's shadow
-	'E': 0x161618, // eyes
+	'E': 0x161616, // eyes
 	'W': 0xFFFFFF, // eye highlights
 	'm': 0xE274AC, // tongue
-	'b': 0x62B2DA,
+	'b': inkOrange,
 	'y': 0xF0EA6E,
 	'p': 0xE678B0,
 }
 
-// Squid ink, the splash background, and the other colors as 0xRRGGBB.
-const (
-	inkBG     uint32 = 0x232F3E
-	inkOrange uint32 = 0xFF9900
-	inkText   uint32 = 0xE6EBEF
-	inkMuted  uint32 = 0x8D99A6
-	inkDim    uint32 = 0x5A6878
-	inkEyes   uint32 = 0x0C0C10
+// The splash background and the other colors as 0xRRGGBB, from the theme.
+var (
+	inkBG     = rgb(theme.Ink)
+	inkOrange = rgb(theme.Orange)
+	inkText   = rgb(theme.Text)
+	inkMuted  = rgb(theme.Gray)
+	inkDim    = rgb(theme.Faint)
 )
+
+const inkEyes uint32 = 0x0C0C0C
+
+// rgb is a theme color, "#RRGGBB", as 0xRRGGBB.
+func rgb(c lipgloss.Color) uint32 {
+	v, err := strconv.ParseUint(strings.TrimPrefix(string(c), "#"), 16, 32)
+	if err != nil {
+		panic("theme color " + string(c) + " is not #RRGGBB")
+	}
+	return uint32(v)
+}
 
 // ---------------------------------------------------------------- canvas
 
@@ -372,7 +383,7 @@ func drawMascot(c *canvas, x, y, s, f int) {
 	at(curlLeft, 0, wave(f, 10, 0))
 	at(curlLowLeft, wave(f, 10, 3), 0)
 	at(curlLowRight, -wave(f, 10, 6), 0)
-	at(puppetBlue, 0, wave(f, 8, 0))
+	at(puppetOrange, 0, wave(f, 8, 0))
 	at(puppetYellow, 0, wave(f, 8, 3))
 	at(puppetPink, 0, wave(f, 8, 6))
 }

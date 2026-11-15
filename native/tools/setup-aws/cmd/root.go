@@ -7,9 +7,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is the release this binary was built from, stamped by GoReleaser
+// (-X .../setup-aws/cmd.version, see .goreleaser.yaml); `go run .` says dev.
+var version = "dev"
+
 var rootCmd = &cobra.Command{
-	Use:   "setup-aws",
-	Short: "Provision the AWS resources Agent Substrate uses on Amazon EKS",
+	Use:     "setup-aws",
+	Version: version,
+	Short:   "Provision the AWS resources Agent Substrate uses on Amazon EKS",
 	Long: `setup-aws provisions the AWS resources Agent Substrate needs on Amazon EKS:
 the cluster and its network (create cluster); the snapshot and microVM asset
 buckets, the EKS Pod Identity roles of ate-api-server and atelet, and private

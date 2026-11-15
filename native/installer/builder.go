@@ -48,11 +48,18 @@ func (b builder) settings(keys []string) []string {
 	return out
 }
 
-// findSetupAWS returns native/tools/setup-aws, searched above cwd and the
+// findSetupAWS returns --setup-aws when given (a source directory or a
+// binary); else the setup-aws binary beside this executable, as a release
+// archive has it; else native/tools/setup-aws, searched above cwd and the
 // executable, like substrate-gke finds its tools/setup-gcp.
 func (b builder) findSetupAWS() string {
 	if b.setupAWS != "" {
 		return b.setupAWS
+	}
+	if b.exeDir != "" {
+		if bin := filepath.Join(b.exeDir, "setup-aws"); plugin.IsSetupAWSBinary(bin) {
+			return bin
+		}
 	}
 	for _, start := range []string{b.cwd, b.exeDir} {
 		for dir := start; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -91,13 +98,13 @@ func (b builder) env(s *state.Setup) []string {
 		"PLAN=false", "KEEP_CLUSTER=" + strconv.FormatBool(s.KeepCluster)}
 }
 
-// setupAWS is `go -C <setup-aws> run . <args>`, as substrate-gke runs
-// setup-gcp, with sim replayed under --dry-run. settings are the step
-// settings this subcommand reads (b.settings), shown and passed; env is
-// passed only.
+// setupAWSSpec runs setup-aws with args: the release's binary, or `go -C
+// <setup-aws> run .` from source (plugin.SetupAWSArgv), with sim replayed
+// under --dry-run. settings are the step settings this subcommand reads
+// (b.settings), shown and passed; env is passed only.
 func (b builder) setupAWSSpec(s *state.Setup, label string, settings, env []string, sim []string, args ...string) execx.Spec {
 	dir := b.findSetupAWS()
-	argv := append([]string{"go", "-C", dir, "run", "."}, args...)
+	argv := plugin.SetupAWSArgv(dir, args...)
 	var shown []string
 	// The step settings are shown too, so the pasted command runs the same
 	// step: setup-aws reads no config file.
@@ -106,7 +113,11 @@ func (b builder) setupAWSSpec(s *state.Setup, label string, settings, env []stri
 			shown = append(shown, k+"="+shellQuote(v))
 		}
 	}
-	shown = append(shown, "go", "-C", b.rel(dir), "run", ".")
+	if argv[0] == "go" {
+		shown = append(shown, "go", "-C", b.rel(dir), "run", ".")
+	} else {
+		shown = append(shown, b.rel(argv[0]))
+	}
 	return execx.Spec{
 		Label:    label,
 		Display:  strings.Join(append(shown, args...), " "),

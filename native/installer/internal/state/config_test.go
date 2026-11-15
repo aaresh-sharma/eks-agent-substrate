@@ -100,6 +100,56 @@ func TestConfigLookupOrder(t *testing.T) {
 	}
 }
 
+// FindConfig finds an extracted release archive (config.env beside the
+// setup-aws binary) from the directory itself and from below it, and still
+// finds a checkout; it finds neither from a directory with a config.env but
+// no setup-aws binary or source, nor from one whose setup-aws is a directory
+// without the source.
+func TestFindConfigFindsAReleaseAndACheckout(t *testing.T) {
+	none := func(string) (string, bool) { return "", false }
+	write := func(path, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := t.TempDir()
+	write(filepath.Join(release, "config.env"), configEnv)
+	write(filepath.Join(release, "setup-aws"), "binary")
+	write(filepath.Join(release, "substrate-eks"), "binary")
+	write(filepath.Join(release, "deploy", "eks", "components", "eks", "kustomization.yaml"), "kind: Component\n")
+	co := checkout(t, "")
+	for name, tc := range map[string]struct{ start, want string }{
+		"release":           {release, release},
+		"below the release": {filepath.Join(release, "deploy", "eks"), release},
+		"checkout":          {filepath.Join(co, "native", "installer"), co},
+	} {
+		c, err := FindConfig(none, tc.start)
+		if err != nil || c.Dir != tc.want {
+			t.Errorf("%s: Dir = %q, %v; want %q", name, c.Dir, err, tc.want)
+			continue
+		}
+		if v, _ := c.Lookup("KUBERNETES_VERSION"); v != "1.37" {
+			t.Errorf("%s: did not read its config.env: KUBERNETES_VERSION = %q", name, v)
+		}
+	}
+
+	unrelated := t.TempDir()
+	write(filepath.Join(unrelated, "config.env"), configEnv)
+	write(filepath.Join(unrelated, "substrate-eks"), "binary")
+	dirNotBinary := t.TempDir()
+	write(filepath.Join(dirNotBinary, "config.env"), configEnv)
+	write(filepath.Join(dirNotBinary, "setup-aws", "main.go"), "package main\n")
+	for name, start := range map[string]string{"unrelated": unrelated, "setup-aws is a directory": dirNotBinary} {
+		if c, err := FindConfig(none, start); err != nil || c.Dir != "" {
+			t.Errorf("%s: Dir = %q, %v; want none", name, c.Dir, err)
+		}
+	}
+}
+
 // config.local.env gets the changed keys and the deployment's own, keeps the
 // keys the wizard does not manage, is 0600, and a different earlier file is
 // backed up.

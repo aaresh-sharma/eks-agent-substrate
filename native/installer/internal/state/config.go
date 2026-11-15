@@ -155,7 +155,8 @@ func parseConfigFile(path string) (ConfigFile, error) {
 // the environment: Lookup answers the environment first, then
 // config.local.env, then config.env.
 type Config struct {
-	// Dir is the checkout; empty when the installer runs outside one, and
+	// Dir is the checkout, or the directory a release archive was
+	// extracted to; empty when the installer runs outside one, and
 	// then Lookup reads the environment alone and nothing is written.
 	Dir             string
 	Defaults, Local ConfigFile
@@ -163,13 +164,14 @@ type Config struct {
 	Env func(string) (string, bool)
 }
 
-// FindConfig returns the eks-talk checkout above any of starts: the first
-// directory with a config.env next to native/tools/setup-aws. It returns a
-// Config with no Dir when there is none.
+// FindConfig returns the eks-talk checkout or extracted release above any of
+// starts: the first directory with a config.env next to
+// native/tools/setup-aws (a checkout) or next to a setup-aws binary (a
+// release archive). It returns a Config with no Dir when there is none.
 func FindConfig(env func(string) (string, bool), starts ...string) (Config, error) {
 	for _, start := range starts {
 		for dir := start; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-			if _, err := os.Stat(filepath.Join(dir, "native", "tools", "setup-aws", "go.mod")); err != nil {
+			if !isCheckout(dir) && !isRelease(dir) {
 				continue
 			}
 			if _, err := os.Stat(filepath.Join(dir, "config.env")); err != nil {
@@ -179,6 +181,18 @@ func FindConfig(env func(string) (string, bool), starts ...string) (Config, erro
 		}
 	}
 	return Config{Env: env}, nil
+}
+
+func isCheckout(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "native", "tools", "setup-aws", "go.mod"))
+	return err == nil
+}
+
+// isRelease: the release archive's setup-aws is a file beside config.env,
+// the same test as plugin.IsSetupAWSBinary.
+func isRelease(dir string) bool {
+	fi, err := os.Stat(filepath.Join(dir, "setup-aws"))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // LoadConfig reads DIR/config.env and DIR/config.local.env.

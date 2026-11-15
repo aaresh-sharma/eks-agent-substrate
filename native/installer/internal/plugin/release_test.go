@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -52,7 +53,7 @@ func TestReadReleaseWithAndWithoutASource(t *testing.T) {
 	f := &fakeCluster{record: "fork"}
 	o := releaseFixture(t, f)
 	Register(Plugin{ID: "fork2", Order: 5, Needs: Needs{Source: &Source{Tag: "v9"}}})
-	if _, err := ReadRelease(context.Background(), io.Discard, o, []string{"fork2"}); err == nil || !strings.Contains(err.Error(), "two plugins replace") {
+	if _, err := ReadRelease(context.Background(), io.Discard, o, []string{"fork2"}); err == nil || !strings.Contains(err.Error(), "plugins fork and fork2 install two different Substrate releases") {
 		t.Errorf("two Sources: %v", err)
 	}
 }
@@ -91,6 +92,58 @@ func TestRunDeployOfAnUncarriedSourceNamesTheReinstall(t *testing.T) {
 	}
 	if len(f.log) != 0 {
 		t.Errorf("ran after a refusal: %q", f.log)
+	}
+}
+
+// Both ways: a plugin whose needs the recorded plugins' already include (the
+// same Source and gate, as mode3-iso's are mode3's) deploys on that control
+// plane though its own ID is not recorded, and is recorded; on a control
+// plane whose record carries no such Source it is still refused with the
+// reinstall, before anything runs.
+func TestRunDeployOfASourceTheRecordAlreadyCarries(t *testing.T) {
+	f := &fakeCluster{record: "base,fork"}
+	o := releaseFixture(t, f)
+	same := *testFork
+	Register(Plugin{ID: "fork-b", Order: 6, Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &same},
+		Deploy: hook(f, "deploy fork-b", nil), Verify: hook(f, "verify fork-b", nil)})
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"fork-b"}, o); err != nil {
+		t.Fatalf("carried: %v", err)
+	}
+	if !strings.Contains(strings.Join(f.log, "\n"), "deploy fork-b") || f.record != "base,fork,fork-b" {
+		t.Errorf("carried: log %q, record %q", f.log, f.record)
+	}
+
+	f = &fakeCluster{record: "base"}
+	o = releaseFixture(t, f)
+	Register(Plugin{ID: "fork-b", Order: 6, Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &same},
+		Deploy: hook(f, "deploy fork-b", nil)})
+	err := Run(context.Background(), io.Discard, ActionDeploy, []string{"fork-b"}, o)
+	if err == nil || !strings.Contains(err.Error(), "run --remove-control-plane, then install again with or without --plugins fork-b") || len(f.log) != 0 {
+		t.Errorf("not carried: %v, ran %q", err, f.log)
+	}
+
+	// The record carries the gate but another release: refused.
+	f = &fakeCluster{record: "base,fork"}
+	o = releaseFixture(t, f)
+	other := *testFork
+	other.Tag = "v1.0.0-other"
+	Register(Plugin{ID: "fork-b", Order: 6, Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &other},
+		Deploy: hook(f, "deploy fork-b", nil)})
+	err = Run(context.Background(), io.Discard, ActionDeploy, []string{"fork-b"}, o)
+	if err == nil || !strings.Contains(err.Error(), "plugin fork-b installs another Substrate release") || len(f.log) != 0 {
+		t.Errorf("another release: %v, ran %q", err, f.log)
+	}
+
+	// The same both ways for a gate-like need: top's ingress ID is carried
+	// once top is recorded; another one is not.
+	for id, carried := range map[string]bool{"spiffe://x": true, "spiffe://other": false} {
+		f = &fakeCluster{record: "base,top"}
+		o = releaseFixture(t, f)
+		Register(Plugin{ID: "ingress-b", Order: 7, Needs: Needs{IngressIDs: []string{id}}, Deploy: hook(f, "deploy ingress-b", nil)})
+		err := Run(context.Background(), io.Discard, ActionDeploy, []string{"ingress-b"}, o)
+		if carried && err != nil || !carried && (err == nil || !strings.Contains(err.Error(), "run --deploy-control-plane --plugins ingress-b first") || len(f.log) != 0) {
+			t.Errorf("ingress ID %s: %v, ran %q", id, err, f.log)
+		}
 	}
 }
 
@@ -219,5 +272,23 @@ func TestReinstallFix(t *testing.T) {
 	}
 	if got := ReinstallFix("v1.0.0", "v1.0.0-fork"); !strings.HasSuffix(got, "--plugins fork") {
 		t.Errorf("to the fork: %q", got)
+	}
+}
+
+// Both ways: with two plugins installing the fork (as mode3 and mode3-iso
+// do), the reinstall names both, in Order; SourceOf still gives the first,
+// and a release no plugin installs names none.
+func TestReinstallFixNamesEveryPluginOfTheRelease(t *testing.T) {
+	releaseFixture(t, &fakeCluster{})
+	same := *testFork
+	Register(Plugin{ID: "fork-b", Order: 6, Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &same}})
+	if got := ReinstallFix("v1.0.0-fork", "v1.0.0"); !strings.HasSuffix(got, "with or without --plugins fork or fork-b") {
+		t.Errorf("two plugins: %q", got)
+	}
+	if got := SourcesOf("v1.0.0-fork"); !slices.Equal(got, []string{"fork", "fork-b"}) || SourceOf("v1.0.0-fork") != "fork" {
+		t.Errorf("SourcesOf = %q, SourceOf = %q", got, SourceOf("v1.0.0-fork"))
+	}
+	if got := SourcesOf("v1.0.0"); len(got) != 0 {
+		t.Errorf("SourcesOf(v1.0.0) = %q", got)
 	}
 }

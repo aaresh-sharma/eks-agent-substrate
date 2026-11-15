@@ -71,6 +71,60 @@ clones the repository first. `install.sh` only builds the installer and
 starts it; every AWS and Kubernetes call is made by the installer. A default
 install takes about 30 minutes; with the demo and plugins, about an hour.
 
+### Two ways to run it
+
+**From source** (the default, as above): clone the repository and let
+`install.sh` build the installer. Needs `git`, `make` and Go 1.27 or newer.
+
+```bash
+git clone https://github.com/csantanapr/eks-agent-substrate.git
+cd eks-agent-substrate
+./native/install.sh --dry-run
+```
+
+**From a release**: download the pre-built installer for your OS (`linux`
+or `darwin`) and CPU (`amd64` or `arm64`) from
+[GitHub Releases](https://github.com/csantanapr/eks-agent-substrate/releases),
+check its sha256 against the release's `checksums.txt`, extract it anywhere
+and run it. `install.sh --from-release [vX.Y.Z]` (the latest release when no
+version is given) does all of that, refuses an archive whose sha256 does not
+match, and extracts it to `~/.substrate-eks-releases/<version>`
+(`SUBSTRATE_EKS_RELEASES` moves it). Settings saves your answers in that
+version's directory, so a new version starts from the defaults again:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csantanapr/eks-agent-substrate/main/native/install.sh | bash -s -- --from-release v2.0.0 --dry-run
+```
+
+Or by hand, here for Linux on x86_64:
+
+```bash
+VERSION=v2.0.0 OS=linux ARCH=amd64
+ARCHIVE="substrate-eks_${VERSION#v}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/csantanapr/eks-agent-substrate/releases/download/${VERSION}/${ARCHIVE}"
+curl -fsSLO "https://github.com/csantanapr/eks-agent-substrate/releases/download/${VERSION}/checksums.txt"
+grep "  ${ARCHIVE}\$" checksums.txt | sha256sum -c      # macOS: shasum -a 256 -c
+gh attestation verify "${ARCHIVE}" --repo csantanapr/eks-agent-substrate  # optional: built by this repository's release workflow
+mkdir substrate-eks && tar -xzf "${ARCHIVE}" -C substrate-eks
+cd substrate-eks
+./substrate-eks --version
+./substrate-eks --dry-run
+```
+
+The archive holds `substrate-eks`, `setup-aws` (which the installer runs
+from beside itself instead of `go run`), `config.env`, `deploy/eks`,
+`LICENSE` and this README. Settings writes `config.local.env` beside them.
+
+Either way, a real install needs Go 1.27 or newer. The release skips
+building the installer and `go run` of setup-aws, and `--dry-run` needs no
+Go, but the steps that build from the Agent Substrate release tree the
+installer fetches still run Go: the control plane (`go run ./cmd/ate-setup`),
+the counter demo, and the plugins that build an image or `kubectl-ate`
+(credprovider-aws, db-rotation, efs and so s3files and openclaw, which
+require it, mode3 and mode3-iso). The installer's preflight check refuses an older Go and
+says why. `git`, `kubectl` and the AWS CLI are still needed too
+([Prerequisites](#prerequisites)).
+
 The wizard checks your tools and credentials, then lists the EKS clusters in
 the Region, with a badge for each one that already runs Substrate. Pick one,
 or create a new one:
@@ -121,9 +175,11 @@ flag and make target.
   profile in `BEDROCK_INFERENCE_PROFILE`, plus active Claude Haiku, Sonnet and
   Opus profiles with the same prefix. For Anthropic models, submit the
   Bedrock first-time-use form once per account.
-- On your machine: `git`, `go` 1.27+, `make`, the AWS CLI v2 (kubectl's token
-  plugin and the microVM asset upload use it) and `kubectl`. Images are built
-  in Go, without Docker. `make -C native doctor` checks them and your
+- On your machine: `git`, `go` 1.27+, `make` (only to build the installer
+  from source; see [Two ways to run it](#two-ways-to-run-it)), the AWS CLI v2
+  (kubectl's token plugin and the microVM asset upload use it) and
+  `kubectl`. Images are built in Go, without Docker. `make -C native doctor`
+  (or `./substrate-eks --doctor` from a release) checks them and your
   credentials.
 
 ## Configure
@@ -190,7 +246,7 @@ keeps them.
 | `db-rotation` | Secrets Manager login rotation | Rotates the two RDS logins with alternating users; External Secrets syncs them and the ESO Reloader rolls ate-api-server. Needs the RDS database. |
 | `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs`; its public images are pinned by digest. |
 | `mode3` | Mode 3 on Kata | Worker Pods are Kata microVMs on the microvm nodes, with gVisor actors inside. |
-| `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs `mode3` and Auto Mode. |
+| `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode. |
 
 Each one also runs on its own, on an installed cluster. A plugin that
 changes the control plane (`efs`, `s3files`, `credprovider-aws`, `openclaw`,
@@ -307,7 +363,7 @@ keeps a mode 3 worker's actors on a tmpfs in the guest, so the pool gets
 
 `mode3-iso` runs the same worker Pods under RuntimeClass `isolated-sandbox`,
 which EKS Auto Mode ships: each Pod runs in its own sandbox with its own guest
-kernel, on a node Auto Mode launches for it. It needs Auto Mode and `mode3`.
+kernel, on a node Auto Mode launches for it. It needs Auto Mode.
 
 | Piece | What it does |
 |---|---|

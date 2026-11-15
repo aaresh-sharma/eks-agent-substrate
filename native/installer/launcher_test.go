@@ -1,12 +1,19 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -247,6 +254,242 @@ func TestLauncherChecksTheGoVersion(t *testing.T) {
 		}
 		if warned := strings.Contains(out, "could not read the Go version"); warned != (c.version == "") {
 			t.Errorf("%s: unreadable-version warning shown = %v:\n%s", name, warned, out)
+		}
+	}
+}
+
+// fakeCurl serves FAKE_RELEASE as GitHub Releases would: it writes the file
+// the URL's last element names to the -o path and fails as curl -f does when
+// there is none. It answers the latest-release lookup (-w) with FAKE_LATEST,
+// logs every URL to FAKE_CURL_LOG, and refuses a call without
+// --proto =https and --proto-redir =https.
+const fakeCurl = `#!/bin/sh
+out="" url="" w="" proto=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -w) w="$2"; shift ;;
+    --proto|--proto-redir)
+      [ "$2" = '=https' ] || { echo "fake curl: $1 $2" >&2; exit 2; }
+      proto=$((proto + 1)); shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+[ "$proto" = 2 ] || { echo "fake curl: not https-only: $url" >&2; exit 2; }
+echo "$url" >> "$FAKE_CURL_LOG"
+if [ -n "$w" ]; then printf '%s' "$FAKE_LATEST"; exit 0; fi
+src="$FAKE_RELEASE/${url##*/}"
+[ -f "$src" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+cat "$src" > "$out"
+`
+
+// fakeUname answers -s and -m with FAKE_UNAME_S and FAKE_UNAME_M.
+const fakeUname = `#!/bin/sh
+case "$1" in -s) echo "$FAKE_UNAME_S" ;; -m) echo "$FAKE_UNAME_M" ;; *) exit 2 ;; esac
+`
+
+// fakeInstaller is the archive's substrate-eks: it writes its arguments to
+// FAKE_ARGS, one a line.
+const fakeInstaller = `#!/bin/sh
+for a; do printf '%s\n' "$a"; done > "$FAKE_ARGS"
+`
+
+// releaseArchive is a tar.gz holding the fake installer as substrate-eks.
+func releaseArchive(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range map[string]string{"substrate-eks": fakeInstaller, "README.md": "# release\n"} {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(tw, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// install.sh --from-release, with a fake curl serving a local release and
+// no git, make or go on PATH: it downloads the archive for this OS and CPU
+// (the latest when no version is named), extracts it once its sha256 matches
+// checksums.txt, and execs its substrate-eks with the arguments after
+// --from-release and the version; a wrong checksum, a missing checksum line
+// and a tag that is not one are refused before anything is extracted.
+func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil || runtime.GOOS == "windows" {
+		t.Skip("needs bash and a POSIX /bin/sh")
+	}
+	script, err := filepath.Abs("../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]string{}
+	for _, name := range []string{"tar", "awk", "mktemp", "rm", "rmdir", "mkdir", "cat", "gzip", "sha256sum", "shasum"} {
+		if p, err := exec.LookPath(name); err == nil {
+			tools[name] = p
+		} else if name != "gzip" && name != "sha256sum" && name != "shasum" {
+			t.Skipf("needs %s", name)
+		}
+	}
+	if tools["sha256sum"] == "" && tools["shasum"] == "" {
+		t.Skip("needs sha256sum or shasum")
+	}
+
+	const base = "https://github.com/csantanapr/eks-agent-substrate/releases"
+	archive := releaseArchive(t)
+	sum := sha256.Sum256(archive)
+	good := hex.EncodeToString(sum[:])
+	wrong := strings.Repeat("0", 64)
+	names := []string{"substrate-eks_9.8.7_linux_amd64.tar.gz", "substrate-eks_9.8.7_linux_arm64.tar.gz", "substrate-eks_9.8.7_darwin_arm64.tar.gz",
+		"substrate-eks_9.8.7-SNAPSHOT-abc1234_linux_amd64.tar.gz"}
+	sums := func(skip, bad string) string {
+		var b strings.Builder
+		for _, n := range names {
+			switch n {
+			case skip:
+			case bad:
+				fmt.Fprintf(&b, "%s  %s\n", wrong, n)
+			default:
+				fmt.Fprintf(&b, "%s  %s\n", good, n)
+			}
+		}
+		return b.String()
+	}
+
+	for _, c := range []struct {
+		name, unameS, unameM, checksums string
+		args                            []string
+		tag                             string   // the release it uses; "" is v9.8.7
+		archive                         string   // the one it must download
+		latest                          bool     // it looks up the latest release first
+		passed                          []string // the installer's arguments
+		refusal                         string   // "" for a run that execs the installer
+	}{
+		{name: "named version", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args: []string{"--from-release", "v9.8.7", "--dry-run", "--region", "us-east-1"}, archive: names[0],
+			passed: []string{"--dry-run", "--region", "us-east-1"}},
+		{name: "latest", unameS: "Darwin", unameM: "arm64", checksums: sums("", ""),
+			args: []string{"--from-release", "--dry-run"}, archive: names[2], latest: true, passed: []string{"--dry-run"}},
+		{name: "aarch64, no installer flags", unameS: "Linux", unameM: "aarch64", checksums: sums("", ""),
+			args: []string{"--from-release", "v9.8.7"}, archive: names[1], passed: nil},
+		{name: "pre-release tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args: []string{"--from-release", "v9.8.7-SNAPSHOT-abc1234", "--version"}, tag: "v9.8.7-SNAPSHOT-abc1234",
+			archive: names[3], passed: []string{"--version"}},
+		{name: "wrong checksum", unameS: "Linux", unameM: "x86_64", checksums: sums("", names[0]),
+			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
+			refusal: "has sha256 " + good + ", but the v9.8.7 checksums.txt says " + wrong + "; refusing it"},
+		{name: "no checksum line", unameS: "Linux", unameM: "x86_64", checksums: sums(names[0], ""),
+			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
+			refusal: "checksums.txt has no sha256 line for " + names[0] + "; refusing it"},
+		{name: "not a tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args:    []string{"--from-release", "9.8.7/../x", "--dry-run"},
+			refusal: "'9.8.7/../x' is not a substrate-eks release tag"},
+	} {
+		dir := t.TempDir()
+		bin, release, home, tmp := filepath.Join(dir, "bin"), filepath.Join(dir, "release"), filepath.Join(dir, "home"), filepath.Join(dir, "tmp")
+		for _, d := range []string{bin, release, home, tmp} {
+			if err := os.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, body := range map[string]string{"curl": fakeCurl, "uname": fakeUname} {
+			if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for tool, p := range tools {
+			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(release, n), archive, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(release, "checksums.txt"), []byte(c.checksums), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		curlLog, argsOut := filepath.Join(dir, "curl.log"), filepath.Join(dir, "args")
+
+		cmd := exec.Command(bash, append([]string{script}, c.args...)...)
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=" + bin, "HOME=" + home, "TMPDIR=" + tmp,
+			"FAKE_RELEASE=" + release, "FAKE_CURL_LOG=" + curlLog, "FAKE_ARGS=" + argsOut,
+			"FAKE_LATEST=" + base + "/tag/v9.8.7", "FAKE_UNAME_S=" + c.unameS, "FAKE_UNAME_M=" + c.unameM}
+		b, runErr := cmd.CombinedOutput()
+		out := string(b)
+
+		tag := c.tag
+		if tag == "" {
+			tag = "v9.8.7"
+		}
+		// Releases go beside the source mode's clone directory, never in it:
+		// git refuses to clone into a non-empty ~/.substrate-eks.
+		releases := filepath.Join(home, ".substrate-eks-releases")
+		extracted := filepath.Join(releases, tag)
+		if _, err := os.Stat(filepath.Join(home, ".substrate-eks")); err == nil {
+			t.Errorf("%s: the release mode wrote into ~/.substrate-eks, where the source mode clones", c.name)
+		}
+		_, statErr := os.Stat(filepath.Join(extracted, "substrate-eks"))
+		passed, argsErr := os.ReadFile(argsOut)
+		logged, _ := os.ReadFile(curlLog)
+		var urls []string
+		if s := strings.TrimSpace(string(logged)); s != "" {
+			urls = strings.Split(s, "\n")
+		}
+		left, _ := os.ReadDir(tmp)
+		if len(left) != 0 {
+			t.Errorf("%s: downloads left in TMPDIR: %v", c.name, left)
+		}
+
+		var wantURLs []string
+		if c.latest {
+			wantURLs = append(wantURLs, base+"/latest")
+		}
+		if c.archive != "" {
+			wantURLs = append(wantURLs, base+"/download/"+tag+"/"+c.archive, base+"/download/"+tag+"/checksums.txt")
+		}
+		if !slices.Equal(urls, wantURLs) {
+			t.Errorf("%s: downloaded %q, want %q\n%s", c.name, urls, wantURLs, out)
+		}
+
+		if c.refusal != "" {
+			if runErr == nil || !strings.Contains(out, c.refusal) {
+				t.Errorf("%s: want the refusal %q:\n%s", c.name, c.refusal, out)
+			}
+			if _, err := os.Stat(releases); err == nil {
+				t.Errorf("%s: made %s after a refusal", c.name, releases)
+			}
+			if argsErr == nil {
+				t.Errorf("%s: ran the installer after a refusal (args %q)", c.name, passed)
+			}
+			continue
+		}
+		if runErr != nil || statErr != nil || argsErr != nil {
+			t.Errorf("%s: exit %v, extracted %v, installer ran %v:\n%s", c.name, runErr, statErr, argsErr, out)
+			continue
+		}
+		var got []string
+		if s := strings.TrimSuffix(string(passed), "\n"); s != "" {
+			got = strings.Split(s, "\n")
+		}
+		if !slices.Equal(got, c.passed) {
+			t.Errorf("%s: the installer got %q, want %q (no --from-release, no version)", c.name, got, c.passed)
+		}
+		if !strings.Contains(out, "sha256 matches checksums.txt: "+good) {
+			t.Errorf("%s: no checksum line:\n%s", c.name, out)
 		}
 	}
 }

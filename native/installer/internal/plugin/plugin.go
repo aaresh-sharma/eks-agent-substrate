@@ -101,7 +101,7 @@ func (n Needs) Release(tag, imageRepo string) Release {
 }
 
 // ReleaseOf is the release of an install carrying ps, the chosen and the
-// recorded plugins alike: the Source of the one plugin that sets one, else
+// recorded plugins alike: the Source the plugins that set one share, else
 // the --tag release (tag, imageRepo).
 func ReleaseOf(ps []Plugin, tag, imageRepo string) (Release, error) {
 	n, err := Merge(ps)
@@ -114,7 +114,7 @@ func ReleaseOf(ps []Plugin, tag, imageRepo string) (Release, error) {
 // ChosenRelease is ReleaseOf the plugins ids resolve to, for the wizard,
 // which shows it and passes the steps the --tag, --image-repo and --plugins
 // that decide it. IDs that do not resolve keep the --tag release: the wizard
-// offers only registered plugins, one Source among them.
+// offers only registered plugins, whose Sources are all one release.
 func ChosenRelease(ids []string, tag, imageRepo string) Release {
 	ps, err := Resolve(ids)
 	if err == nil {
@@ -125,15 +125,25 @@ func ChosenRelease(ids []string, tag, imageRepo string) Release {
 	return Needs{}.Release(tag, imageRepo)
 }
 
-// SourceOf is the plugin whose Source installs release tag, or "" when no
-// registered plugin's does (or tag is empty).
+// SourceOf is the first plugin (by Order) whose Source installs release tag,
+// or "" when no registered plugin's does (or tag is empty).
 func SourceOf(tag string) string {
-	for _, p := range All() {
-		if s := p.Needs.Source; s != nil && tag != "" && s.Tag == tag {
-			return p.ID
-		}
+	if ids := SourcesOf(tag); len(ids) > 0 {
+		return ids[0]
 	}
 	return ""
+}
+
+// SourcesOf is every plugin whose Source installs release tag, by Order
+// (mode3 and mode3-iso both install the fork).
+func SourcesOf(tag string) []string {
+	var ids []string
+	for _, p := range All() {
+		if s := p.Needs.Source; s != nil && tag != "" && s.Tag == tag {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
 }
 
 // RunningRelease is the release o's control plane runs, located like o's,
@@ -163,12 +173,13 @@ func ReleaseFix(id string) string {
 }
 
 // ReinstallFix is ReleaseFix for a control plane that runs release have
-// where the install's release is want: with or without the plugin whose
-// Source is one of the two, else at want's tag.
+// where the install's release is want: with or without the plugins whose
+// Source is one of the two (each one named, so an install with mode3-iso
+// alone is not told about mode3 only), else at want's tag.
 func ReinstallFix(have, want string) string {
 	for _, tag := range []string{have, want} {
-		if id := SourceOf(tag); id != "" {
-			return ReleaseFix(id)
+		if ids := SourcesOf(tag); len(ids) > 0 {
+			return ReleaseFix(strings.Join(ids, " or "))
 		}
 	}
 	return "run --remove-control-plane, then install again with --tag " + want
@@ -184,7 +195,8 @@ type Needs struct {
 	// IngressIDs are SPIFFE IDs the ingress router admits, beyond
 	// spiffe://cluster.local/ns/ate-system/sa/atenet-client.
 	IngressIDs []string
-	// Source, when set, replaces the release. At most one plugin may set it.
+	// Source, when set, replaces the release. Plugins installed together
+	// must set the same one, or none (Merge).
 	Source *Source
 }
 
@@ -212,8 +224,9 @@ type Options struct {
 	// (awsx.KubeconfigPath), already written by the caller; its current
 	// context is the cluster. Use Kubectl, which passes it.
 	Kubeconfig string
-	// SetupAWS is native/tools/setup-aws; Run runs `setup-aws plugin <id>`
-	// from it for a plugin with SetupAWS set.
+	// SetupAWS is native/tools/setup-aws, or a release's setup-aws binary
+	// (SetupAWSArgv); Run runs `setup-aws plugin <id>` from it for a plugin
+	// with SetupAWS set.
 	SetupAWS string
 	// Tags is TAGS: space-separated key=value pairs every AWS resource gets
 	// besides the owner tag (OwnerTags adds it).
@@ -441,20 +454,24 @@ func Resolve(ids []string) ([]Plugin, error) {
 	return out, nil
 }
 
-// Merge is the union of ps' needs, each list sorted and without repeats. Two
-// plugins that set a Source are an error.
+// Merge is the union of ps' needs, each list sorted and without repeats.
+// Plugins may set the same Source (mode3 and mode3-iso both install the
+// fork); two different Sources are an error naming both plugins.
 func Merge(ps []Plugin) (Needs, error) {
 	var n Needs
+	from := ""
 	for _, p := range ps {
 		n.Preview = append(n.Preview, p.Needs.Preview...)
 		n.CredentialProviders = append(n.CredentialProviders, p.Needs.CredentialProviders...)
 		n.IngressIDs = append(n.IngressIDs, p.Needs.IngressIDs...)
-		if p.Needs.Source != nil {
-			if n.Source != nil {
-				return Needs{}, fmt.Errorf("two plugins replace the Substrate release; choose one (%s)", p.ID)
-			}
-			s := *p.Needs.Source
-			n.Source = &s
+		switch s := p.Needs.Source; {
+		case s == nil:
+		case n.Source == nil:
+			c := *s
+			n.Source, from = &c, p.ID
+		case *n.Source != *s:
+			return Needs{}, fmt.Errorf("plugins %s and %s install two different Substrate releases (%s and %s); choose one",
+				from, p.ID, n.Source.Tag, s.Tag)
 		}
 	}
 	for _, l := range []*[]string{&n.Preview, &n.CredentialProviders, &n.IngressIDs} {

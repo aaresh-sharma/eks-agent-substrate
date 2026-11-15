@@ -5,7 +5,8 @@
 //
 //   - Needs: the control plane installs the fork's pinned commit with its
 //     images (ghcr.io/csantanapr/substrate) and the NetworkWorkers preview
-//     gate, so atelet reaches a worker over the Pod network.
+//     gate, so atelet reaches a worker over the Pod network. mode3-iso, which
+//     installs no Kata, declares the same Needs.
 //   - Deploy: Kata 3.32.0 from kata-deploy's own manifests (kata-deploy.yaml)
 //     on the microvm node group, then the counter pool counter-mode3
 //     (counter-mode3*.yaml) with RuntimeClass kata, its counter image built
@@ -56,8 +57,17 @@ const (
 	CounterTag = ID + "-" + Tag
 )
 
+// Needs is what a mode 3 control plane carries: the fork's pinned commit
+// with its images, and the NetworkWorkers gate. mode3-iso declares the same
+// Needs, so either one installs the fork, and the two merge into one release
+// (plugin.Merge).
+var Needs = plugin.Needs{
+	Preview: []string{Preview},
+	Source:  &plugin.Source{Repo: Repo, Commit: Commit, Tag: Tag, ImageRepo: ImageRepo},
+}
+
 // Order places mode 3 after the plugins that only add volumes or providers;
-// mode3-iso, which requires it, comes right after.
+// mode3-iso comes right after, so the two are listed together.
 const Order = 70
 
 var (
@@ -71,6 +81,7 @@ var (
 
 // Kata is the mode 3 counter pool on the microvm node group.
 var Kata = Counter{
+	Plugin:    ID,
 	Namespace: "ate-demo-counter-mode3", Name: "counter-mode3",
 	Actor: "demo-mode3", DeleteActor: "demo-mode3-delete",
 	RuntimeClass: "kata", NodeLabels: map[string]string{"ate.dev/pool": "microvm"},
@@ -85,10 +96,7 @@ func init() {
 			"so an escape from gVisor lands in the guest kernel. Installs Substrate from csantanapr/substrate " +
 			"(" + Tag + "), Kata 3.32.0 with kata-deploy, and a counter pool on RuntimeClass kata that it checks.",
 		Order: Order, Minutes: 12,
-		Needs: plugin.Needs{
-			Preview: []string{Preview},
-			Source:  &plugin.Source{Repo: Repo, Commit: Commit, Tag: Tag, ImageRepo: ImageRepo},
-		},
+		Needs: Needs,
 		// Kata and the counter pool run on the microvm node group, which a
 		// new cluster gets for mode 3 even without the microvm class.
 		Nodes: []string{"microvm"}, AddsNodes: true,
@@ -107,7 +115,7 @@ const (
 )
 
 func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
-	tree, err := Tree(o)
+	tree, err := Tree(o, ID)
 	if err != nil {
 		return err
 	}
@@ -170,7 +178,7 @@ func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := plugin.Kubectl(ctx, w, o, kataManifest, nil, "delete", "-f", "-", "--ignore-not-found", "--wait=true"); err != nil {
 		return err
 	}
-	if err := deleteCounterImage(ctx, w, o); err != nil {
+	if err := DeleteCounterImage(ctx, w, o, CounterTag); err != nil {
 		return err
 	}
 	fmt.Fprintln(w, RemovedNote)

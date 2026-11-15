@@ -152,7 +152,7 @@ func TestDeploysAreRefusedOnAnotherRelease(t *testing.T) {
 	for _, args := range [][]string{{"--deploy-demo"}, {"--deploy-demo", "--verify"}, {"--plugin-action", "deploy", "--plugins", "llm-gateway"}} {
 		err, out := runMain(t, answers, args...)
 		if err == nil || !strings.Contains(out, "runs Substrate "+mode3.Tag+", not v1.0.0") ||
-			!strings.Contains(out, "run --remove-control-plane, then install again with or without --plugins mode3") ||
+			!strings.Contains(out, "run --remove-control-plane, then install again with or without --plugins mode3 or mode3-iso") ||
 			strings.Contains(out, "no substrate") || strings.Contains(out, "Deploying plugin") {
 			t.Errorf("%v: %v\n%s", args, err, out)
 		}
@@ -174,7 +174,7 @@ func TestPluginRemovalOnAnotherReleaseGivesTheReinstall(t *testing.T) {
 	for _, tc := range []struct {
 		installed, tag, want, not string
 	}{
-		{mode3.Tag, "v1.0.0", "so a control plane deploy is refused: to drop them, run --remove-control-plane, then install again with or without --plugins mode3",
+		{mode3.Tag, "v1.0.0", "so a control plane deploy is refused: to drop them, run --remove-control-plane, then install again with or without --plugins mode3 or mode3-iso",
 			"run --deploy-control-plane again"},
 		{"v1.0.0", "v1.0.0", "run --deploy-control-plane again to drop them", "run --remove-control-plane"},
 		{"v1.0.0", "v1.0.1", "so a control plane deploy is refused: to drop them, run --remove-control-plane, then install again with --tag v1.0.1",

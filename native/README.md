@@ -60,6 +60,59 @@ curl -fsSL https://raw.githubusercontent.com/csantanapr/eks-agent-substrate/main
 `install.sh` only fetches, builds and starts the installer. Every AWS and
 Kubernetes call is made by the installer.
 
+### Two ways to run it
+
+From source, the default: `install.sh` (or `make build`) builds
+`bin/substrate-eks` from this checkout, and the installer runs setup-aws
+with `go -C tools/setup-aws run .`. Needs `git`, `make` and Go 1.27+.
+
+```bash
+./native/install.sh --dry-run
+```
+
+From a release: `.goreleaser.yaml` builds one archive per OS (`linux`,
+`darwin`) and CPU (`amd64`, `arm64`) for each `v*` tag, with
+`checksums.txt` and a build provenance attestation
+(`.github/workflows/release.yaml`). The archive holds `substrate-eks`,
+`setup-aws`, `config.env`, `deploy/eks`, `LICENSE` and `README.md`; extract
+it anywhere and run `./substrate-eks`, which finds `config.env` and
+`deploy/eks` beside itself and runs the `setup-aws` binary beside it (or the
+one `--setup-aws` names) instead of `go run`. `install.sh --from-release
+[vX.Y.Z]` downloads the archive for `uname -s`/`uname -m` (the latest
+release with no version), refuses it unless its sha256 matches
+`checksums.txt`, extracts it to `~/.substrate-eks-releases/<version>`
+(`SUBSTRATE_EKS_RELEASES` moves it; it is kept apart from `~/.substrate-eks`,
+where the source mode clones) and starts it with the remaining flags:
+
+```bash
+./native/install.sh --from-release v2.0.0 --dry-run
+curl -fsSL https://raw.githubusercontent.com/csantanapr/eks-agent-substrate/main/native/install.sh | bash -s -- --from-release
+```
+
+By hand, for Linux on x86_64 (`darwin`, `arm64` for an Apple silicon Mac):
+
+```bash
+VERSION=v2.0.0 OS=linux ARCH=amd64
+ARCHIVE="substrate-eks_${VERSION#v}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/csantanapr/eks-agent-substrate/releases/download/${VERSION}/${ARCHIVE}"
+curl -fsSLO "https://github.com/csantanapr/eks-agent-substrate/releases/download/${VERSION}/checksums.txt"
+grep "  ${ARCHIVE}\$" checksums.txt | sha256sum -c      # macOS: shasum -a 256 -c
+mkdir substrate-eks && tar -xzf "${ARCHIVE}" -C substrate-eks
+./substrate-eks/substrate-eks --version
+```
+
+Go: a `--dry-run` needs none, but a real install from either one needs Go
+1.27+, because the steps that build from the fetched Agent Substrate tree
+run Go: the control plane (`go run ./cmd/ate-setup`), the counter demo, and
+the credprovider-aws, db-rotation, efs (and so s3files and openclaw),
+mode3 and mode3-iso plugins, which build an image or `kubectl-ate`. The
+preflight check (`--doctor`, and the wizard's Check your setup) refuses an
+older Go and says why.
+
+`goreleaser check` and `goreleaser release --snapshot --clean` (into the
+gitignored `dist/`) build the archives locally and publish nothing; a
+release is published only by pushing a `v*` tag.
+
 Or use the Makefile in `native/`:
 
 ```bash
@@ -119,8 +172,10 @@ rds`, whose command on the Review screen shows them. The installer's
 `--plugin-action` and `--remove-control-plane` read `BEDROCK_INFERENCE_PROFILE`,
 `EFS_ADDON_VERSION`, the `OPENCLAW_*` images and workers and `WHATSAPP_PEER`
 from the files themselves (an exported value wins), so no command, screen or
-log line carries them (`WHATSAPP_PEER` is a phone number). Outside a checkout
-it uses built-in defaults and writes nothing.
+log line carries them (`WHATSAPP_PEER` is a phone number). From an extracted
+release it reads the archive's `config.env` and writes `config.local.env`
+beside it. Outside a checkout or a release it uses built-in defaults and
+writes nothing.
 
 Press `s` on any screen (`ctrl+s` where you type text) to save it as `.ansi`,
 `.txt` and `.html` under `--snapshot-dir` (default
@@ -147,6 +202,7 @@ the notes printed on exit.
 | `--snapshot-dir` | `~/.cache/substrate-eks/snapshots` | Where `s` saves the screen. |
 | `--redact` | off | Mask account ids, ARNs, bucket names and phone numbers in full. |
 | `--log` | `~/.cache/substrate-eks/logs/installer-<time>.log` | The log of every command and its output (mode 0600). |
+| `--version` | off | Print the installer's version (the release's, or `dev` from source) and exit. |
 
 The steps the wizard runs are subcommands of the same binary, so each one
 also runs on its own: `--deploy-control-plane`, `--deploy-demo`, `--verify`,
@@ -175,7 +231,7 @@ control plane deploy keeps their needs.
 | `db-rotation` | the RDS database | Secrets Manager rotation of the two RDS logins, synced by External Secrets, with the ESO Reloader rolling ate-api-server |
 | `openclaw` | `efs` | an always-on OpenClaw gateway; each conversation's agent is an actor. Its public images are pinned by digest; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE` and `OPENCLAW_DASHBOARD_IMAGE` replace them, pinned by digest too. The gateway UI asks for the gateway token, key `gateway-token` of Secret `openclaw/openclaw-secrets`; the deploy prints the command that reads it. With `llm-gateway` installed, it adds NetworkPolicy `llm-gateway/llm-gateway-from-openclaw`, which admits the gateway's pods (no other openclaw pod) to the LLM gateway, so the gateway's own agent (the gateway UI's chat) gets a model; deploy openclaw again after adding llm-gateway |
 | `mode3` | | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
-| `mode3-iso` | `mode3`, EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
+| `mode3-iso` | EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
 
 On an installed cluster:
 
@@ -298,7 +354,7 @@ CloudFormation stacks, so teardown leaves it: run `setup-aws teardown
 | `installer/` (Bubble Tea) | `installer/` | the wizard |
 | `internal/state` | `internal/state` | the step machine (code kept identical) and the answers |
 | `internal/execx` | `internal/execx` | runs a command argv and streams its output; `--dry-run` replays (copied verbatim) |
-| `internal/theme` | `internal/theme` | colours and glyphs (copied verbatim) |
+| `internal/theme` | `internal/theme` | colours and glyphs (adapted: Amazon orange in place of the blues; glyphs and styles unchanged) |
 | `internal/steps` | `internal/steps` | live checklists keyed off output lines, with titles from `setup-aws/phases` |
 | `internal/doctor` | `internal/doctor` | preflight checks with fixes |
 | `internal/gcp` | `internal/awsx` | read-only AWS view (identity, clusters) through the SDK, and the installer's own kubeconfig |

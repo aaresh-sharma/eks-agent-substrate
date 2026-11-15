@@ -58,6 +58,35 @@ func TestCounterImageBuildsAndPushesLikeDeploy(t *testing.T) {
 	}
 }
 
+// Both ways: CounterImageFor builds for the architecture it is given, not
+// the nodes' (here the nodes are amd64 and it is asked for arm64, then
+// amd64), reads no node, and pushes under the caller's tag.
+func TestCounterImageForBuildsForTheGivenArch(t *testing.T) {
+	_, tree := testTree(t)
+	o := testOptions(t.TempDir())
+	for _, arch := range []string{"arm64", "amd64"} {
+		f := newFake(t)
+		useFake(t, f)
+		ref, err := CounterImageFor(context.Background(), io.Discard, o, tree, arch, "mode3-iso-v1.0.0-mode3.abc1234")
+		if err != nil || ref != testCounter {
+			t.Fatalf("%s: CounterImageFor = %q, %v", arch, ref, err)
+		}
+		if want := []string{"counter|" + testBase + "|" + arch + "|c1/counter|mode3-iso-v1.0.0-mode3.abc1234"}; !slices.Equal(f.pushed, want) {
+			t.Errorf("%s: pushed %q, want %q", arch, f.pushed, want)
+		}
+		var build bool
+		for _, c := range f.calls {
+			if c.argv[0] == "kubectl" {
+				t.Errorf("%s: read the cluster: %q", arch, c.argv)
+			}
+			build = build || (slices.Contains(c.argv, "./demos/counter") && c.dir == tree && slices.Contains(c.env, "GOARCH="+arch))
+		}
+		if !build {
+			t.Errorf("%s: no build in the tree for %s: %+v", arch, arch, f.calls)
+		}
+	}
+}
+
 // Pin, KubectlAte and Ate run what Deploy and Verify run.
 func TestPinKubectlAteAndAte(t *testing.T) {
 	_, tree := testTree(t)

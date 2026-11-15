@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,17 +84,17 @@ func argvRelease(t *testing.T, argv []string) plugin.Release {
 	return r
 }
 
-// Both ways: with mode3 chosen, every step that installs or uses the release
-// (the control plane, the demo, its check and the plugins) carries the fork's
-// release from the first of them, and the control plane step says so; without
-// it, each carries v1.0.0. The control plane removal is left out: it reads the
+// Both ways: with mode3 or mode3-iso chosen (alone or together), every step
+// that installs or uses the release (the control plane, the demo, its check
+// and the plugins) carries the fork's release from the first of them, and the
+// control plane step says so; without them, each carries v1.0.0. The control plane removal is left out: it reads the
 // release of the install it removes off the cluster's record (the reinstall
 // guard runs it on a found install, which the chosen plugins say nothing about).
 func TestEveryStepCarriesTheForkReleaseWithMode3(t *testing.T) {
-	for _, chosen := range [][]string{{"mode3", "efs", "credprovider-aws"}, {"efs", "credprovider-aws"}} {
+	for _, chosen := range [][]string{{"mode3", "efs", "credprovider-aws"}, {"mode3-iso"}, {"mode3", "mode3-iso"}, {"efs", "credprovider-aws"}} {
 		b, s := testBuilder()
 		s.Plugins = chosen
-		fork := slices.Contains(chosen, mode3.ID)
+		fork := slices.Contains(chosen, mode3.ID) || slices.Contains(chosen, "mode3-iso")
 		want := plugin.Release{Tag: state.DefaultTag, ImageRepo: state.DefaultImageRepo, Repo: plugin.UpstreamRepo, Ref: state.DefaultTag}
 		if fork {
 			want = plugin.Release{Tag: mode3.Tag, ImageRepo: mode3.ImageRepo, Repo: mode3.Repo, Ref: mode3.Commit}
@@ -369,6 +371,60 @@ func TestStepSettingsReachOnlyTheirSteps(t *testing.T) {
 	for name, spec := range allSpecs(b, s) {
 		if slices.ContainsFunc(spec.Env, isSetting) {
 			t.Errorf("%s: carries a step setting with none configured: %v", name, spec.Env)
+		}
+	}
+}
+
+// Both ways: with a setup-aws binary beside the executable, as a release
+// archive has it, every setup-aws step runs that binary with the same
+// arguments and environment, shown as the binary; without one, the steps
+// run `go -C <tools/setup-aws> run .` from the checkout, as they always did.
+func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
+	release := t.TempDir()
+	bin := filepath.Join(release, "setup-aws")
+	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	co := t.TempDir()
+	src := filepath.Join(co, "native", "tools", "setup-aws")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, s := testBuilder()
+	for _, tc := range []struct {
+		name      string
+		b         builder
+		argv0     []string
+		displayed string
+	}{
+		{"release", builder{self: filepath.Join(release, "substrate-eks"), cwd: release, exeDir: release},
+			[]string{bin}, "./setup-aws"},
+		{"checkout", builder{self: filepath.Join(co, "native", "bin", "substrate-eks"), cwd: filepath.Join(co, "native"), exeDir: filepath.Join(co, "native", "bin")},
+			[]string{"go", "-C", src, "run", "."}, "go -C tools/setup-aws run ."},
+	} {
+		specs := map[string]struct {
+			spec execx.Spec
+			args []string
+		}{
+			"create cluster": {tc.b.createCluster(s), []string{"create", "cluster"}},
+			"bootstrap":      {tc.b.bootstrap(s), []string{"bootstrap"}},
+			"rds":            {tc.b.rds(s), []string{"create", "rds"}},
+			"teardown":       {tc.b.teardown(s), []string{"teardown"}},
+			"inventory":      {tc.b.inventory(s), []string{"inventory"}},
+		}
+		for name, c := range specs {
+			if want := append(slices.Clone(tc.argv0), c.args...); !slices.Equal(c.spec.Argv, want) {
+				t.Errorf("%s %s: argv %q, want %q", tc.name, name, c.spec.Argv, want)
+			}
+			if want := tc.displayed + " " + strings.Join(c.args, " "); !strings.HasSuffix(c.spec.Display, want) {
+				t.Errorf("%s %s: display %q, want it to end %q", tc.name, name, c.spec.Display, want)
+			}
+			if !slices.Contains(c.spec.Env, "PLAN=false") || !slices.Contains(c.spec.Env, "CLUSTER_NAME=demo") {
+				t.Errorf("%s %s: env %q", tc.name, name, c.spec.Env)
+			}
 		}
 	}
 }
