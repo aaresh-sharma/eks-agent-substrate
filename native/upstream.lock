@@ -12,7 +12,7 @@ verbatim  installer/internal/execx/execx.go                     installer/intern
 verbatim  installer/internal/execx/execx_test.go                installer/internal/execx/execx_test.go
 verbatim  installer/internal/execx/log.go                       installer/internal/execx/log.go
 verbatim  installer/internal/execx/log_test.go                  installer/internal/execx/log_test.go
-verbatim  installer/internal/theme/theme.go                     installer/internal/theme/theme.go
+adapted   installer/internal/theme/theme.go                     installer/internal/theme/theme.go
 adapted   installer/internal/state/state.go                     installer/internal/state/state.go
 adapted   installer/internal/steps/steps.go                     installer/internal/steps/steps.go
 adapted   installer/internal/doctor/doctor.go                   installer/internal/doctor/doctor.go
