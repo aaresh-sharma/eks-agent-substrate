@@ -88,7 +88,9 @@ or `darwin`) and CPU (`amd64` or `arm64`) from
 check its sha256 against the release's `checksums.txt`, extract it anywhere
 and run it. `install.sh --from-release [vX.Y.Z]` (the latest release when no
 version is given) does all of that, refuses an archive whose sha256 does not
-match, and extracts it to `~/.substrate-eks/releases/<version>`:
+match, and extracts it to `~/.substrate-eks-releases/<version>`
+(`SUBSTRATE_EKS_RELEASES` moves it). Settings saves your answers in that
+version's directory, so a new version starts from the defaults again:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/csantanapr/eks-agent-substrate/main/native/install.sh | bash -s -- --from-release v2.0.0 --dry-run

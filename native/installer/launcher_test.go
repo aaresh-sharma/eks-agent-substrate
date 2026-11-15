@@ -435,8 +435,13 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 		if tag == "" {
 			tag = "v9.8.7"
 		}
-		releases := filepath.Join(home, ".substrate-eks", "releases")
+		// Releases go beside the source mode's clone directory, never in it:
+		// git refuses to clone into a non-empty ~/.substrate-eks.
+		releases := filepath.Join(home, ".substrate-eks-releases")
 		extracted := filepath.Join(releases, tag)
+		if _, err := os.Stat(filepath.Join(home, ".substrate-eks")); err == nil {
+			t.Errorf("%s: the release mode wrote into ~/.substrate-eks, where the source mode clones", c.name)
+		}
 		_, statErr := os.Stat(filepath.Join(extracted, "substrate-eks"))
 		passed, argsErr := os.ReadFile(argsOut)
 		logged, _ := os.ReadFile(curlLog)

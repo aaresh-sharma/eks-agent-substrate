@@ -10,7 +10,8 @@
 #   version means the latest release): downloads the release archive for
 #   this OS and CPU from GitHub Releases, with its checksums.txt, refuses
 #   the archive unless its sha256 matches, extracts it under
-#   ~/.substrate-eks/releases/<version>, and hands over to its substrate-eks.
+#   ~/.substrate-eks-releases/<version> (SUBSTRATE_EKS_RELEASES), and hands
+#   over to its substrate-eks.
 #   Needs curl and tar, and no git, make or Go to start; the install itself
 #   still needs Go 1.27, which the installer's preflight checks (see
 #   README.md, "Two ways to run it").
@@ -155,7 +156,10 @@ fetch_release() {
     fi
     echo "==> sha256 matches checksums.txt: ${want}"
 
-    release_dir="${SUBSTRATE_EKS_DIR:-$HOME/.substrate-eks}/releases/${version}"
+    # Not under ~/.substrate-eks (SUBSTRATE_EKS_DIR): that is where the source
+    # mode clones the repository, and git refuses to clone into a non-empty
+    # directory, so a release extracted there would break a later source run.
+    release_dir="${SUBSTRATE_EKS_RELEASES:-$HOME/.substrate-eks-releases}/${version}"
     echo "==> Extracting into ${release_dir}..."
     mkdir -p "${release_dir}"
     tar -xzf "${tmp}/${archive}" -C "${release_dir}"

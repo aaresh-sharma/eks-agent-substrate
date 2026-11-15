@@ -80,8 +80,9 @@ it anywhere and run `./substrate-eks`, which finds `config.env` and
 one `--setup-aws` names) instead of `go run`. `install.sh --from-release
 [vX.Y.Z]` downloads the archive for `uname -s`/`uname -m` (the latest
 release with no version), refuses it unless its sha256 matches
-`checksums.txt`, extracts it to `~/.substrate-eks/releases/<version>` and
-starts it with the remaining flags:
+`checksums.txt`, extracts it to `~/.substrate-eks-releases/<version>`
+(`SUBSTRATE_EKS_RELEASES` moves it; it is kept apart from `~/.substrate-eks`,
+where the source mode clones) and starts it with the remaining flags:
 
 ```bash
 ./native/install.sh --from-release v2.0.0 --dry-run
