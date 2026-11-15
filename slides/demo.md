@@ -5,11 +5,21 @@ sandboxes: each mode 3 worker Pod runs under RuntimeClass `isolated-sandbox`,
 an AWS Nitro Sandbox with its own guest kernel, and the worker runs actors
 with gVisor inside it.
 
-Install first with the installer (`./native/install.sh`): EKS Auto Mode, the
-counter demo, the `mode3` and `mode3-iso` plugins, and the Secrets Manager
-credential provider (`credprovider-aws`) for section 3. See the
-[README](../README.md#plugins). Run every block from a checkout of this
-repository, in one shell.
+Install first with the installer (`./native/install.sh`) on EKS Auto Mode,
+with the AWS Nitro sandbox class, `nitro`. It installs the `mode3-iso`
+plugin and needs neither the `mode3` plugin nor any node group. Section 3
+also needs the Secrets Manager credential provider (`credprovider-aws`),
+which runs on the `system` and `gvisor` node groups, so add the `gvisor`
+class for it:
+
+```bash
+./native/install.sh --sandbox-classes gvisor,nitro --plugins credprovider-aws
+```
+
+For sections 1, 2 and 4 alone, `--sandbox-classes nitro --database bundled`
+(the minimal profile) makes no node group at all. See the
+[README](../README.md#sandbox-classes-and-node-groups). Run every block from
+a checkout of this repository, in one shell.
 
 ## 0. Set up the shell
 
