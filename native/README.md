@@ -201,7 +201,7 @@ the notes printed on exit.
 | `--sandbox-classes` | `SANDBOX_CLASSES` (`gvisor,microvm`) | The sandbox classes, in any combination of `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox, Auto Mode only). They decide a new cluster's node groups. |
 | `--database` | `rds` | `rds` (Amazon RDS for PostgreSQL) or `bundled` (in-cluster PostgreSQL). |
 | `--demo` | off | End the install with the counter demo, and check it. |
-| `--plugins` | none (the wizard preselects `llm-gateway`) | Comma-separated plugin IDs to preselect. |
+| `--plugins` | none (the wizard preselects `llm-gateway` where the cluster gets the `system` group anyway) | Comma-separated plugin IDs to preselect. |
 | `--dry-run` | off | Walk every screen with simulated commands; nothing touches AWS. |
 | `--teardown`, `--keep-cluster` | off | Open on the teardown of `--cluster`; keep the cluster. |
 | `--snapshot-dir` | `~/.cache/substrate-eks/snapshots` | Where `s` saves the screen. |
@@ -226,14 +226,20 @@ outside it):
 
 | Selection | Node groups created |
 |---|---|
-| Default: Auto Mode, `gvisor,microvm` | `system`, `gvisor`, `microvm` (unchanged) |
+| Default: Auto Mode, RDS, `gvisor,microvm` | `system`, `gvisor`, `microvm` (unchanged) |
 | `gvisor` class | `gvisor` |
 | `microvm` class | `microvm` (nested virtualization) |
 | `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
 | `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
-| `system` | without Auto Mode, always (required); with Auto Mode, when a `gvisor` or `microvm` group is created |
-| Auto Mode and only `nitro` | none (`NODE_GROUPS=none`): no launch template, no node IAM role; the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
+| `system`, without Auto Mode | always (required) |
+| `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created, which the control plane is cordoned onto |
+| `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it (`NODE_GROUPS=gvisor` for the `gvisor` class alone) |
+| A plugin on `system` (`llm-gateway`, `efs`, `db-rotation`, `credprovider-aws`) | `system`, whatever the classes and database |
+| Auto Mode and only `nitro`, no such plugin | none (`NODE_GROUPS=none`): no launch template, no node IAM role; the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
 | No Auto Mode with nothing to run sandboxes on (`nitro` alone) | refused |
+
+`setup-aws create cluster` accepts any of the three groups, or none, on Auto
+Mode; without it, the `system` group and a `gvisor` or `microvm` group.
 
 `ate-setup` gets `--sandbox-classes gvisor`, plus `microvm` with the
 `microvm` class: in v1.0.0 its `gvisor` class is the `gvisor-default`
@@ -242,9 +248,11 @@ SandboxConfig, which every gVisor-class pool resolves (the Nitro sandbox's
 and applies their SandboxConfig. The `nitro` class installs `mode3-iso`,
 whose release is the fork's (one release per install), in its own step after
 the control plane; the counter demo runs on `gvisor` and `microvm`, and
-`--verify` checks `nitro` through `mode3-iso`'s counter pool. With RDS and no
-`system` group nothing is cordoned, and the bootstrap Job runs on Auto Mode
-nodes. On a cluster you connect nothing is created: the probe reads the
+`--verify` checks `nitro` through `mode3-iso`'s counter pool. The control
+plane is cordoned onto the `system` group only with RDS on Auto Mode and only
+when the cluster has `system` nodes; with RDS and no `system` group the
+bootstrap Job runs on Auto Mode nodes, and the bundled PostgreSQL is never
+cordoned. On a cluster you connect nothing is created: the probe reads the
 `ate.dev/pool` labels of its nodes, and a class or plugin whose nodes are
 missing is refused, naming them.
 
@@ -279,7 +287,7 @@ control plane deploy keeps their needs.
 
 | ID | Needs | What it adds |
 |---|---|---|
-| `llm-gateway` | (preselected) | agentgateway on Amazon Bedrock with EKS Pod Identity; actors ask for `claude`, `claude-haiku`, `claude-sonnet` or `claude-opus` and hold no AWS credentials |
+| `llm-gateway` | (preselected where the cluster gets the `system` group anyway) | agentgateway on Amazon Bedrock with EKS Pod Identity; actors ask for `claude`, `claude-haiku`, `claude-sonnet` or `claude-opus` and hold no AWS credentials |
 | `efs` | the counter demo | an Amazon EFS access point per actor as its data volume (`ExternalVolumes` preview), and `counter-efs` |
 | `s3files` | `efs`, the counter demo | an S3 Files access point per actor, synced to a private, versioned S3 bucket, and `counter-s3files` |
 | `credprovider-aws` | | egress credential injection from AWS Secrets Manager |
@@ -291,9 +299,12 @@ control plane deploy keeps their needs.
 A plugin pinned to a node group (`Plugin.Nodes`) needs that group's nodes:
 `llm-gateway`, `efs`, `db-rotation` and `credprovider-aws` run on `system`,
 `openclaw` and `credprovider-aws`'s probe on `gvisor`, `mode3` on `microvm`.
-The wizard refuses one the cluster will not have, with the reason, and
-`--plugin-action deploy|verify` refuses it on a cluster whose nodes lack the
-`ate.dev/pool` label.
+On a cluster the run creates, one on `system` makes the `system` group (and
+`mode3` the `microvm` group); the wizard refuses, with the reason, one on a
+sandbox group whose class is off, or on a group a connected cluster lacks.
+`llm-gateway` is preselected only where the `system` group is made anyway.
+`--plugin-action deploy|verify` refuses a plugin on a cluster whose nodes
+lack the `ate.dev/pool` label.
 
 On an installed cluster:
 
