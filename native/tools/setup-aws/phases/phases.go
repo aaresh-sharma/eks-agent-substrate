@@ -28,7 +28,7 @@ var Cluster = []string{
 	"Creating the EKS cluster...",
 	"Granting cluster access...",
 	"Installing EKS add-ons...",
-	"Creating the microvm launch template...",
+	"Creating the node groups' launch templates...",
 	"Creating the managed node groups...",
 	"Waiting for the node groups to be ACTIVE...",
 }
