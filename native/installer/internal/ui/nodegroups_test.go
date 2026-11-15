@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/execx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
 
 // groupRows are the node groups Settings has rows for.
@@ -215,5 +217,25 @@ func TestConnectedClusterRefusesWhatItsNodesLack(t *testing.T) {
 	m = press(m, " ")
 	if m.m.Current() != state.Plugins || m.pl.chosen["t-claw"] || m.notice != "Claw agent runs on the gvisor node group, which new does not have" {
 		t.Errorf("t-claw on a cluster without gvisor nodes:\n%s", m.View())
+	}
+}
+
+// The Create the cluster step names the node groups it makes, one group in
+// the singular: gvisor alone (Auto Mode, the bundled PostgreSQL), and
+// system and gvisor with RDS.
+func TestCreateClusterStepNamesItsNodeGroups(t *testing.T) {
+	for db, want := range map[string]string{
+		state.DatabaseBundled: "EKS cluster fresh and its gvisor node group ",
+		state.DatabaseRDS:     "EKS cluster fresh and its system and gvisor node groups ",
+	} {
+		s := newSetup("fresh")
+		s.SandboxClasses, s.Database = state.ClassGVisor, db
+		s.NewCluster("fresh")
+		m := sized(New(testDeps(&recorder{}), s))
+		m.jump(state.InstallOrder(s), state.CreateCluster)
+		m.tasks[state.CreateCluster] = newTask(execx.Spec{Label: "create cluster"}, steps.Cluster())
+		if v := stripANSI(m.View()); !strings.Contains(v, want) {
+			t.Errorf("%s: want %q in\n%s", db, want, v)
+		}
 	}
 }
