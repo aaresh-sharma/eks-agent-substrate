@@ -94,6 +94,17 @@ func field(t *testing.T, n *yaml.RNode, path ...string) string {
 	return string(b)
 }
 
+// selects reports whether a matchLabels selector matches a pod with labels:
+// every entry of sel is in labels.
+func selects(sel, labels map[string]string) bool {
+	for k, v := range sel {
+		if got, ok := labels[k]; !ok || got != v {
+			return false
+		}
+	}
+	return true
+}
+
 // The policy names what the other manifests make: the gateway Deployment's
 // pod labels and namespace, and the LLM gateway's pods and the port its
 // Service sends to.
@@ -140,6 +151,13 @@ func TestLLMPolicyNamesTheGatewayAndTheLLMGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := docs(t, string(b))
+	var llmLabels map[string]string
+	if err := json.Unmarshal([]byte(field(t, llm["Deployment/llm-gateway"], "spec", "template", "metadata", "labels")), &llmLabels); err != nil {
+		t.Fatal(err)
+	}
+	if !selects(spec.PodSelector.MatchLabels, llmLabels) {
+		t.Errorf("the LLM gateway's pods are labeled %v; the policy applies to pods labeled %v", llmLabels, spec.PodSelector.MatchLabels)
+	}
 	if got, want := field(t, llm["NetworkPolicy/llm-gateway-ingress"], "spec", "podSelector"), `{"matchLabels":{"app":"llm-gateway"}}`; got != want {
 		t.Errorf("llm-gateway-ingress selects %s, want %s", got, want)
 	}
