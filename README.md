@@ -149,7 +149,7 @@ with the reason, when it needs Auto Mode on a cluster without it, or runs on
 a node group the cluster will not have (the LLM gateway on the `system`
 group, OpenClaw on `gvisor`).
 
-![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata and on isolated sandboxes](native/installer/docs/plugins.png)
+![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata](native/installer/docs/plugins.png)
 
 **Review the plan** shows every command in order, its time and its hourly
 cost. Nothing changes in AWS before you press `y`. The install then writes

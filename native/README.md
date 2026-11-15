@@ -137,7 +137,7 @@ make verify AWS_PROFILE=my-profile AWS_REGION=us-west-2 CLUSTER_NAME=my-cluster
 
 ## The wizard
 
-![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata and on isolated sandboxes](installer/docs/plugins.png)
+![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata](installer/docs/plugins.png)
 
 The screens, in order: Welcome, Check your setup (the tools and your AWS
 identity), Choose AWS account, Connect your cluster (the clusters in the
