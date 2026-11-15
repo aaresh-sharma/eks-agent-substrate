@@ -41,6 +41,7 @@ func init() {
 		Minutes:  3,
 		Default:  true,
 		SetupAWS: true,
+		Nodes:    []string{"system"}, // the gateway's Deployment is pinned there
 		Deploy:   Deploy,
 		Verify:   Verify,
 		Remove:   Remove,

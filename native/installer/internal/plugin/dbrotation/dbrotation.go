@@ -51,6 +51,7 @@ func init() {
 		// Two Lambda functions that run once a rotation, and one small
 		// controller pod each: cents a month.
 		HourlyUSD: 0,
+		Nodes:     []string{"system"}, // External Secrets and the Reloader are pinned there
 		Deploy:    deploy,
 		Verify:    verify,
 		Remove:    remove,

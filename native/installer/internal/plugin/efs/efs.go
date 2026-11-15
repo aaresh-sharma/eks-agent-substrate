@@ -71,6 +71,7 @@ func init() {
 		SetupAWS: true,
 		// Its templates and Verify's actors are the counter demo's.
 		NeedsDemo: true,
+		Nodes:     []string{"system"}, // Substrate's EFS CSI controller is pinned there
 		Needs:     plugin.Needs{Preview: []string{"ExternalVolumes"}},
 		// EFS bills stored data and throughput, not hours: a few test
 		// volumes cost cents a month.

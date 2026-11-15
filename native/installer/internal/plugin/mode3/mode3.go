@@ -89,6 +89,9 @@ func init() {
 			Preview: []string{Preview},
 			Source:  &plugin.Source{Repo: Repo, Commit: Commit, Tag: Tag, ImageRepo: ImageRepo},
 		},
+		// Kata and the counter pool run on the microvm node group, which a
+		// new cluster gets for mode 3 even without the microvm class.
+		Nodes: []string{"microvm"}, AddsNodes: true,
 		Deploy: deploy, Verify: Kata.Verify, Remove: remove,
 	})
 }

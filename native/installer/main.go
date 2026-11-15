@@ -376,6 +376,11 @@ func clusterRelease(ctx context.Context, o plugin.Options, chosen []string, depl
 	if err := awsx.WriteKubeconfig(o.Kubeconfig, cl, o.Region, o.Profile); err != nil {
 		return o, err
 	}
+	// The node groups the cluster's nodes come from: plugin.Run refuses a
+	// plugin pinned to one it lacks.
+	if o.Pools, err = plugin.NodePools(ctx, os.Stdout, o); err != nil {
+		return o, err
+	}
 	if o.Release, err = plugin.ReadRelease(ctx, os.Stdout, o, chosen); err != nil {
 		return o, err
 	}

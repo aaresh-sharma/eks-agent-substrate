@@ -129,6 +129,7 @@ func init() {
 		Minutes:  15,
 		Requires: []string{efs.ID},
 		Needs:    plugin.Needs{IngressIDs: []string{GatewayID, DashboardID}},
+		Nodes:    []string{"gvisor"}, // its worker pool
 		Check:    check,
 		Deploy:   deploy,
 		Verify:   verify,

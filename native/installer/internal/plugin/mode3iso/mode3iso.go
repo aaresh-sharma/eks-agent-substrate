@@ -42,6 +42,10 @@ import (
 // ID is the plugin ID.
 const ID = "mode3-iso"
 
+// Class is the sandbox class that installs the plugin: the AWS Nitro
+// sandbox, chosen in Settings or with --sandbox-classes nitro.
+const Class = "nitro"
+
 // The names of the plugin's objects.
 const (
 	RuntimeClass                = "isolated-sandbox"
@@ -77,10 +81,12 @@ var Iso = mode3.Counter{
 func init() {
 	plugin.Register(plugin.Plugin{
 		ID:    ID,
-		Title: "Mode 3: actor in a microVM Pod (isolated-sandbox)",
-		Summary: "Mode 3 with each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
+		Title: "AWS Nitro sandbox (isolated-sandbox)",
+		Summary: "The AWS Nitro sandbox class: each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
 			"on nodes Auto Mode launches for them (NodePool ate-isolated). Needs Auto Mode and mode 3, which it turns on; " +
 			"adds a counter pool that it checks.",
+		// Chosen with the class in Settings, not on the Plugins screen.
+		Class: Class,
 		Order: mode3.Order + 1, Minutes: 12, Requires: []string{mode3.ID}, NeedsAutoMode: needsAutoMode,
 		// One node for the two worker Pods, launched by Auto Mode (an
 		// m8a.large on-demand, with the Auto Mode fee).

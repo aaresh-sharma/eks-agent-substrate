@@ -92,6 +92,15 @@ func SetupAWS(ctx context.Context, w io.Writer, o Options, args ...string) error
 	return Exec(ctx, w, Cmd{Env: env, Argv: append([]string{"go", "-C", o.SetupAWS, "run", "."}, args...)})
 }
 
+// NodePools are the PoolLabel values of o's cluster's nodes (Options.Pools).
+func NodePools(ctx context.Context, w io.Writer, o Options) ([]string, error) {
+	var out bytes.Buffer
+	if err := Kubectl(ctx, w, o, nil, &out, PoolsArgs...); err != nil {
+		return nil, fmt.Errorf("read the nodes' %s labels: %w", PoolLabel, err)
+	}
+	return ParsePools(out.String()), nil
+}
+
 // ReadRecord returns the IDs the cluster records as installed (none when the
 // record is missing).
 func ReadRecord(ctx context.Context, w io.Writer, o Options) ([]string, error) {
@@ -196,6 +205,14 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 		// nothing done (review of 86ba13f, finding 3).
 		if err := CheckSettings(ps, os.LookupEnv); err != nil {
 			return err
+		}
+		// So do missing nodes: its Pods would stay Pending on nodes that do
+		// not exist.
+		for _, p := range ps {
+			if miss := MissingNodes(p, o.Pools); len(miss) > 0 {
+				return fmt.Errorf("plugin %s runs on the %s node group, and %s has no node labeled %s=%s: a cluster gets its node groups from the sandbox classes it is created with",
+					p.ID, strings.Join(miss, " and "), o.Cluster, PoolLabel, strings.Join(miss, ","))
+			}
 		}
 		if action == ActionVerify {
 			for _, p := range ps {

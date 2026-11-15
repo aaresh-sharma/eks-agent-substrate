@@ -494,7 +494,8 @@ func runOptions(t *testing.T) (plugin.Options, map[string]string) {
 	for _, k := range settingVars {
 		t.Setenv(k, "")
 	}
-	return plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", SetupAWS: "/setup-aws",
+	// The nodes openclaw (gvisor) and efs (system) run on.
+	return plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc", SetupAWS: "/setup-aws", Pools: []string{"gvisor", "system"},
 			Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}},
 		map[string]string{plugin.ActionDeploy: "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins",
 			plugin.ActionVerify: "go build -o "}
