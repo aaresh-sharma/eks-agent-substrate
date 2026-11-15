@@ -375,14 +375,19 @@ func TestStepSettingsReachOnlyTheirSteps(t *testing.T) {
 	}
 }
 
-// Both ways: with a setup-aws binary beside the executable, as a release
-// archive has it, every setup-aws step runs that binary with the same
-// arguments and environment, shown as the binary; without one, the steps
-// run `go -C <tools/setup-aws> run .` from the checkout, as they always did.
+// Both ways: from a release (its setup-aws binary beside config.env and the
+// executable), every setup-aws step runs that binary with the same
+// arguments and environment, shown as the binary; from a source build, the
+// steps run `go -C <tools/setup-aws> run .` from the checkout, as they
+// always did, even with a setup-aws binary built beside the executable
+// into native/bin, which may be stale.
 func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
 	release := t.TempDir()
 	bin := filepath.Join(release, "setup-aws")
 	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "config.env"), []byte("SUBSTRATE_TAG=v2.0.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	co := t.TempDir()
@@ -391,6 +396,13 @@ func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(co, "native", "bin", "setup-aws")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, s := testBuilder()

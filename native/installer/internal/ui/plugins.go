@@ -163,6 +163,7 @@ func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
 		// microvm group brings the system group on Auto Mode).
 		m.dropUnavailable()
 	case "enter":
+		// Defensive: cannot fire today, as entry and every space already drop what does not fit, and no other key changes it.
 		if m.dropUnavailable() {
 			return nil
 		}

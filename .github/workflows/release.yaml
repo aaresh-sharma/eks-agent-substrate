@@ -31,9 +31,9 @@ jobs:
       with:
         # The install needs 1.27 (Agent Substrate's ate-setup); build with it.
         go-version: '1.27'
-        cache-dependency-path: |
-          native/installer/go.sum
-          native/tools/setup-aws/go.sum
+        # No module cache: a tag run would restore one saved by the
+        # default branch's runs into the binaries it attests.
+        cache: false
     - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
       with:
         distribution: goreleaser
