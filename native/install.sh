@@ -124,8 +124,9 @@ fetch_release() {
         version="${latest##*/}"
     fi
     # The tag names a directory below, so it is checked before any use: one
-    # path component, vX.Y.Z with an optional semver pre-release.
-    local tag_re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+    # path component, vX.Y.Z with an optional semver pre-release whose
+    # dot-separated identifiers are never empty (no '/', and no '..').
+    local tag_re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
     if [[ ! "${version}" =~ ${tag_re} ]]; then
         echo "error: '${version}' is not a substrate-eks release tag such as v2.0.0; name one: --from-release v2.0.0" >&2
         exit 1
@@ -143,8 +144,15 @@ fetch_release() {
     download "${base}/${archive}" "${tmp}/${archive}"
     download "${base}/checksums.txt" "${tmp}/checksums.txt"
 
-    local want got sum_re='^[0-9a-f]{64}$'
-    want="$(awk -v f="${archive}" '$2 == f { print $1 }' "${tmp}/checksums.txt")"
+    # The archive's own line is exactly "<sha256>  <archive>", once: a line
+    # with more fields is not it, and two lines naming it are refused.
+    local want got listed sum_re='^[0-9a-f]{64}$'
+    listed="$(awk -v f="${archive}" '$2 == f { n++ } END { print n + 0 }' "${tmp}/checksums.txt")"
+    if [ "${listed}" -gt 1 ]; then
+        echo "error: ${archive} is listed ${listed} times in the ${version} checksums.txt; refusing it." >&2
+        exit 1
+    fi
+    want="$(awk -v f="${archive}" 'NF == 2 && $2 == f { print $1 }' "${tmp}/checksums.txt")"
     if [[ ! "${want}" =~ ${sum_re} ]]; then
         echo "error: the ${version} checksums.txt has no sha256 line for ${archive}; refusing it." >&2
         exit 1

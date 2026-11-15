@@ -323,8 +323,9 @@ func releaseArchive(t *testing.T) []byte {
 // no git, make or go on PATH: it downloads the archive for this OS and CPU
 // (the latest when no version is named), extracts it once its sha256 matches
 // checksums.txt, and execs its substrate-eks with the arguments after
-// --from-release and the version; a wrong checksum, a missing checksum line
-// and a tag that is not one are refused before anything is extracted.
+// --from-release and the version; a wrong checksum, a missing checksum line,
+// a line with a field after the archive's name, the archive listed twice and
+// a tag that is not one are refused before anything is extracted.
 func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil || runtime.GOOS == "windows" {
@@ -352,7 +353,7 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 	good := hex.EncodeToString(sum[:])
 	wrong := strings.Repeat("0", 64)
 	names := []string{"substrate-eks_9.8.7_linux_amd64.tar.gz", "substrate-eks_9.8.7_linux_arm64.tar.gz", "substrate-eks_9.8.7_darwin_arm64.tar.gz",
-		"substrate-eks_9.8.7-SNAPSHOT-abc1234_linux_amd64.tar.gz"}
+		"substrate-eks_9.8.7-SNAPSHOT-abc1234_linux_amd64.tar.gz", "substrate-eks_9.8.7-rc.1_linux_amd64.tar.gz"}
 	sums := func(skip, bad string) string {
 		var b strings.Builder
 		for _, n := range names {
@@ -386,15 +387,28 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 		{name: "pre-release tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
 			args: []string{"--from-release", "v9.8.7-SNAPSHOT-abc1234", "--version"}, tag: "v9.8.7-SNAPSHOT-abc1234",
 			archive: names[3], passed: []string{"--version"}},
+		{name: "dotted pre-release tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args: []string{"--from-release", "v9.8.7-rc.1", "--version"}, tag: "v9.8.7-rc.1",
+			archive: names[4], passed: []string{"--version"}},
 		{name: "wrong checksum", unameS: "Linux", unameM: "x86_64", checksums: sums("", names[0]),
 			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
 			refusal: "has sha256 " + good + ", but the v9.8.7 checksums.txt says " + wrong + "; refusing it"},
 		{name: "no checksum line", unameS: "Linux", unameM: "x86_64", checksums: sums(names[0], ""),
 			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
 			refusal: "checksums.txt has no sha256 line for " + names[0] + "; refusing it"},
+		{name: "a field after the archive's name", unameS: "Linux", unameM: "x86_64",
+			checksums: sums(names[0], "") + good + "  " + names[0] + " trailing\n",
+			args:      []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
+			refusal: "checksums.txt has no sha256 line for " + names[0] + "; refusing it"},
+		{name: "the archive listed twice", unameS: "Linux", unameM: "x86_64", checksums: sums("", "") + good + "  " + names[0] + "\n",
+			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
+			refusal: names[0] + " is listed 2 times in the v9.8.7 checksums.txt; refusing it"},
 		{name: "not a tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
 			args:    []string{"--from-release", "9.8.7/../x", "--dry-run"},
 			refusal: "'9.8.7/../x' is not a substrate-eks release tag"},
+		{name: "an empty pre-release identifier", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args:    []string{"--from-release", "v1.0.0-..", "--dry-run"},
+			refusal: "'v1.0.0-..' is not a substrate-eks release tag"},
 	} {
 		dir := t.TempDir()
 		bin, release, home, tmp := filepath.Join(dir, "bin"), filepath.Join(dir, "release"), filepath.Join(dir, "home"), filepath.Join(dir, "tmp")

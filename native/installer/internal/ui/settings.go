@@ -246,6 +246,7 @@ func (m *Model) checkSettings() {
 			return
 		}
 	}
+	// Defensive: cannot fire today, as classProblem above refuses the only set Check refuses (nitro alone, Auto Mode off).
 	if m.s.ClusterIsNew {
 		if err := nodegroups.Check(m.settingsAutoMode(), m.settingsGroups()); err != nil {
 			st.errs[classKey] = err.Error()

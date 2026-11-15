@@ -171,7 +171,7 @@ type Config struct {
 func FindConfig(env func(string) (string, bool), starts ...string) (Config, error) {
 	for _, start := range starts {
 		for dir := start; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-			if !isCheckout(dir) && !isRelease(dir) {
+			if !isCheckout(dir) && !IsRelease(dir) {
 				continue
 			}
 			if _, err := os.Stat(filepath.Join(dir, "config.env")); err != nil {
@@ -188,11 +188,19 @@ func isCheckout(dir string) bool {
 	return err == nil
 }
 
-// isRelease: the release archive's setup-aws is a file beside config.env,
-// the same test as plugin.IsSetupAWSBinary.
-func isRelease(dir string) bool {
-	fi, err := os.Stat(filepath.Join(dir, "setup-aws"))
-	return err == nil && fi.Mode().IsRegular()
+// IsRelease reports whether dir is an extracted release archive: its
+// setup-aws is a file (the same test as plugin.IsSetupAWSBinary) beside
+// config.env. A source build's native/bin has no config.env, so a
+// setup-aws binary built there does not make it a release.
+func IsRelease(dir string) bool {
+	if dir == "" {
+		return false // no directory, not the working one
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "setup-aws")); err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "config.env"))
+	return err == nil
 }
 
 // LoadConfig reads DIR/config.env and DIR/config.local.env.
