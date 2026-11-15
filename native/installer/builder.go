@@ -19,6 +19,7 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/probe"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
 
 // builder makes the long steps' commands, substrate-gke's snapshot.Builder.
@@ -368,14 +369,36 @@ func (b builder) verify(s *state.Setup) execx.Spec {
 
 // removeControlPlane re-executes the installer with --remove-control-plane
 // for cluster: the guard runs it on a found install, the teardown flow on
-// the run's own.
+// the run's own. The dry run replays the removal of simRecord's plugins
+// first, in the order and with the lines plugin.Run's remove prints.
 func (b builder) removeControlPlane(s *state.Setup) execx.Spec {
-	return b.selfSpec(s, s.ClusterName, "ate-setup delete ate-system", []string{
-		controlplane.CachedLine + s.SubstrateTag,
-		"$ go run ./cmd/ate-setup delete ate-system --context " + s.ClusterName,
+	sim := []string{controlplane.RemovePluginsLine}
+	ps, _ := steps.RemovalOrder(simRecord(s))
+	for _, p := range ps {
+		if p.SetupAWS {
+			sim = append(sim, plugin.PlanLine+p.ID)
+		}
+	}
+	for _, p := range ps {
+		sim = append(sim, plugin.RemoveLine+p.ID, plugin.RemovedLine+p.ID)
+	}
+	sim = append(sim,
+		controlplane.CachedLine+s.SubstrateTag,
+		controlplane.DeleteLine+" --context "+s.ClusterName,
 		`namespace "ate-system" deleted`,
 		controlplane.RemovedLine,
-	}, "--remove-control-plane", "--tag", s.SubstrateTag)
+	)
+	return b.selfSpec(s, s.ClusterName, "ate-setup delete ate-system", sim, "--remove-control-plane", "--tag", s.SubstrateTag)
+}
+
+// simRecord is the plugin record of s's cluster in the dry run's story: the
+// one its probe answer lists (probe.SimLine), else the plugins the run
+// installs.
+func simRecord(s *state.Setup) []string {
+	if r, err := probe.ParseInstalled([]string{probe.SimLine(s.ClusterName)}); err == nil && r.PluginsRead {
+		return r.Plugins
+	}
+	return resolvedIDs(s.InstallPlugins())
 }
 
 // probe re-executes the installer with --probe-installed for cluster.

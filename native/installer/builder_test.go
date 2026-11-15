@@ -14,6 +14,7 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/execx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/mode3"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/probe"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
@@ -295,6 +296,48 @@ func TestDryRunLinesWalkEveryPhase(t *testing.T) {
 		}
 		if lit != len(items) {
 			t.Errorf("%s: lit %d of %d rows", name, lit, len(items))
+		}
+	}
+}
+
+// AC8.5 for Remove Substrate: the dry-run replay lights every row of each
+// checklist the wizard gives the step, one at a time and in order: the
+// reinstall guard's, with a row per plugin its probe answer records
+// (efs and llm-gateway on substrate-installed); the teardown flow's, with
+// one row for the plugins, with and without plugins in the run; and one
+// whose record lists none.
+func TestDryRunLinesWalkEveryRemovalRow(t *testing.T) {
+	guard, err := probe.ParseInstalled([]string{probe.SimLine("substrate-installed")})
+	if err != nil || len(guard.Plugins) == 0 {
+		t.Fatalf("the dry run's installed cluster records %v (%v)", guard.Plugins, err)
+	}
+	for _, tc := range []struct {
+		name, cluster string
+		plugins       []string
+		items         []steps.ChecklistItem
+		rows          int
+	}{
+		{"guard", "substrate-installed", nil, steps.RemoveControlPlane(guard.Plugins, guard.PluginsRead), len(guard.Plugins) + 2},
+		{"teardown with plugins", "my-substrate", []string{"llm-gateway", "efs"}, steps.RemoveControlPlane(nil, false), 3},
+		{"teardown without plugins", "my-substrate", nil, steps.RemoveControlPlane(nil, false), 3},
+		{"none recorded", "my-substrate", nil, steps.RemoveControlPlane(nil, true), 2},
+	} {
+		b, s := testBuilder()
+		s.ClusterName, s.Plugins, s.SandboxClasses = tc.cluster, tc.plugins, "gvisor"
+		if len(tc.items) != tc.rows {
+			t.Fatalf("%s: rows %d, want %d", tc.name, len(tc.items), tc.rows)
+		}
+		active, lit := -1, 0
+		for _, line := range b.removeControlPlane(s).SimLines {
+			if next := steps.Progress(tc.items, active, line); next != active {
+				if next != active+1 {
+					t.Errorf("%s: %q jumped from row %d to %d", tc.name, line, active, next)
+				}
+				active, lit = next, lit+1
+			}
+		}
+		if lit != len(tc.items) {
+			t.Errorf("%s: lit %d of %d rows", tc.name, lit, len(tc.items))
 		}
 	}
 }
