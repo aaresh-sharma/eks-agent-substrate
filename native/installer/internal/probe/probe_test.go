@@ -76,7 +76,7 @@ func TestUnreadableImageStillReadsInstalled(t *testing.T) {
 // A failed namespace or DaemonSet read is an error, never "absent" or
 // "partial": a cluster the probe cannot read must not be offered for install.
 func TestFailedReadsAreErrors(t *testing.T) {
-	for _, kind := range []string{"namespace", "daemonset"} {
+	for _, kind := range []string{"namespace", "nodes", "daemonset"} {
 		k := fakeKubectl(map[string]string{"namespace": "ate-system"}, map[string]error{kind: errors.New("Unauthorized")})
 		if line, err := Check(context.Background(), k); err == nil {
 			t.Errorf("%s read failed but Check returned %q", kind, line)
@@ -109,6 +109,23 @@ func TestInstalledPluginsAreReadFromTheRecord(t *testing.T) {
 	}
 	if line, _ := Check(context.Background(), fakeKubectl(map[string]string{"configmap": "efs"}, nil)); strings.Contains(line, "plugins") {
 		t.Errorf("absent cluster: %q", line)
+	}
+}
+
+// Both ways: the node groups of the cluster's nodes are reported, sorted and
+// once each, on a clean cluster and an installed one alike; a cluster with
+// no labeled node reports none.
+func TestPoolsAreReadFromTheNodes(t *testing.T) {
+	for name, answers := range map[string]map[string]string{
+		"absent":    {"nodes": "system gvisor system isolated"},
+		"installed": {"nodes": "system gvisor system isolated", "namespace": "ate-system", "daemonset": "daemonset.apps/atelet"},
+	} {
+		if r := checkThenParse(t, fakeKubectl(answers, nil)); strings.Join(r.Pools, ",") != "gvisor,isolated,system" || r.Installed != (name == "installed") {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	if r := checkThenParse(t, fakeKubectl(map[string]string{}, nil)); len(r.Pools) != 0 {
+		t.Errorf("no labeled node read as pools %v", r.Pools)
 	}
 }
 

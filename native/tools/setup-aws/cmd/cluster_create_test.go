@@ -469,6 +469,81 @@ func TestCreateClusterPreflight(t *testing.T) {
 	})
 }
 
+// NODE_GROUPS=none on Auto Mode: the cluster, its roles and add-ons, and no
+// node group, launch template or node role. The instance type reads are
+// denied, so the run proves it never makes them (an empty
+// DescribeInstanceTypes would list every type in the Region).
+func TestCreateClusterNoNodeGroups(t *testing.T) {
+	f := newClusterFake()
+	f.deny["DescribeInstanceTypes"] = "AccessDenied"
+	f.deny["DescribeInstanceTypeOfferings"] = "AccessDenied"
+	r := clusterTestRun(t, f, false, func(c *clusterConfig) { c.NodeGroups = "none" })
+	if err := r.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := maps.Clone(freshCreates)
+	for k := range want {
+		if strings.HasPrefix(k, "CreateNodegroup ") || strings.HasPrefix(k, "CreateLaunchTemplate ") || k == "CreateRole demo-us-west-2-eks-node" {
+			delete(want, k)
+		}
+	}
+	if got := creates(f.writes); !maps.Equal(got, want) {
+		t.Errorf("creates:\n got %v\nwant %v", got, want)
+	}
+	if len(f.ngIn) != 0 || len(f.lts) != 0 || f.roles["demo-us-west-2-eks-node"] != nil {
+		t.Errorf("node groups %v, launch templates %d, node role %v", sortedKeysOf(f.ngIn), len(f.lts), f.roles["demo-us-west-2-eks-node"] != nil)
+	}
+	// Auto Mode's own node role, and the zones EKS accepts, are still there.
+	if f.roles["demo-us-west-2-eks-auto-node"] == nil || !slices.Equal(r.azs, []string{"us-west-2a", "us-west-2b", "us-west-2c"}) {
+		t.Errorf("Auto Mode node role %v, zones %v", f.roles["demo-us-west-2-eks-auto-node"] != nil, r.azs)
+	}
+	for _, a := range f.addons {
+		if a.Status != ekstypes.AddonStatusActive {
+			t.Errorf("add-on %s is %s", aws.ToString(a.AddonName), a.Status)
+		}
+	}
+}
+
+// NODE_GROUPS=system,gvisor makes those two with their templates, and no
+// microvm group or nested-virtualization template.
+func TestCreateClusterSomeNodeGroups(t *testing.T) {
+	f := newClusterFake()
+	if err := clusterTestRun(t, f, false, func(c *clusterConfig) { c.NodeGroups = "system,gvisor" }).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := creates(f.writes)
+	for _, k := range []string{"CreateNodegroup system", "CreateNodegroup gvisor", "CreateLaunchTemplate demo-system-nodes",
+		"CreateLaunchTemplate demo-gvisor-nodes", "CreateRole demo-us-west-2-eks-node"} {
+		if got[k] != 1 {
+			t.Errorf("%s: %d, want 1", k, got[k])
+		}
+	}
+	if got["CreateNodegroup microvm"] != 0 || got["CreateLaunchTemplate demo-microvm-nested-virt"] != 0 {
+		t.Errorf("made the microvm group or its template: %v", got)
+	}
+}
+
+// The rule refuses, before any write, a selection that has nothing to run
+// sandboxes on (no Auto Mode, no sandbox group) or a sandbox group without
+// the system group.
+func TestCreateClusterRefusesNodeGroupsOutsideTheRule(t *testing.T) {
+	for _, c := range []struct {
+		auto, groups, want string
+	}{
+		{"", "none", "needs the gvisor or microvm node group"},
+		{"", "gvisor", "needs the system node group"},
+		{"on", "microvm", "need the system node group too"},
+		{"on", "system", "comes only with the gvisor or microvm node group"},
+		{"on", "system,kata", `unknown node group "kata"`},
+	} {
+		f := newClusterFake()
+		err := clusterTestRun(t, f, false, func(cc *clusterConfig) { cc.AutoMode, cc.NodeGroups = c.auto, c.groups }).run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), c.want) || len(f.writes) != 0 {
+			t.Errorf("AUTO_MODE=%q NODE_GROUPS=%s: %v (writes %v), want %q", c.auto, c.groups, err, f.writes, c.want)
+		}
+	}
+}
+
 func TestCreateClusterStandardMode(t *testing.T) {
 	f := newClusterFake()
 	if err := clusterTestRun(t, f, false, func(c *clusterConfig) { c.AutoMode = "" }).run(context.Background()); err != nil {

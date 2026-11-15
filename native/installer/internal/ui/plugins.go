@@ -41,24 +41,34 @@ func pluginTitles(ps []plugin.Plugin) []string {
 	return out
 }
 
-// unavailable is why p cannot be chosen for this run's cluster, or "".
-func (m Model) unavailable(p plugin.Plugin) string {
-	if p.NeedsAutoMode != "" && !m.s.AutoMode {
-		return p.NeedsAutoMode + "; " + m.s.ClusterName + " has Auto Mode off"
+// choosable are the plugins the screen lists: every registered one but
+// those a sandbox class installs (plugin.Class), which Settings chooses.
+func choosable() []plugin.Plugin {
+	var out []plugin.Plugin
+	for _, p := range plugin.All() {
+		if p.Class == "" {
+			out = append(out, p)
+		}
 	}
-	return ""
+	return out
+}
+
+// unavailable is why p cannot be chosen for this run's cluster, its sandbox
+// classes and the other chosen plugins, or "" (state.PluginProblem).
+func (m Model) unavailable(p plugin.Plugin) string {
+	return m.s.PluginProblem(p, m.chosenIDs())
 }
 
 // enterPlugins preselects, the first time, --plugins or else the Default
 // plugins, with what they require. A preselected plugin this cluster cannot
-// take is dropped, and the screen says so.
+// take is dropped, and the screen says why.
 func (m *Model) enterPlugins() {
 	pl := m.pl
 	if !pl.shown {
 		pl.shown = true
 		ids := m.s.Plugins
 		if ids == nil {
-			for _, p := range plugin.All() {
+			for _, p := range choosable() {
 				if p.Default {
 					ids = append(ids, p.ID)
 				}
@@ -66,20 +76,30 @@ func (m *Model) enterPlugins() {
 		}
 		pl.chosen = map[string]bool{}
 		for _, p := range resolved(ids) {
-			pl.chosen[p.ID] = true
+			if p.Class == "" {
+				pl.chosen[p.ID] = true
+			}
 		}
 	}
+	m.dropUnavailable()
+	pl.cursor = min(pl.cursor, max(len(choosable())-1, 0))
+}
+
+// dropUnavailable clears every chosen plugin this run cannot take (and what
+// requires it), and says which and why. It reports whether it dropped any.
+func (m *Model) dropUnavailable() bool {
 	var dropped []string
-	for _, p := range plugin.All() {
-		if pl.chosen[p.ID] && m.unavailable(p) != "" {
+	for _, p := range choosable() {
+		if m.pl.chosen[p.ID] && m.unavailable(p) != "" {
 			dropped = append(dropped, p.ID)
 			m.setPlugin(p.ID, false)
 		}
 	}
 	if len(dropped) > 0 {
-		m.notice = "not selected: " + strings.Join(dropped, ", ") + " (needs EKS Auto Mode)"
+		// The list says why for the row under the cursor.
+		m.notice = "not selected: " + strings.Join(dropped, ", ") + " (unavailable)"
 	}
-	pl.cursor = min(pl.cursor, max(len(plugin.All())-1, 0))
+	return len(dropped) > 0
 }
 
 // setPlugin selects id with everything it requires, or clears it with
@@ -118,7 +138,7 @@ func (m Model) chosenIDs() []string {
 }
 
 func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
-	all := plugin.All()
+	all := choosable()
 	pl := m.pl
 	switch msg.String() {
 	case "up", "k":
@@ -134,12 +154,18 @@ func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		p := all[pl.cursor]
-		if why := m.unavailable(p); why != "" {
+		if why := m.unavailable(p); why != "" && !pl.chosen[p.ID] {
 			m.notice = p.Title + " " + why
 			return nil
 		}
 		m.setPlugin(p.ID, !pl.chosen[p.ID])
+		// Clearing one may take away what another runs on (mode 3's
+		// microvm group brings the system group on Auto Mode).
+		m.dropUnavailable()
 	case "enter":
+		if m.dropUnavailable() {
+			return nil
+		}
 		m.s.Plugins = m.chosenIDs()
 		// A plugin built on the counter demo's templates needs the demo,
 		// which then runs before the plugins (state.InstallOrder).
@@ -174,7 +200,7 @@ func (m Model) requiredBy(id string) []string {
 }
 
 func (m Model) pluginsView() string {
-	all := plugin.All()
+	all := choosable()
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Choose plugins") + "\n")
 	b.WriteString(theme.Subtle.Render("Optional parts of the install. The control plane is installed once with what they need, then each is deployed and checked.") + "\n\n")
@@ -198,8 +224,10 @@ func (m Model) pluginsView() string {
 		}
 		note := ""
 		switch {
-		case why != "":
+		case why != "" && p.NeedsAutoMode != "" && !m.s.AutoMode:
 			note = "needs Auto Mode"
+		case why != "":
+			note = "unavailable"
 		case len(m.requiredBy(p.ID)) > 0:
 			note = "for " + strings.Join(m.requiredBy(p.ID), ", ")
 		case p.Default:

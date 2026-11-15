@@ -233,6 +233,47 @@ type Options struct {
 	Tags string
 	// AutoMode is the cluster's EKS Auto Mode, read off the cluster.
 	AutoMode bool
+	// Pools are the ate.dev/pool values of the cluster's nodes (NodePools),
+	// read by the caller: the node groups a plugin's Nodes are checked
+	// against.
+	Pools []string
+}
+
+// PoolLabel is the label of the node groups' nodes: system, gvisor or
+// microvm (and isolated, on the AWS Nitro sandbox class's Auto Mode nodes).
+const PoolLabel = "ate.dev/pool"
+
+// PoolsArgs are the kubectl arguments that list the PoolLabel values of the
+// cluster's nodes, which ParsePools reads.
+var PoolsArgs = []string{"get", "nodes", "-l", PoolLabel, "-o", `jsonpath={.items[*].metadata.labels.ate\.dev/pool}`}
+
+// ParsePools is the sorted, distinct pools PoolsArgs printed.
+func ParsePools(out string) []string {
+	pools := strings.Fields(out)
+	slices.Sort(pools)
+	return slices.Compact(pools)
+}
+
+// MissingNodes are the groups of p's Nodes that pools lack.
+func MissingNodes(p Plugin, pools []string) []string {
+	var out []string
+	for _, n := range p.Nodes {
+		if !slices.Contains(pools, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// ForClass are the registered plugins the sandbox class installs, by Order.
+func ForClass(class string) []Plugin {
+	var out []Plugin
+	for _, p := range All() {
+		if class != "" && p.Class == class {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Plugin is one optional part of an install.
@@ -261,7 +302,22 @@ type Plugin struct {
 	// runs before the plugins. Deploy itself refuses when the demo is
 	// missing, so --plugin-action deploy says so too.
 	NeedsDemo bool
-	Needs     Needs
+	// Nodes are the node groups its Pods are pinned to, by their
+	// ate.dev/pool label (system, gvisor, microvm). The wizard offers it
+	// only when the run makes those groups or the cluster has their nodes,
+	// and Run refuses to deploy or check it on a cluster whose nodes
+	// (Options.Pools) lack one.
+	Nodes []string
+	// AddsNodes: choosing it makes its Nodes' gvisor and microvm groups on a
+	// cluster the run creates, as their sandbox classes do (mode3 makes the
+	// microvm group even without the microvm class).
+	AddsNodes bool
+	// Class is the sandbox class that installs it: such a plugin is not on
+	// the wizard's Plugins screen, and choosing the class in Settings (or
+	// --sandbox-classes) adds it (mode3-iso is the AWS Nitro sandbox class,
+	// "nitro").
+	Class string
+	Needs Needs
 	// HourlyUSD is the rough on-demand cost the plugin adds, for the Review
 	// screen (0 when it is only Kubernetes objects).
 	HourlyUSD float64

@@ -75,6 +75,7 @@ func init() {
 		Minutes:  12,
 		SetupAWS: true,
 		Needs:    plugin.Needs{CredentialProviders: []string{providerJSON}},
+		Nodes:    []string{"system", "gvisor"}, // the provider, and the probe pool
 		Deploy:   Deploy,
 		Verify:   Verify,
 		Remove:   Remove,

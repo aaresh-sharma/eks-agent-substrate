@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
@@ -141,9 +142,12 @@ func simStart(s *state.Setup, what string) string {
 	return fmt.Sprintf("level=INFO msg=%q cluster=%s region=%s", what, s.ClusterName, s.Region)
 }
 
-// createCluster runs `setup-aws create cluster` with config.env's knobs.
+// createCluster runs `setup-aws create cluster` with config.env's knobs and
+// the node groups the run's sandbox classes and plugins need (NODE_GROUPS,
+// shown in the command: none on Auto Mode with only the AWS Nitro sandbox).
 func (b builder) createCluster(s *state.Setup) execx.Spec {
-	return b.setupAWSSpec(s, "setup-aws create cluster", nil, s.NewClusterConfig.Env(),
+	groups := "NODE_GROUPS=" + nodegroups.Format(s.NodeGroups())
+	return b.setupAWSSpec(s, "setup-aws create cluster", []string{groups}, s.NewClusterConfig.Env(),
 		simPhases(phases.Cluster, simStart(s, "Creating the cluster..."),
 			`level=INFO msg="Cluster ready." cluster=`+s.ClusterName+` created=27 changed=0 took=19m40s`),
 		"create", "cluster")
@@ -216,30 +220,31 @@ func (b builder) selfSpec(s *state.Setup, cluster, label string, sim []string, f
 // control plane, plugins, demo and verify steps: --tag, --image-repo when it
 // is not the default, and --plugins, whose Source replaces the --tag release
 // (plugin.ReadRelease, with the recorded plugins). So a run that chooses
-// mode 3 is on its fork from the control plane step on.
-func releaseFlags(s *state.Setup) []string {
+// mode 3, or the AWS Nitro sandbox class, is on its fork from the control
+// plane step on. ids are the plugins the step names: every plugin the
+// install carries (s.InstallPlugins) on the control plane, demo and verify
+// steps, and the ones a plugin step deploys on the two plugin steps.
+func releaseFlags(s *state.Setup, ids []string) []string {
 	f := []string{"--tag", s.SubstrateTag}
 	if s.ImageRepo != state.DefaultImageRepo {
 		f = append(f, "--image-repo", s.ImageRepo)
 	}
-	if len(s.Plugins) > 0 {
-		f = append(f, "--plugins", plugin.FormatRecord(s.Plugins))
+	if len(ids) > 0 {
+		f = append(f, "--plugins", plugin.FormatRecord(ids))
 	}
 	return f
 }
 
-// classFlags are --sandbox-classes when it is not the default, for the steps
-// that install or check the sandbox classes.
+// classFlags are --sandbox-classes, always: a child's default is
+// SANDBOX_CLASSES from the config files, which the run's Settings may have
+// changed.
 func classFlags(s *state.Setup) []string {
-	if s.SandboxClasses != state.DefaultSandboxClasses {
-		return []string{"--sandbox-classes", s.SandboxClasses}
-	}
-	return nil
+	return []string{"--sandbox-classes", s.SandboxClasses}
 }
 
 // release is the release s's steps install and use (releaseFlags).
 func release(s *state.Setup) plugin.Release {
-	return plugin.ChosenRelease(s.Plugins, s.SubstrateTag, s.ImageRepo)
+	return plugin.ChosenRelease(s.InstallPlugins(), s.SubstrateTag, s.ImageRepo)
 }
 
 // controlPlane re-executes the installer with --deploy-control-plane.
@@ -247,8 +252,9 @@ func (b builder) controlPlane(s *state.Setup) execx.Spec {
 	sim := []string{
 		controlplane.KubeconfLine + "~/.cache/substrate-eks/kubeconfig/" + s.ClusterName + "." + s.Region + ".yaml",
 	}
-	if len(s.Plugins) > 0 {
-		sim = append(sim, controlplane.PluginsLine+strings.Join(resolvedIDs(s.Plugins), ", "))
+	ids := s.InstallPlugins()
+	if len(ids) > 0 {
+		sim = append(sim, controlplane.PluginsLine+strings.Join(resolvedIDs(ids), ", "))
 	}
 	rel := release(s)
 	sim = append(sim,
@@ -266,9 +272,13 @@ func (b builder) controlPlane(s *state.Setup) execx.Spec {
 		sim = append(sim, controlplane.PrereqLine+"StorageClass "+sc+" ("+prov+", encrypted gp3, 3 volume tags)",
 			"storageclass.storage.k8s.io/"+sc+" created")
 	}
+	sim = append(sim, "[step]: deploy_ate_system")
+	// ate-setup stages the microVM assets only for its microvm class.
+	ateClasses := state.AteSetupClasses(s.SandboxClasses)
+	if state.HasClass(ateClasses, state.ClassMicroVM) {
+		sim = append(sim, "[step]: prepare_microvm_deps", "Uploading assets to s3://"+s.AssetBucket()+"/microvm-assets/ ...")
+	}
 	sim = append(sim,
-		"[step]: deploy_ate_system", "[step]: prepare_microvm_deps",
-		"Uploading assets to s3://"+s.AssetBucket()+"/microvm-assets/ ...",
 		"[step]: deploy_crds", "[step]: ensure_apiserver_prerequisites",
 		"[step]: Waiting for ATE system components to be ready...",
 		`deployment "ate-api-server" successfully rolled out`,
@@ -277,9 +287,9 @@ func (b builder) controlPlane(s *state.Setup) execx.Spec {
 	)
 	flags := []string{"--deploy-control-plane", "--database", s.Database,
 		"--snap-bucket", s.SnapBucket(), "--asset-bucket", s.AssetBucket()}
-	flags = append(append(flags, releaseFlags(s)...), classFlags(s)...)
+	flags = append(append(flags, releaseFlags(s, ids)...), classFlags(s)...)
 	spec := b.selfSpec(s, s.ClusterName, "ate-setup deploy ate-system", sim, flags...)
-	spec.Display = "go run ./cmd/ate-setup deploy ate-system  (substrate " + rel.Tag + " + deploy/eks, " + s.SandboxClasses + ", database " + s.Database + ")"
+	spec.Display = "go run ./cmd/ate-setup deploy ate-system  (substrate " + rel.Tag + " + deploy/eks, " + ateClasses + ", database " + s.Database + ")"
 	spec.DisplayIsSummary = true
 	return spec
 }
@@ -301,29 +311,49 @@ func resolvedIDs(ids []string) []string {
 // plugins re-executes the installer with --plugin-action deploy for the
 // chosen plugins, after the control plane carries their needs.
 func (b builder) plugins(s *state.Setup) execx.Spec {
+	return b.pluginStep(s, "plugins", s.Plugins)
+}
+
+// nitro is the AWS Nitro sandbox class's step: --plugin-action deploy for
+// the plugin the class installs (state.ClassPlugins), after the control
+// plane carries its needs and before the demo checks the class.
+func (b builder) nitro(s *state.Setup) execx.Spec {
+	return b.pluginStep(s, "AWS Nitro sandbox", state.ClassPlugins(s.SandboxClasses))
+}
+
+// pluginStep is --plugin-action deploy for ids. The release is the
+// install's: what the record lists and ids decide it, as on every step.
+func (b builder) pluginStep(s *state.Setup, label string, ids []string) execx.Spec {
 	var sim []string
-	for _, id := range resolvedIDs(s.Plugins) {
+	for _, id := range resolvedIDs(ids) {
 		sim = append(sim, plugin.DeployLine+id, plugin.VerifyLine+id, plugin.ReadyLine+id)
 	}
 	// No plugin settings (state.PluginKeys) in its Env: --plugin-action
 	// reads them from the config files itself (loadPluginSettings), so the
 	// log, which prints each Spec's Env, never holds WHATSAPP_PEER.
-	return b.selfSpec(s, s.ClusterName, "plugins", sim, append([]string{"--plugin-action", plugin.ActionDeploy}, releaseFlags(s)...)...)
+	return b.selfSpec(s, s.ClusterName, label, sim, append([]string{"--plugin-action", plugin.ActionDeploy}, releaseFlags(s, ids)...)...)
 }
 
 // demoStep re-executes the installer with --deploy-demo --verify: the counter
-// demo on every sandbox class, then the suspend/resume check on each.
+// demo on every gvisor and microvm class, then the suspend/resume check on
+// each class, the AWS Nitro sandbox's through its plugin's counter check.
 func (b builder) demoStep(s *state.Setup) execx.Spec {
 	var sim []string
-	classes := strings.Split(s.SandboxClasses, ",")
-	for _, c := range classes {
+	for _, c := range state.DemoClasses(s.SandboxClasses) {
 		sim = append(sim, demo.DeployLine+c, "actor counter-"+c+" is Running")
 	}
-	for _, c := range classes {
+	for _, c := range state.ParseClasses(s.SandboxClasses) {
+		if c == state.ClassNitro {
+			sim = append(sim, demo.VerifyLine+c)
+			for _, id := range resolvedIDs(state.ClassPlugins(c)) {
+				sim = append(sim, plugin.VerifyLine+id, plugin.ReadyLine+id)
+			}
+			continue
+		}
 		sim = append(sim, demo.VerifyLine+c, "suspended counter-"+c+"; snapshot in s3://"+s.SnapBucket()+"/",
 			demo.VerifyPassLine+c+": memory, file and rootfs counters continued after resume")
 	}
-	flags := append(append([]string{"--deploy-demo", "--verify"}, releaseFlags(s)...), classFlags(s)...)
+	flags := append(append([]string{"--deploy-demo", "--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...)
 	return b.selfSpec(s, s.ClusterName, "counter demo", sim, flags...)
 }
 
@@ -332,7 +362,7 @@ func (b builder) demoStep(s *state.Setup) execx.Spec {
 func (b builder) verify(s *state.Setup) execx.Spec {
 	// The release flags, as demoStep passes them: verify reads the tree of
 	// the release that was installed (review F11).
-	return b.selfSpec(s, s.ClusterName, "verify", nil, append(append([]string{"--verify"}, releaseFlags(s)...), classFlags(s)...)...)
+	return b.selfSpec(s, s.ClusterName, "verify", nil, append(append([]string{"--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...)...)
 }
 
 // removeControlPlane re-executes the installer with --remove-control-plane

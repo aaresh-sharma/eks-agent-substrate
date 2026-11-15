@@ -32,6 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/awsload"
 )
@@ -61,9 +62,11 @@ const (
 	// The bootstrap Job's node pool, and the pool
 	// --cordon-system-infra-components pins the control plane to. On an
 	// Auto Mode cluster from setup-aws create cluster, the system group
-	// carries both labels.
+	// carries both labels. An Auto Mode cluster with no node group has
+	// neither, and its Auto Mode nodes run both (autoNodeSelector).
 	systemPoolSelector  = "ate.dev/pool=system"
 	systemInfraSelector = "ate.dev/workloadType=ate-system-infra"
+	autoNodeKey         = "eks.amazonaws.com/compute-type"
 )
 
 // DBInstanceID is the RDS instance setup-aws create rds makes (DB_ID).
@@ -110,15 +113,28 @@ type rdsDB struct {
 // downloads the CA bundle into o.caFile (0600, in a 0700 directory that
 // cleanup removes), runs the schema bootstrap, and returns ate-setup's
 // connection-string environment. cleanup is never nil.
+//
+// The bootstrap Job and, on Auto Mode, the cordoned control plane run on
+// the system node group. An Auto Mode cluster without one (setup-aws
+// NODE_GROUPS=none) sets o.systemPool false: the Job runs on Auto Mode's
+// nodes and AteSetupArgs does not cordon. A standard cluster has no other
+// nodes, so there it is still required.
 func prepareRDS(ctx context.Context, w io.Writer, o *Options, kc, tree string) (env []string, cleanup func(), err error) {
 	cleanup = func() {}
-	if err := requireNodes(ctx, kc, systemPoolSelector, "the database bootstrap Job runs on the system node group"); err != nil {
+	if o.systemPool, err = nodesExist(ctx, kc, systemPoolSelector); err != nil {
 		return nil, cleanup, err
 	}
-	if o.AutoMode {
+	switch {
+	case !o.AutoMode:
+		if err := requireNodes(ctx, kc, systemPoolSelector, "the database bootstrap Job runs on the system node group"); err != nil {
+			return nil, cleanup, err
+		}
+	case o.systemPool:
 		if err := requireNodes(ctx, kc, systemInfraSelector, "on Auto Mode, --cordon-system-infra-components pins the control plane to them"); err != nil {
 			return nil, cleanup, err
 		}
+	default:
+		fmt.Fprintln(w, NoSystemPoolLine)
 	}
 	db, err := readRDS(ctx, *o)
 	if err != nil {
@@ -136,7 +152,7 @@ func prepareRDS(ctx context.Context, w io.Writer, o *Options, kc, tree string) (
 	if err != nil {
 		return nil, cleanup, err
 	}
-	if err := bootstrapSchema(ctx, w, kc, o.Overlay, tree, db, ca); err != nil {
+	if err := bootstrapSchema(ctx, w, kc, o.Overlay, tree, db, ca, o.systemPool); err != nil {
 		return nil, cleanup, err
 	}
 	return []string{
@@ -145,15 +161,28 @@ func prepareRDS(ctx context.Context, w io.Writer, o *Options, kc, tree string) (
 	}, cleanup, nil
 }
 
-// requireNodes fails unless a node matches selector: a pod pinned to a
-// missing pool stays Pending until a timeout that names nothing.
-func requireNodes(ctx context.Context, kc, selector, why string) error {
+// NoSystemPoolLine is printed with RDS on an Auto Mode cluster that has no
+// system node group.
+const NoSystemPoolLine = "No system node group: the database bootstrap Job and the control plane run on EKS Auto Mode nodes"
+
+// nodesExist reports whether a node matches selector.
+func nodesExist(ctx context.Context, kc, selector string) (bool, error) {
 	var out strings.Builder
 	if err := runCommand(ctx, io.Discard, command{Env: []string{"KUBECONFIG=" + kc}, Stdout: &out,
 		Argv: []string{"kubectl", "get", "nodes", "-l", selector, "-o", "name"}}); err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out.String()) != "", nil
+}
+
+// requireNodes fails unless a node matches selector: a pod pinned to a
+// missing pool stays Pending until a timeout that names nothing.
+func requireNodes(ctx context.Context, kc, selector, why string) error {
+	ok, err := nodesExist(ctx, kc, selector)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(out.String()) == "" {
+	if !ok {
 		return fmt.Errorf("no node is labeled %s, and %s; add the system node group (setup-aws create cluster makes it)", selector, why)
 	}
 	return nil
@@ -293,7 +322,7 @@ $$;
 // The master password lives only in a Secret in a throwaway namespace for
 // the length of the Job; removeBootstrap deletes the Secret, the Job and the
 // namespace afterwards, also on failure and when ctx is cancelled.
-func bootstrapSchema(ctx context.Context, w io.Writer, kc, overlay, tree string, db rdsDB, ca []byte) (err error) {
+func bootstrapSchema(ctx context.Context, w io.Writer, kc, overlay, tree string, db rdsDB, ca []byte, onSystem bool) (err error) {
 	setupSQL, err := os.ReadFile(filepath.Join(tree, "pkg", "postgressetup", "setup.sql"))
 	if err != nil {
 		return fmt.Errorf("no setup.sql in the Substrate tree: %w", err)
@@ -302,7 +331,7 @@ func bootstrapSchema(ctx context.Context, w io.Writer, kc, overlay, tree string,
 	if err != nil {
 		return err
 	}
-	job, err := renderJob(filepath.Join(overlay, bootstrapJob), db.host)
+	job, err := renderJob(filepath.Join(overlay, bootstrapJob), db.host, onSystem)
 	if err != nil {
 		return err
 	}
@@ -386,8 +415,10 @@ func removeBootstrap(w io.Writer, kc string, failed bool) error {
 	return errors.Join(errs...)
 }
 
-// renderJob fills the Job's three placeholders, the only ones it has.
-func renderJob(path, host string) ([]byte, error) {
+// renderJob fills the Job's three placeholders, the only ones it has. Off
+// the system node group (onSystem false: an Auto Mode cluster without one),
+// its pod is pinned to Auto Mode's nodes instead, with no toleration.
+func renderJob(path, host string, onSystem bool) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read the bootstrap Job: %w", err)
@@ -396,7 +427,30 @@ func renderJob(path, host string) ([]byte, error) {
 	if strings.Contains(out, "${") {
 		return nil, fmt.Errorf("%s has a placeholder the installer does not fill", path)
 	}
-	return []byte(out), nil
+	if onSystem {
+		return []byte(out), nil
+	}
+	job, err := kyaml.Parse(out)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	spec, err := job.Pipe(kyaml.Lookup("spec", "template", "spec"))
+	if err != nil || spec == nil {
+		return nil, fmt.Errorf("%s has no pod spec", path)
+	}
+	sel, err := kyaml.Parse("{" + autoNodeKey + ": auto}")
+	if err != nil {
+		return nil, err
+	}
+	// Two calls: PipeE hands each filter the previous one's result.
+	if err := spec.PipeE(kyaml.SetField("nodeSelector", sel)); err != nil {
+		return nil, err
+	}
+	if err := spec.PipeE(kyaml.Clear("tolerations")); err != nil {
+		return nil, err
+	}
+	s, err := job.String()
+	return []byte(s), err
 }
 
 // manifest is a v1 object as JSON, which kubectl apply reads like YAML.

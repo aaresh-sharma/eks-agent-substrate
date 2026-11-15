@@ -49,19 +49,18 @@ const (
 var nodeDiskGB = map[string]float64{"SYSTEM": 100, "GVISOR": 200, "MICROVM": 200}
 
 // clusterHourly is what a new cluster costs an hour: the control plane, the
-// NAT gateway, the nodes and their gp3 volumes. ok is false, with the
-// instance type, when the type is not in the price list.
-func clusterHourly(c state.ClusterConfig) (usd float64, unknown string) {
+// NAT gateway, and the nodes of groups (the node groups it gets) with their
+// gp3 volumes. unknown names an instance type that is not in the price list.
+func clusterHourly(c state.ClusterConfig, groups []string) (usd float64, unknown string) {
 	usd = eksHourly + natHourly
-	for _, g := range []struct {
-		name, typ, nodes string
-	}{{"SYSTEM", c.SystemInstanceType, c.SystemNodes}, {"GVISOR", c.GVisorInstanceType, c.GVisorNodes}, {"MICROVM", c.MicroVMInstanceType, c.MicroVMNodes}} {
-		n, _ := strconv.Atoi(g.nodes)
-		p, ok := ec2Price[g.typ]
+	for _, g := range groups {
+		nodes, typ := c.Group(g)
+		n, _ := strconv.Atoi(nodes)
+		p, ok := ec2Price[typ]
 		if !ok {
-			return 0, g.typ
+			return 0, typ
 		}
-		usd += float64(n) * (p + nodeDiskGB[g.name]*gp3PerGBMonth/hoursPerMonth)
+		usd += float64(n) * (p + nodeDiskGB[strings.ToUpper(g)]*gp3PerGBMonth/hoursPerMonth)
 	}
 	return usd, ""
 }
@@ -94,11 +93,15 @@ func (m Model) plan() []planStep {
 		p := planStep{step: st, display: spec.Display, summary: spec.DisplayIsSummary, minutes: stepMinutes[st]}
 		switch st {
 		case state.CreateCluster:
-			p.hourly, p.unknown = clusterHourly(m.s.NewClusterConfig)
+			p.hourly, p.unknown = clusterHourly(m.s.NewClusterConfig, m.s.NodeGroups())
 		case state.RDS:
 			p.hourly = rdsHourly + rdsStorageGB*gp3PerGBMonth/hoursPerMonth
-		case state.InstallPlugins:
-			for _, pl := range resolved(m.s.Plugins) {
+		case state.InstallPlugins, state.NitroSandbox:
+			ids := m.s.Plugins
+			if st == state.NitroSandbox {
+				ids = state.ClassPlugins(m.s.SandboxClasses)
+			}
+			for _, pl := range resolved(ids) {
 				p.minutes += pl.Minutes
 				p.hourly += pl.HourlyUSD
 			}
@@ -135,7 +138,7 @@ func costLine(plan []planStep, region string) (headline, cost string) {
 // plane, so the install is stopped here instead (review of 86ba13f,
 // finding 3).
 func (m Model) settingsErr() error {
-	return plugin.CheckSettings(resolved(m.s.Plugins), m.d.Config.Lookup)
+	return plugin.CheckSettings(resolved(m.s.InstallPlugins()), m.d.Config.Lookup)
 }
 
 func (m *Model) reviewKey(msg tea.KeyMsg) tea.Cmd {
@@ -209,11 +212,22 @@ func (m Model) reviewView(h int) string {
 	if s.DemoMode {
 		demo = "the counter on " + s.SandboxClasses
 	}
+	// The node groups the run creates, or the connected cluster has.
+	groups := "Node groups: " + s.NewClusterConfig.GroupsLine(s.NodeGroups())
+	if !s.ClusterIsNew {
+		groups = "Node groups on the cluster: " + strings.Join(s.NodeGroups(), ", ")
+		if len(s.NodeGroups()) == 0 {
+			groups = "No node groups on the cluster: everything runs on EKS Auto Mode nodes"
+		}
+	} else if len(s.NodeGroups()) == 0 {
+		groups = "No node groups: everything runs on EKS Auto Mode nodes"
+	}
 	head := []string{
 		theme.Title.Render("Review the plan") + "  " + theme.Subtle.Render("nothing has run yet"),
 		theme.Subtle.Render(truncate(fmt.Sprintf("Cluster %s (%s) · EKS %s · %s · %s", s.ClusterName, what, s.ClusterVersion, auto, s.Region), w)),
-		theme.Subtle.Render(truncate(fmt.Sprintf("Substrate %s · %s · database %s · plugins: %s · demo: %s",
-			plugin.ChosenRelease(s.Plugins, s.SubstrateTag, s.ImageRepo).Tag, s.SandboxClasses, s.Database, plugins, demo), w)),
+		theme.Subtle.Render(truncate(groups, w)),
+		theme.Subtle.Render(truncate(fmt.Sprintf("Substrate %s · classes %s · database %s · plugins: %s · demo: %s",
+			plugin.ChosenRelease(s.InstallPlugins(), s.SubstrateTag, s.ImageRepo).Tag, s.SandboxClasses, s.Database, plugins, demo), w)),
 		theme.Title.Render(pad("   Step", w-24)) + theme.Title.Render(fmt.Sprintf("%8s  %12s", "Time", "Cost an hour")),
 	}
 

@@ -182,7 +182,7 @@ func (m *Model) decide(c awsx.Cluster, res probe.Result) tea.Cmd {
 		m.cl.mode = "installed"
 	default:
 		m.cl.mode = "list"
-		m.s.SelectCluster(c)
+		m.s.SelectCluster(c, res.Pools)
 		return m.commit()
 	}
 	return nil
@@ -460,9 +460,9 @@ func (m Model) clusterPanel() string {
 		}
 		lines = append(lines, "",
 			theme.Subtle.Render("Created in "+m.s.Region+" by setup-aws create cluster, with:"),
-			para.Render(m.s.NewClusterConfig.Summary()),
+			para.Render(m.s.NewClusterConfig.Summary(state.NewNodeGroups(m.s.NewClusterConfig.AutoMode == "on", m.s.SandboxClasses, m.s.Plugins))),
 			theme.Subtle.Render("Tags: "+m.s.Tags+" (from TAGS), plus the deployment owner tag."),
-			theme.Fainted.Render("Change these with KUBERNETES_VERSION, AUTO_MODE, *_INSTANCE_TYPE, *_NODES, EKS_PUBLIC_ACCESS_CIDRS."))
+			theme.Fainted.Render("Change these with KUBERNETES_VERSION, AUTO_MODE, SANDBOX_CLASSES, *_INSTANCE_TYPE, *_NODES, EKS_PUBLIC_ACCESS_CIDRS."))
 	case "probing":
 		if err := cl.failed[sel.Name]; err != nil {
 			lines = []string{

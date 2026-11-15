@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,20 @@ type nodeGroupSpec struct {
 	Taints            []ekstypes.Taint
 }
 
-// groups are the system, gvisor and microvm node groups. The gvisor and
+// groups are the node groups NODE_GROUPS names, of the system, gvisor and
+// microvm ones (allGroups), in that order: none on an Auto Mode cluster
+// whose sandboxes are all Auto Mode's (nodegroups.Check is the rule).
+func (r *clusterRun) groups() []nodeGroupSpec {
+	var out []nodeGroupSpec
+	for _, g := range r.allGroups() {
+		if slices.Contains(r.wanted, g.Name) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// allGroups are the system, gvisor and microvm node groups. The gvisor and
 // microvm groups are tainted ate.dev/sandboxClass, so only the worker pods
 // that tolerate it land there. ate.dev/workloadType=ate-system-infra is the
 // label ate-setup pins the control plane to under
@@ -34,7 +48,7 @@ type nodeGroupSpec struct {
 // tainted with it, so any other pod runs on a node Auto Mode launches.
 //
 //	https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
-func (r *clusterRun) groups() []nodeGroupSpec {
+func (r *clusterRun) allGroups() []nodeGroupSpec {
 	sandbox := func(class string) []ekstypes.Taint {
 		return []ekstypes.Taint{{Key: aws.String("ate.dev/sandboxClass"), Value: aws.String(class), Effect: ekstypes.TaintEffectNoSchedule}}
 	}

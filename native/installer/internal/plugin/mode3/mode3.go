@@ -96,7 +96,10 @@ func init() {
 			"so an escape from gVisor lands in the guest kernel. Installs Substrate from csantanapr/substrate " +
 			"(" + Tag + "), Kata 3.32.0 with kata-deploy, and a counter pool on RuntimeClass kata that it checks.",
 		Order: Order, Minutes: 12,
-		Needs:  Needs,
+		Needs: Needs,
+		// Kata and the counter pool run on the microvm node group, which a
+		// new cluster gets for mode 3 even without the microvm class.
+		Nodes: []string{"microvm"}, AddsNodes: true,
 		Deploy: deploy, Verify: Kata.Verify, Remove: remove,
 	})
 }

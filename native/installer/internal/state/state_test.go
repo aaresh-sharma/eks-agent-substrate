@@ -59,7 +59,7 @@ func TestClusterConfigFromEnv(t *testing.T) {
 func TestNewSetupFromReadsTheReleaseAndTags(t *testing.T) {
 	env := map[string]string{"SUBSTRATE_TAG": "v1.0.1", "SUBSTRATE_IMAGE_REPO": "registry.example.com/substrate", "TAGS": ""}
 	s := NewSetupFrom(func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if s.SubstrateTag != "v1.0.1" || s.ImageRepo != "registry.example.com/substrate" || s.Tags != "" || s.SandboxClasses != AllSandboxClasses {
+	if s.SubstrateTag != "v1.0.1" || s.ImageRepo != "registry.example.com/substrate" || s.Tags != "" || s.SandboxClasses != DefaultSandboxClasses {
 		t.Errorf("setup %+v", s)
 	}
 	s = NewSetupFrom(func(k string) (string, bool) { return "", k == "SUBSTRATE_TAG" })
@@ -69,12 +69,12 @@ func TestNewSetupFromReadsTheReleaseAndTags(t *testing.T) {
 }
 
 func TestValidSandboxClasses(t *testing.T) {
-	for _, ok := range []string{"gvisor", "microvm", "gvisor,microvm", "microvm,gvisor"} {
+	for _, ok := range []string{"gvisor", "microvm", "nitro", "gvisor,microvm", "microvm,gvisor", "gvisor,nitro", "gvisor,microvm,nitro"} {
 		if err := ValidSandboxClasses(ok); err != nil {
 			t.Errorf("%q refused: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"", "kata", "gvisor,gvisor", "gvisor,", "gvisor microvm"} {
+	for _, bad := range []string{"", "kata", "gvisor,gvisor", "gvisor,", "gvisor microvm", "nitro,nitro", "Nitro"} {
 		if ValidSandboxClasses(bad) == nil {
 			t.Errorf("%q accepted", bad)
 		}
@@ -86,12 +86,12 @@ func TestValidSandboxClasses(t *testing.T) {
 func TestSelectAndNewClusterOverwriteEachOther(t *testing.T) {
 	s := &Setup{Region: "us-west-2", NewClusterConfig: ClusterConfig{KubernetesVersion: "1.37", AutoMode: "on"}}
 	s.NewCluster("made")
-	s.SelectCluster(awsx.Cluster{Name: "brought", Version: "1.38"})
-	if s.ClusterIsNew || s.ClusterOwned || s.AutoMode || s.ClusterVersion != "1.38" {
+	s.SelectCluster(awsx.Cluster{Name: "brought", Version: "1.38"}, []string{"gvisor"})
+	if s.ClusterIsNew || s.ClusterOwned || s.AutoMode || s.ClusterVersion != "1.38" || len(s.ClusterPools) != 1 {
 		t.Errorf("after SelectCluster: %+v", s)
 	}
 	s.NewCluster("made")
-	if !s.ClusterIsNew || !s.ClusterOwned || !s.AutoMode || s.ClusterName != "made" {
+	if !s.ClusterIsNew || !s.ClusterOwned || !s.AutoMode || s.ClusterName != "made" || s.ClusterPools != nil {
 		t.Errorf("after NewCluster: %+v", s)
 	}
 }

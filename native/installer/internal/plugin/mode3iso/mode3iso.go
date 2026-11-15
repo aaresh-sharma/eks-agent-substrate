@@ -44,6 +44,10 @@ import (
 // ID is the plugin ID.
 const ID = "mode3-iso"
 
+// Class is the sandbox class that installs the plugin: the AWS Nitro
+// sandbox, chosen in Settings or with --sandbox-classes nitro.
+const Class = "nitro"
+
 // CounterTag is the tag of this plugin's counter image in the deployment's
 // counter repository: its own, so Remove never deletes the image mode3
 // (mode3.CounterTag) or the demo (the release tag) runs.
@@ -85,15 +89,20 @@ var Iso = mode3.Counter{
 func init() {
 	plugin.Register(plugin.Plugin{
 		ID:    ID,
-		Title: "Mode 3: actor in a microVM Pod (isolated-sandbox)",
-		Summary: "Mode 3 with each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
-			"on nodes Auto Mode launches for them (NodePool ate-isolated); no Kata. Needs Auto Mode. Installs Substrate from " +
+		Title: "AWS Nitro sandbox (isolated-sandbox)",
+		Summary: "The AWS Nitro sandbox class: each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
+			"on nodes Auto Mode launches for them (NodePool ate-isolated); no Kata, no node group. Needs Auto Mode. Installs Substrate from " +
 			"csantanapr/substrate (" + mode3.Tag + ") and a counter pool that it checks.",
-		Order: mode3.Order + 1, Minutes: 12, NeedsAutoMode: needsAutoMode,
+		// Chosen with the class in Settings, not on the Plugins screen.
+		Class: Class,
+		// Minutes as measured on sub-p15 (2026-11-15): 7m29s, the counter
+		// image build and push included.
+		Order: mode3.Order + 1, Minutes: 8, NeedsAutoMode: needsAutoMode,
 		Needs: mode3.Needs,
-		// One node for the two worker Pods, launched by Auto Mode (an
-		// m8a.large on-demand, with the Auto Mode fee).
-		HourlyUSD: 0.12,
+		// One node for the two worker Pods, launched by Auto Mode: a
+		// c6i.xlarge on-demand on sub-p15, $0.17 in us-west-2, plus the
+		// $0.0204 Auto Mode fee.
+		HourlyUSD: 0.19,
 		Deploy:    deploy, Verify: Iso.Verify, Remove: remove,
 	})
 }

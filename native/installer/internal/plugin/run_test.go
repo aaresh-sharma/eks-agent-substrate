@@ -314,6 +314,57 @@ func TestRunDeployNeedsAutoMode(t *testing.T) {
 	}
 }
 
+// Both ways: a plugin pinned to a node group the cluster's nodes lack is
+// refused, deploy and verify alike, before anything runs, naming the group;
+// with the group's nodes (Options.Pools) it deploys and checks. A plugin it
+// requires counts too: "needy" requires "pinned".
+func TestRunRefusesAPluginWhoseNodesAreMissing(t *testing.T) {
+	f := &fakeCluster{}
+	o := runFixture(t, f, nil)
+	Register(Plugin{ID: "pinned", Order: 4, Nodes: []string{"system", "gvisor"},
+		Deploy: hook(f, "deploy pinned", nil), Verify: hook(f, "verify pinned", nil)})
+	Register(Plugin{ID: "needy", Order: 5, Requires: []string{"pinned"},
+		Deploy: hook(f, "deploy needy", nil), Verify: hook(f, "verify needy", nil)})
+	o.Pools = []string{"system", "isolated"}
+	for _, action := range []string{ActionDeploy, ActionVerify} {
+		err := Run(context.Background(), io.Discard, action, []string{"needy"}, o)
+		if err == nil || !strings.Contains(err.Error(), "plugin pinned runs on the gvisor node group") || !strings.Contains(err.Error(), "ate.dev/pool=gvisor") {
+			t.Errorf("%s: want the gvisor refusal, got %v", action, err)
+		}
+	}
+	if len(f.log) != 0 {
+		t.Errorf("ran after the refusal: %q", f.log)
+	}
+	o.Pools = []string{"gvisor", "system"}
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"needy"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), io.Discard, ActionVerify, []string{"needy"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.log, "deploy pinned") || !slices.Contains(f.log, "verify needy") {
+		t.Errorf("not deployed and checked with the nodes: %q", f.log)
+	}
+}
+
+func TestParsePoolsAndForClass(t *testing.T) {
+	if got := ParsePools("system gvisor system  microvm\n"); !slices.Equal(got, []string{"gvisor", "microvm", "system"}) {
+		t.Errorf("ParsePools = %v", got)
+	}
+	if got := ParsePools(""); len(got) != 0 {
+		t.Errorf("ParsePools of nothing = %v", got)
+	}
+	withRegistry(t)
+	Register(Plugin{ID: "c1", Order: 2, Class: "nitro"})
+	Register(Plugin{ID: "c0", Order: 1})
+	if got := ForClass("nitro"); len(got) != 1 || got[0].ID != "c1" {
+		t.Errorf("ForClass(nitro) = %v", got)
+	}
+	if got := ForClass(""); len(got) != 0 {
+		t.Errorf("ForClass of no class = %v", got)
+	}
+}
+
 // Both ways: SetupAWS runs a release's setup-aws binary itself, by its
 // absolute path, and `go -C <dir> run .` on the source directory, with the
 // same arguments and environment.

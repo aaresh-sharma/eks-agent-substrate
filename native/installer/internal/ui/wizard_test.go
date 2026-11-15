@@ -21,11 +21,15 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
 
-// Plugins for these tests: a default one, one that another requires, and
-// mode3-iso, which needs EKS Auto Mode.
+// Plugins for these tests: a default one on the system node group, one that
+// another requires, mode3-iso, which needs EKS Auto Mode and is the AWS
+// Nitro sandbox class's, and t-kata, which adds the microvm node group as
+// mode 3 does.
 func init() {
 	for _, p := range []plugin.Plugin{
-		{ID: "t-gateway", Title: "LLM gateway", Summary: "A gateway to Amazon Bedrock.", Order: 10, Minutes: 3, Default: true},
+		{ID: "t-gateway", Title: "LLM gateway", Summary: "A gateway to Amazon Bedrock.", Order: 10, Minutes: 3, Default: true, Nodes: []string{"system"}},
+		{ID: "t-kata", Title: "Kata pool", Summary: "Workers in Kata on the microvm nodes.", Order: 60, Minutes: 5, Nodes: []string{"microvm"}, AddsNodes: true},
+		{ID: "t-claw", Title: "Claw agent", Summary: "Workers on the gvisor nodes.", Order: 70, Minutes: 5, Nodes: []string{"gvisor"}},
 		{ID: "t-efs", Title: "EFS volumes", Summary: "Amazon EFS volumes per actor.", Order: 20, Minutes: 6, HourlyUSD: 0.04, SetupAWS: true,
 			Check: func(lookup func(string) (string, bool)) error {
 				if v, _ := lookup("T_EFS_IMAGE"); v != "" && !strings.Contains(v, "@sha256:") {
@@ -34,7 +38,7 @@ func init() {
 				return nil
 			}},
 		{ID: "t-s3files", Title: "S3 Files volumes", Summary: "S3 Files volumes per actor.", Order: 30, Minutes: 7, HourlyUSD: 0.05, Requires: []string{"t-efs"}, SetupAWS: true},
-		{ID: "mode3-iso", Title: "Mode 3 on isolated sandboxes", Summary: "Worker Pods in Nitro sandboxes.", Order: 40, Minutes: 4,
+		{ID: "mode3-iso", Title: "AWS Nitro sandbox", Summary: "Worker Pods in Nitro sandboxes.", Order: 40, Minutes: 4, HourlyUSD: 0.12, Class: "nitro",
 			NeedsAutoMode: "needs EKS Auto Mode: its isolated-sandbox RuntimeClass and NodePool come from Auto Mode"},
 		{ID: "t-ondemo", Title: "Counter volumes", Summary: "Counter templates with a volume.", Order: 50, Minutes: 2, NeedsDemo: true},
 	} {
@@ -200,7 +204,9 @@ func TestSettingsDatabaseAndClassesChangeTheRun(t *testing.T) {
 	s.DemoMode = true
 	m := toStep(t, New(testDeps(r), s), state.Settings)
 	m = cursorTo(t, m, "microvm")
-	m = press(m, "enter", "left", "enter")
+	m = press(m, "enter")
+	m = cursorTo(t, m, "gvisor")
+	m = press(m, "enter")
 	if m.set.values[classKey] != "gvisor" || !strings.Contains(m.View(), "At least one sandbox class") {
 		t.Fatalf("classes %q:\n%s", m.set.values[classKey], m.View())
 	}
@@ -301,30 +307,61 @@ func TestPluginsFlagPreselectsInsteadOfTheDefaults(t *testing.T) {
 	}
 }
 
-// mode3-iso is offered only on an Auto Mode cluster; asked for on another,
-// it is dropped with a notice (both directions).
-func TestModeISONeedsAutoMode(t *testing.T) {
+// The AWS Nitro sandbox is a sandbox class, chosen in Settings: it is not on
+// the Plugins screen, it is refused without Auto Mode (turning it on, and
+// turning Auto Mode off under it, both stop n with the reason), and with
+// Auto Mode its plugin gets its own step after the control plane, before
+// the demo (both directions).
+func TestNitroIsASandboxClassThatNeedsAutoMode(t *testing.T) {
 	for _, auto := range []bool{true, false} {
+		r := &recorder{}
 		s := newSetup("fresh")
-		s.Plugins = []string{"mode3-iso"}
-		m := toSettings(t, testDeps(&recorder{}), s)
+		s.DemoMode = true
+		m := toSettings(t, testDeps(r), s)
 		if !auto {
 			m = cursorTo(t, m, "AUTO_MODE")
 			m = press(m, "enter")
 		}
+		m = cursorTo(t, m, state.ClassNitro)
+		m = press(m, "enter")
+		if got := m.set.classOn(state.ClassNitro); got != auto {
+			t.Fatalf("auto=%v: nitro on %v:\n%s", auto, got, m.View())
+		}
+		if !auto {
+			if !strings.HasPrefix(m.notice, "AWS Nitro sandbox needs EKS Auto Mode") || !strings.Contains(m.View(), "[–] AWS Nitro sandbox") ||
+				!strings.Contains(m.View(), "Not available: needs EKS") {
+				t.Errorf("no refusal shown (notice %q):\n%s", m.notice, m.View())
+			}
+			// Auto Mode off under a chosen class: n names it and stays.
+			m = cursorTo(t, m, "AUTO_MODE")
+			m = press(m, "enter")
+			m = cursorTo(t, m, state.ClassNitro)
+			m = press(m, "enter")
+			m = cursorTo(t, m, "AUTO_MODE")
+			m = press(m, "enter", "n")
+			if m.m.Current() != state.Settings || !strings.Contains(m.View(), "AWS Nitro sandbox: needs EKS Auto Mode") {
+				t.Errorf("n went on with the class and Auto Mode off: at %s:\n%s", m.m.Current().Title(), m.View())
+			}
+			continue
+		}
 		m = press(m, "n")
-		if got := m.pl.chosen["mode3-iso"]; got != auto {
-			t.Errorf("auto=%v: preselected %v", auto, got)
+		if strings.Contains(m.View(), "AWS Nitro sandbox") {
+			t.Errorf("the class's plugin is on the Plugins screen:\n%s", m.View())
 		}
-		if !auto && !strings.Contains(m.View(), "not selected: mode3-iso") {
-			t.Errorf("no notice:\n%s", m.View())
+		m = press(m, "enter")
+		o := m.m.Order()
+		c, n, d := slices.Index(o, state.ControlPlane), slices.Index(o, state.NitroSandbox), slices.Index(o, state.Demo)
+		if c < 0 || n != c+1 || d != n+1 {
+			t.Fatalf("order %v: want Set up Nitro sandboxes between the control plane and the demo", o)
 		}
-		m = press(m, "down", "down", "down", " ", " ") // off and on again, where it may be chosen
-		if got := m.pl.chosen["mode3-iso"]; got != auto {
-			t.Errorf("auto=%v: after two presses chosen=%v", auto, got)
+		m = toStep(t, m, state.Complete)
+		before(t, r.ran(), "control plane", "nitro")
+		before(t, r.ran(), "nitro", "demo")
+		if tk := m.tasks[state.NitroSandbox]; tk == nil || len(tk.items) != 2 || tk.items[0].Label != "Deploy AWS Nitro sandbox" {
+			t.Errorf("nitro step checklist %+v", tk)
 		}
-		if !auto && !strings.Contains(m.View(), "needs EKS Auto Mode") {
-			t.Errorf("no reason shown:\n%s", m.View())
+		if tk := m.tasks[state.Demo]; len(tk.items) != 5 || tk.items[4].Label != "Check suspend and resume on nitro" {
+			t.Errorf("demo checklist %+v", tk.items)
 		}
 	}
 }
@@ -380,11 +417,12 @@ func TestReviewCostFollowsTheChoices(t *testing.T) {
 		t.Errorf("other Region: %s / %s", head, got)
 	}
 	c := state.ClusterConfigFromEnv(func(string) (string, bool) { return "", false })
-	if usd, unknown := clusterHourly(c); unknown != "" || usd < 2.376 || usd > 2.377 {
+	all := []string{"system", "gvisor", "microvm"}
+	if usd, unknown := clusterHourly(c, all); unknown != "" || usd < 2.376 || usd > 2.377 {
 		t.Errorf("default cluster $%.4f (%q); the price table says $2.3764", usd, unknown)
 	}
 	c.SystemInstanceType = "c7i.large"
-	if _, unknown := clusterHourly(c); unknown != "c7i.large" {
+	if _, unknown := clusterHourly(c, all); unknown != "c7i.large" {
 		t.Errorf("unknown type: %q", unknown)
 	}
 	if _, got := costLine([]planStep{{unknown: "c7i.large"}}, region); !strings.Contains(got, "Pricing Calculator for c7i.large") {

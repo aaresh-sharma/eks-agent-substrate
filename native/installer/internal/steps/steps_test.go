@@ -1,12 +1,14 @@
 package steps
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/demo"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/eksoverlay"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 )
 
@@ -61,11 +63,31 @@ func TestControlPlaneChecklistFollowsRealMarkerOrder(t *testing.T) {
 		"[step]: Waiting for ATE system components to be ready...",
 	}
 	want := []int{0, 0, 1, 2, 3, 4, 4, 5, 6, 7}
-	items, active := ControlPlane(), -1
+	items, active := ControlPlane(true), -1
 	for i, line := range real {
 		active = Progress(items, active, line)
 		if active != want[i] {
 			t.Fatalf("line %q lit row %d, want %d", line, active, want[i])
+		}
+	}
+}
+
+// Both ways: without ate-setup's microvm class (only the AWS Nitro sandbox
+// or gVisor) there is no microVM assets row to tick as done, and the lines
+// that run light every other row in order; with it the row is there.
+func TestControlPlaneHasTheMicroVMRowOnlyWhenItStages(t *testing.T) {
+	has := func(items []ChecklistItem) bool {
+		return slices.ContainsFunc(items, func(i ChecklistItem) bool { return i.Label == "Stage microVM assets in S3" })
+	}
+	if !has(ControlPlane(true)) || has(ControlPlane(false)) || len(ControlPlane(false)) != len(ControlPlane(true))-1 {
+		t.Fatalf("rows: with %d, without %d", len(ControlPlane(true)), len(ControlPlane(false)))
+	}
+	items, active := ControlPlane(false), -1
+	for i, line := range []string{controlplane.KubeconfLine + "/k", controlplane.CachedLine + "v1", eksoverlay.LinePrefix + "x",
+		controlplane.PrereqLine + "StorageClass x", "[step]: deploy_crds", "[step]: ensure_apiserver_prerequisites",
+		"[step]: Waiting for ATE system components to be ready..."} {
+		if active = Progress(items, active, line); active != i {
+			t.Fatalf("line %q lit row %d, want %d", line, active, i)
 		}
 	}
 }
@@ -78,7 +100,7 @@ func TestDatabaseRowLightsForEveryPath(t *testing.T) {
 		controlplane.DatabaseLine + "sub-nt1-pg (sub-nt1-pg.x.us-west-2.rds.amazonaws.com:5432)",
 		controlplane.PrereqLine + "StorageClass substrate-eks-ebs (ebs.csi.aws.com, encrypted gp3, 3 volume tags)",
 	} {
-		items := ControlPlane()
+		items := ControlPlane(true)
 		got := Progress(items, 2, line)
 		if got != 3 || items[got].Label != "Prepare the database" {
 			t.Errorf("%q lit row %d", line, got)
@@ -87,7 +109,7 @@ func TestDatabaseRowLightsForEveryPath(t *testing.T) {
 }
 
 func TestChecklistRejectsUnrelatedLines(t *testing.T) {
-	for _, items := range [][]ChecklistItem{Bootstrap(), ControlPlane()} {
+	for _, items := range [][]ChecklistItem{Bootstrap(), ControlPlane(true), ControlPlane(false)} {
 		if got := Progress(items, -1, "some unrelated output"); got != -1 {
 			t.Errorf("unrelated line lit row %d", got)
 		}
@@ -109,7 +131,7 @@ func TestDemoChecklistFollowsDeployThenVerify(t *testing.T) {
 		demo.VerifyLine + "gvisor", demo.VerifyPassLine + "gvisor", demo.VerifyLine + "microvm",
 	}
 	want := []int{0, 1, 2, 2, 3}
-	items, active := Demo([]string{"gvisor", "microvm"}), -1
+	items, active := Demo([]string{"gvisor", "microvm"}, []string{"gvisor", "microvm"}), -1
 	for i, line := range lines {
 		active = Progress(items, active, line)
 		if active != want[i] {

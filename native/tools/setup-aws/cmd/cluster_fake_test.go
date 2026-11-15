@@ -209,6 +209,9 @@ func (e *fcEC2) DescribeAvailabilityZones(_ context.Context, in *ec2.DescribeAva
 }
 
 func (e *fcEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanceTypesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error) {
+	if err := e.f().read("DescribeInstanceTypes"); err != nil {
+		return nil, err
+	}
 	out := &ec2.DescribeInstanceTypesOutput{}
 	for _, t := range in.InstanceTypes {
 		it, ok := e.types[string(t)]
@@ -221,6 +224,9 @@ func (e *fcEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanc
 }
 
 func (e *fcEC2) DescribeInstanceTypeOfferings(_ context.Context, in *ec2.DescribeInstanceTypeOfferingsInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypeOfferingsOutput, error) {
+	if err := e.f().read("DescribeInstanceTypeOfferings"); err != nil {
+		return nil, err
+	}
 	out := &ec2.DescribeInstanceTypeOfferingsOutput{}
 	for _, z := range sortedKeysOf(e.offerings) {
 		for _, t := range e.offerings[z] {
@@ -829,10 +835,12 @@ func (e *fcEKS) DescribeAddon(_ context.Context, in *eks.DescribeAddonInput, _ .
 	}
 	c := *a
 	// The networking add-ons come up on their own; coredns and the EBS CSI
-	// driver stay DEGRADED until there are nodes, as on EKS.
+	// driver stay DEGRADED until there are nodes, as on EKS: a node group's,
+	// or on Auto Mode the nodes Auto Mode launches for their Pods.
+	auto := e.cluster != nil && e.cluster.ComputeConfig != nil && aws.ToBool(e.cluster.ComputeConfig.Enabled)
 	if a.Status == ekstypes.AddonStatusCreating || a.Status == ekstypes.AddonStatusDegraded {
 		switch {
-		case aws.ToString(a.AddonName) != "coredns" && aws.ToString(a.AddonName) != "aws-ebs-csi-driver", e.anyNodegroupActive():
+		case aws.ToString(a.AddonName) != "coredns" && aws.ToString(a.AddonName) != "aws-ebs-csi-driver", e.anyNodegroupActive(), auto:
 			a.Status = ekstypes.AddonStatusActive
 		default:
 			a.Status = ekstypes.AddonStatusDegraded

@@ -25,6 +25,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/spf13/cobra"
 
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
 )
 
@@ -48,6 +49,9 @@ type clusterConfig struct {
 	PublicAccessCIDRs                                           string
 	SystemInstanceType, GvisorInstanceType, MicrovmInstanceType string
 	SystemNodes, GvisorNodes, MicrovmNodes                      int
+	// NodeGroups is NODE_GROUPS: the node groups to make, comma-separated,
+	// or "none" (nodegroups.Parse); nodegroups.Check is the rule.
+	NodeGroups string
 }
 
 var ccfg clusterConfig
@@ -62,10 +66,14 @@ API endpoint limited to EKS_PUBLIC_ACCESS_CIDRS (by default "auto": this
 machine's public address, a /32, looked up at https://checkip.amazonaws.com
 for a new cluster; an explicit value is applied to an existing one), and a
 check that this machine reaches it; a cluster-admin access entry
-for the caller; the add-ons; the node launch templates (IMDSv2 only, hop limit
-1, encrypted gp3, nested virtualization on microvm); and the system, gvisor
-and microvm managed node groups. Idempotent: a rerun creates only what is
-missing, and --plan changes nothing.`,
+for the caller; the add-ons; and the managed node groups NODE_GROUPS names
+(by default system, gvisor and microvm), each with its launch template
+(IMDSv2 only, hop limit 1, encrypted gp3, nested virtualization on microvm).
+Without Auto Mode the system group and a gvisor or microvm group are
+required; with it the system group comes with a gvisor or microvm group, and
+NODE_GROUPS=none makes no node group (and no node IAM role): Auto Mode's
+nodes run everything. Idempotent: a rerun creates only what is missing, and
+--plan changes nothing.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		e, err := newEnv(cmd.Context())
 		if err != nil {
@@ -90,6 +98,8 @@ func init() {
 	f.IntVar(&ccfg.SystemNodes, "system-nodes", getEnv("SYSTEM_NODES", 2), "nodes in the system node group (SYSTEM_NODES)")
 	f.IntVar(&ccfg.GvisorNodes, "gvisor-nodes", getEnv("GVISOR_NODES", 2), "nodes in the gvisor node group (GVISOR_NODES)")
 	f.IntVar(&ccfg.MicrovmNodes, "microvm-nodes", getEnv("MICROVM_NODES", 2), "nodes in the microvm node group (MICROVM_NODES)")
+	f.StringVar(&ccfg.NodeGroups, "node-groups", getEnv("NODE_GROUPS", nodegroups.Default),
+		`managed node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
 	createCmd.AddCommand(createClusterCmd)
 }
 
@@ -117,6 +127,11 @@ type clusterRun struct {
 
 	creates, changes []string
 
+	// wanted are the node groups NODE_GROUPS names; wantedErr is why it
+	// cannot be read, which validate reports.
+	wanted    []string
+	wantedErr error
+
 	cluster    *ekstypes.Cluster // nil while it does not exist
 	nodegroups map[string]*ekstypes.Nodegroup
 	addons     map[string]*ekstypes.Addon
@@ -134,10 +149,17 @@ func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
 	for k, v := range e.tags {
 		tags[k] = v
 	}
-	return &clusterRun{e: e, c: c, cfg: cfg, auto: cfg.AutoMode == "on", tags: tags,
+	r := &clusterRun{e: e, c: c, cfg: cfg, auto: cfg.AutoMode == "on", tags: tags,
 		autoCIDRs:  strings.TrimSpace(cfg.PublicAccessCIDRs) == publicAccessAuto,
 		nodegroups: map[string]*ekstypes.Nodegroup{}, addons: map[string]*ekstypes.Addon{},
 		amiTypes: map[string]ekstypes.AMITypes{}, templates: map[string]ltRef{}}
+	// Empty is unset, as getEnv reads NODE_GROUPS: the default three.
+	ng := cfg.NodeGroups
+	if strings.TrimSpace(ng) == "" {
+		ng = nodegroups.Default
+	}
+	r.wanted, r.wantedErr = nodegroups.Parse(ng)
+	return r
 }
 
 func (r *clusterRun) run(ctx context.Context) error {
@@ -263,6 +285,12 @@ func (r *clusterRun) validate() error {
 		if _, _, err := net.ParseCIDR(c); err != nil && !r.autoCIDRs {
 			return fmt.Errorf("EKS_PUBLIC_ACCESS_CIDRS: %q is not an address range", c)
 		}
+	}
+	if r.wantedErr != nil {
+		return r.wantedErr
+	}
+	if err := nodegroups.Check(r.auto, r.wanted); err != nil {
+		return fmt.Errorf("NODE_GROUPS=%s: %w", nodegroups.Format(r.wanted), err)
 	}
 	for _, g := range r.groups() {
 		if g.Desired < 1 {
@@ -427,6 +455,12 @@ func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 			types = append(types, t)
 		}
 	}
+	if len(types) == 0 {
+		// No node group: Auto Mode picks its own instance types. (With no
+		// InstanceTypes, DescribeInstanceTypes would list every type.)
+		slog.Info("no node group to make: Auto Mode's nodes run everything")
+		return nil
+	}
 	out, err := r.c.EC2.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{InstanceTypes: types})
 	if err != nil {
 		return fmt.Errorf("describe instance types: %w", err)
@@ -452,7 +486,7 @@ func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 			return fmt.Errorf("instance type %s has no x86_64 or arm64 support", g.InstanceType)
 		}
 	}
-	slog.Info("instance types ok", "microvm", r.cfg.MicrovmInstanceType, "nestedVirtualization", true)
+	slog.Info("instance types ok", "types", fmt.Sprint(types))
 	return nil
 }
 
@@ -477,7 +511,9 @@ func (r *clusterRun) pickAZs(ctx context.Context) error {
 		LocationType: ec2types.LocationTypeAvailabilityZone,
 		Filters:      []ec2types.Filter{{Name: aws.String("instance-type"), Values: types}},
 	})
-	for p.HasMorePages() {
+	// With no node group there is no instance type to offer: every zone EKS
+	// accepts is fine, and Auto Mode picks types per zone.
+	for len(types) > 0 && p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
 			return fmt.Errorf("describe instance type offerings: %w", err)
