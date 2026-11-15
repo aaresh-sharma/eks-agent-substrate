@@ -13,6 +13,33 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/csantanapr/eks-agent-substrate.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 
+# The Go the installer needs. The installer's own go.mod asks for 1.26, and
+# its control plane step runs Agent Substrate's ate-setup, whose go.mod (at
+# v1.0.0) asks for 1.27. The install runs Go with GOTOOLCHAIN=local, so an
+# older Go cannot fetch a newer toolchain by itself.
+GO_MIN_MAJOR=1
+GO_MIN_MINOR=27
+
+# check_go stops with the fix when the Go found in dir, the directory the
+# build runs in, is older than GO_MIN_MAJOR.GO_MIN_MINOR. It asks from dir
+# because version managers (goenv, asdf, mise) pick the version per directory.
+check_go() {
+    local dir="$1" found re='go([0-9]+)\.([0-9]+)'
+    found="$(cd "${dir}" && GOTOOLCHAIN=local go env GOVERSION 2>/dev/null || true)"
+    if [[ ! "${found}" =~ ${re} ]]; then
+        echo "warning: could not read the Go version ('${found}'); the build needs Go ${GO_MIN_MAJOR}.${GO_MIN_MINOR} or newer." >&2
+        return 0
+    fi
+    local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+    if (( major > GO_MIN_MAJOR || (major == GO_MIN_MAJOR && minor >= GO_MIN_MINOR) )); then
+        return 0
+    fi
+    echo "error: the substrate-eks installer needs Go ${GO_MIN_MAJOR}.${GO_MIN_MINOR} or newer; found ${found} ($(command -v go))." >&2
+    echo "  Install it from https://go.dev/dl/, with your package manager (macOS: brew install go)," >&2
+    echo "  or with your Go version manager, then run this again." >&2
+    exit 1
+}
+
 main() {
     # Piped in (curl ... | bash), the wizard still needs the keyboard. Hand
     # /dev/tty to the installer alone: bash reads this script from the pipe,
@@ -61,6 +88,8 @@ main() {
     # `go run` steps the installer starts: the pinned local toolchain, and
     # modules fetched straight from their source.
     export GOTOOLCHAIN="${GOTOOLCHAIN:-local}" GOPROXY="${GOPROXY:-direct}" GOSUMDB="${GOSUMDB:-off}"
+
+    check_go "${native_dir}"
 
     echo "==> Building the substrate-eks installer in ${native_dir}..."
     make -C "${native_dir}" build

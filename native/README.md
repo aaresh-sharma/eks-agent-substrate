@@ -213,7 +213,13 @@ whatever `--tag` names: a fork whose plugin was removed, or the old tag
 after `SUBSTRATE_TAG` moved to a new one.
 
 The Makefile and `install.sh` run Go with `GOTOOLCHAIN=local` and
-`GOPROXY=direct`, so module downloads go straight to their source.
+`GOPROXY=direct`, so module downloads go straight to their source, and an
+older Go cannot fetch a newer toolchain by itself. `install.sh` therefore
+checks first that the Go it will build with is 1.27 or newer, asking from
+`native/` so a per-directory version manager (goenv, asdf, mise) answers as
+it will for the build, and stops with the fix when it is not. Go 1.26 builds
+the installer, but its control plane step runs Agent Substrate's `ate-setup`,
+which needs 1.27.
 
 ### What the demo shows
 

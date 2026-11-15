@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -148,5 +151,102 @@ func TestLauncherCheckAcceptsMentionsAndRejectsInvocations(t *testing.T) {
 	}
 	if _, err := launcherCalls("cat <<EOF\nkubectl apply\nEOF\n"); err == nil {
 		t.Error("a heredoc was accepted unchecked")
+	}
+}
+
+// fakeGo answers `go env GOVERSION` with FAKE_GO_VERSION, after writing the
+// directory it was asked from to FAKE_GO_PWD, and fails any other call, so a
+// launcher that gets past its Go check stops at the build instead of running
+// it.
+const fakeGo = `#!/bin/sh
+if [ "$1 $2" = 'env GOVERSION' ]; then
+  pwd > "$FAKE_GO_PWD"
+  printf '%s\n' "$FAKE_GO_VERSION"
+  exit 0
+fi
+echo fake-go-build "$@"
+exit 3
+`
+
+// install.sh stops before the build, naming the fix, when the Go the build
+// would use is older than 1.27, and goes on to the build otherwise. It asks
+// that Go from native/, where the build runs, so a per-directory version
+// manager answers as it will for the build. PATH holds only the fake go and
+// the tools the launcher needs, so no real Go or build runs.
+func TestLauncherChecksTheGoVersion(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil || runtime.GOOS == "windows" {
+		t.Skip("needs bash and a POSIX /bin/sh")
+	}
+	script, err := filepath.Abs("../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeDir, err := filepath.EvalSymlinks(filepath.Dir(script))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := map[string]string{}
+	for _, name := range []string{"git", "make", "dirname"} {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("needs %s", name)
+		}
+		tools[name] = p
+	}
+
+	for _, c := range []struct {
+		version string
+		refused bool
+	}{
+		{"go1.22.3", true},
+		{"go1.26.4", true},
+		{"go1.27.0", false},
+		{"go1.27rc1", false},
+		{"go1.28.1", false},
+		{"go2.0.0", false},
+		{"devel go1.28-0123abcd Mon Jan 5 2026", false},
+		{"", false},
+	} {
+		name := fmt.Sprintf("%q", c.version)
+		bin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for tool, p := range tools {
+			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pwdFile := filepath.Join(t.TempDir(), "pwd")
+		cmd := exec.Command(bash, script, "--dry-run")
+		cmd.Env = []string{"PATH=" + bin, "HOME=" + t.TempDir(), "FAKE_GO_VERSION=" + c.version, "FAKE_GO_PWD=" + pwdFile}
+		b, runErr := cmd.CombinedOutput()
+		out := string(b)
+		if runErr == nil {
+			t.Errorf("%s: install.sh exited 0; the fake build always fails:\n%s", name, out)
+		}
+
+		asked, err := os.ReadFile(pwdFile)
+		if err != nil {
+			t.Errorf("%s: the launcher never asked go for its version: %v\n%s", name, err, out)
+		} else if dir, err := filepath.EvalSymlinks(strings.TrimSpace(string(asked))); err != nil || dir != nativeDir {
+			t.Errorf("%s: asked go for its version from %q, want %q (the build's directory)", name, strings.TrimSpace(string(asked)), nativeDir)
+		}
+
+		built := strings.Contains(out, "==> Building") || strings.Contains(out, "fake-go-build")
+		refusal := "needs Go 1.27 or newer; found " + c.version
+		if c.refused {
+			if built || !strings.Contains(out, refusal) || !strings.Contains(out, "https://go.dev/dl/") {
+				t.Errorf("%s: want a refusal naming the version and the fix, before the build:\n%s", name, out)
+			}
+			continue
+		}
+		if !strings.Contains(out, "==> Building") || !strings.Contains(out, "fake-go-build") || strings.Contains(out, "error: the substrate-eks installer needs Go") {
+			t.Errorf("%s: want the build to start, with no refusal:\n%s", name, out)
+		}
+		if warned := strings.Contains(out, "could not read the Go version"); warned != (c.version == "") {
+			t.Errorf("%s: unreadable-version warning shown = %v:\n%s", name, warned, out)
+		}
 	}
 }
