@@ -284,3 +284,37 @@ func TestAGroupAPluginAddsIsValidated(t *testing.T) {
 		}
 	}
 }
+
+// Review NIT-6: the help on every class row says when an Auto Mode cluster
+// with neither gVisor nor microVM gets a node group: only from a plugin,
+// mode 3's microvm group (with RDS the system group too), or the system
+// group for a plugin that runs on it; none without one. The rule agrees.
+func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
+	for _, c := range []struct {
+		db      string
+		plugins []string
+		want    []string
+	}{
+		{state.DatabaseBundled, nil, nil},
+		{state.DatabaseRDS, nil, nil},
+		{state.DatabaseBundled, []string{"t-kata"}, []string{"microvm"}},
+		{state.DatabaseRDS, []string{"t-kata"}, []string{"system", "microvm"}},
+		{state.DatabaseBundled, []string{"t-gateway"}, []string{"system"}},
+	} {
+		if got := state.NewNodeGroups(true, c.db, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
+			t.Errorf("Auto Mode, %s, nitro, %v: %v, want %v", c.db, c.plugins, got, c.want)
+		}
+	}
+	for _, c := range state.Classes {
+		for _, want := range []string{
+			"With neither class, an Auto Mode cluster gets a node group only from a plugin",
+			"mode 3 adds the microvm group (and with RDS the system group)",
+			"a plugin that runs on the system group",
+			"Without such a plugin it gets none",
+		} {
+			if !strings.Contains(help[c], want) {
+				t.Errorf("%s help lacks %q:\n%s", c, want, help[c])
+			}
+		}
+	}
+}

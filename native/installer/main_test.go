@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/llmgateway"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/mode3"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 )
 
@@ -72,5 +75,34 @@ func TestCreatePrivateLogFile(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(old); string(b) != "kept\n" {
 		t.Errorf("existing log content lost: %q", b)
+	}
+}
+
+// Review NIT-6: the checkout's comment on SANDBOX_CLASSES says when Auto
+// Mode with the nitro class alone gets a node group: only for a plugin that
+// adds one, mode3's microvm or system for a plugin that runs on it (the LLM
+// gateway); none without one. The rule, with the real plugins, agrees.
+func TestSandboxClassesCommentSaysWhenAPluginAddsANodeGroup(t *testing.T) {
+	for _, c := range []struct {
+		plugins []string
+		want    []string
+	}{{nil, nil}, {[]string{mode3.ID}, []string{"microvm"}}, {[]string{llmgateway.ID}, []string{"system"}}} {
+		if got := state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
+			t.Errorf("Auto Mode, bundled, nitro, %v: %v, want %v", c.plugins, got, c.want)
+		}
+	}
+	cfg, err := state.LoadConfig(filepath.Join("..", ".."), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.Join(strings.Fields(cfg.Defaults.Doc("SANDBOX_CLASSES")), " ")
+	for _, want := range []string{
+		"the microvm group for the mode3 plugin",
+		"or for a plugin that runs on it",
+		"With SANDBOX_CLASSES=nitro it makes a node group only for a plugin that adds one (mode3's microvm, or system for a plugin that runs on it), and none without such a plugin.",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("the SANDBOX_CLASSES comment lacks %q:\n%s", want, doc)
+		}
 	}
 }
