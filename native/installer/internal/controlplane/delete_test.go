@@ -137,6 +137,33 @@ func TestDeleteRunsAteSetupWaitsAndRemovesTheKubeconfig(t *testing.T) {
 	}
 }
 
+// The lines the wizard's Remove Substrate checklist keys off come in the
+// order the work runs: RemovePluginsLine before any plugin is removed, then
+// the ate-setup command line (DeleteLine) only after the plugins are gone,
+// then RemovedLine.
+func TestDeletePrintsTheChecklistLinesInOrder(t *testing.T) {
+	o, _, _ := deleteEnv(t, nil, nil)
+	var seen string
+	removePlugins = func(_ context.Context, w io.Writer, _ string, _ []string, _ plugin.Options) error {
+		seen = w.(*bytes.Buffer).String()
+		fmt.Fprintln(w, plugin.RemoveLine+"efs")
+		return nil
+	}
+	var out bytes.Buffer
+	if err := Delete(context.Background(), &out, o); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(seen, RemovePluginsLine) || strings.Contains(seen, DeleteLine) {
+		t.Errorf("when the plugins' removal started the output was:\n%s", seen)
+	}
+	got := out.String()
+	at := func(s string) int { return strings.Index(got, s) }
+	if !(at(RemovePluginsLine) >= 0 && at(RemovePluginsLine) < at(plugin.RemoveLine+"efs") &&
+		at(plugin.RemoveLine+"efs") < at(DeleteLine+" --context demo") && at(DeleteLine) < at(RemovedLine)) {
+		t.Errorf("lines out of order:\n%s", got)
+	}
+}
+
 // A recorded plugin that needs Auto Mode (mode3-iso, the AWS Nitro sandbox
 // class's) never stops the removal: Delete reads the cluster but not into
 // Options.AutoMode, and the deploy's Auto Mode refusal must not reach it. It

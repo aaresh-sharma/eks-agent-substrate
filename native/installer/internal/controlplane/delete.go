@@ -15,8 +15,15 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 )
 
-// RemovedLine is what Delete prints once ate-system is gone.
-const RemovedLine = "Substrate control plane removed"
+// Lines Delete prints, in this order, for the wizard's checklist
+// (steps.RemoveControlPlane): RemovePluginsLine as the recorded plugins'
+// removal starts, the ate-setup command line (DeleteLine, then its
+// --context), and RemovedLine once ate-system is gone.
+const (
+	RemovePluginsLine = "Removing the recorded plugins before ate-system"
+	DeleteLine        = "$ go run ./cmd/ate-setup delete ate-system"
+	RemovedLine       = "Substrate control plane removed"
+)
 
 // namespaceWait bounds the wait for ate-system to finish deleting.
 const namespaceWait = "10m"
@@ -99,6 +106,7 @@ func Delete(ctx context.Context, w io.Writer, o Options) error {
 	// resources: their objects run on Substrate, and a volume they hold
 	// would keep the VPC's subnets. They are removed on the install's
 	// release, as they were made.
+	fmt.Fprintln(w, RemovePluginsLine)
 	if err := removePlugins(ctx, w, plugin.ActionRemove, nil, po); err != nil {
 		return err
 	}
