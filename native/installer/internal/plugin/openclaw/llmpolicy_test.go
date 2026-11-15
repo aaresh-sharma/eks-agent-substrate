@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -265,6 +266,33 @@ func TestVerifyChecksTheLLMPolicy(t *testing.T) {
 	out, err = run(false, "")
 	if strings.Contains(out, pass) || !strings.Contains(out, "No namespace llm-gateway") || err == nil || !strings.Contains(err.Error(), imageErr) {
 		t.Errorf("no LLM gateway: %v\n%s", err, out)
+	}
+}
+
+// When kubectl cannot say whether the LLM gateway is there, Deploy and
+// Verify return that error. Neither reads it as "no LLM gateway", which
+// would skip the policy (Deploy) or its check (Verify).
+func TestLLMGatewayLookupErrorIsReturned(t *testing.T) {
+	const lookup = "kubectl --kubeconfig /kc get namespace llm-gateway"
+	const skipped = "No namespace llm-gateway"
+	out, stdins, err := fakeDeploy(t, map[string]string{lookup: failAnswer})
+	if !errors.Is(err, errKubectl) || strings.Contains(out, skipped) || slices.Contains(stdins, llmPolicyYAML) {
+		t.Errorf("deploy, with the namespace lookup failing: %v\n%s", err, out)
+	}
+
+	for _, k := range imageVars {
+		t.Setenv(k, "")
+	}
+	kc := "kubectl --kubeconfig /kc "
+	fakeExec(t, map[string]string{
+		kc + "-n ate-system get deployment atenet-router": GatewayID + " " + DashboardID,
+		kc + "-n openclaw get services":                   `{"items":[{"metadata":{"name":"s0"},"spec":{"type":"ClusterIP"}}]}`,
+		lookup:                                            failAnswer,
+	})
+	var vout strings.Builder
+	err = verify(context.Background(), &vout, plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc"})
+	if !errors.Is(err, errKubectl) || strings.Contains(vout.String(), skipped) {
+		t.Errorf("verify, with the namespace lookup failing: %v\n%s", err, vout.String())
 	}
 }
 
