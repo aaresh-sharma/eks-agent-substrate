@@ -99,8 +99,11 @@ func goCheck() Check {
 // Checks are the preflight checks for profile and region.
 //
 // aws is still needed at run time, but only by kubectl's exec plugin (`aws eks
-// get-token`) and by ate-setup's microVM staging (the EKS code patch); the
-// installer and setup-aws reach AWS through the SDK.
+// get-token`), by ate-setup's microVM asset upload to S3 (the EKS code patch),
+// and by the efs and openclaw plugins' EFS calls (efs.AWS: `aws efs`, which
+// every AWS CLI v2 has). Everything else the installer and setup-aws do in
+// AWS, the s3files plugin's S3 Files calls included, goes through the SDK, so
+// no CLI version is checked.
 func Checks(profile, region string) []Check {
 	return []Check{
 		{Name: "AWS credentials", Run: func(ctx context.Context) Result {
@@ -119,7 +122,7 @@ func Checks(profile, region string) []Check {
 		goCheck(),
 		tool("git", "install git", "--version"),
 		tool("kubectl", "install kubectl: https://kubernetes.io/docs/tasks/tools/", "version", "--client=true"),
-		tool("aws", "install AWS CLI v2 (kubectl's token plugin and microVM staging use it): https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html", "--version"),
+		tool("aws", "install AWS CLI v2 (kubectl's token plugin, the microVM asset upload to S3 and the efs and openclaw plugins' EFS calls use it): https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html", "--version"),
 	}
 }
 

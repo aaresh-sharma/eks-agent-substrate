@@ -508,5 +508,7 @@ check. `installer/docs/splash-gif.sh` rebuilds `docs/splash.gif` from the
 splash's frames (go, node and ffmpeg); the screenshots are `s` snapshots of a
 `--dry-run`, rendered to 1920x1080 PNGs with `node installer/docs/render.mjs
 SNAPSHOT_DIR OUT_DIR` (headless Chromium through Playwright; its header
-names the helper module it loads). Runtime tools besides Go: the `aws` CLI (kubectl's token plugin, and
-the S3 asset upload in the Go patch), `kubectl` and `git`.
+names the helper module it loads). Runtime tools besides Go: the `aws` CLI (kubectl's token plugin, the S3
+asset upload in the Go patch, and the efs and openclaw plugins' `aws efs`
+calls; the s3files plugin uses the SDK, so a CLI without `s3files` works),
+`kubectl` and `git`.

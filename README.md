@@ -186,7 +186,8 @@ flag and make target.
   Bedrock first-time-use form once per account.
 - On your machine: `git`, `go` 1.27+, `make` (only to build the installer
   from source; see [Two ways to run it](#two-ways-to-run-it)), the AWS CLI v2
-  (kubectl's token plugin and the microVM asset upload use it) and
+  (kubectl's token plugin, the microVM asset upload and the efs and openclaw
+  plugins' EFS calls use it) and
   `kubectl`. Images are built in Go, without Docker. `make -C native doctor`
   (or `./substrate-eks --doctor` from a release) checks them and your
   credentials.

@@ -1,9 +1,9 @@
 package efs
 
 // Helpers the efs plugin shares with s3files and openclaw, which require it:
-// reads through kubectl and the AWS CLI, kubectl-ate, Pod Identity restarts
-// and StorageClass replacement. Every child goes through plugin.Exec, from
-// an argv, against the installer's own kubeconfig.
+// reads through kubectl, EFS calls through the AWS CLI, kubectl-ate, Pod
+// Identity restarts and StorageClass replacement. Every child goes through
+// plugin.Exec, from an argv, against the installer's own kubeconfig.
 
 import (
 	"bytes"
@@ -47,8 +47,15 @@ func Apply(ctx context.Context, w io.Writer, o plugin.Options, manifest []byte) 
 }
 
 // AWS runs the AWS CLI for o's Region and profile and returns its stdout.
-// The installer module has no EFS or S3 Files SDK, and the CLI is one of its
-// prerequisites (kubectl's token plugin is `aws eks get-token`).
+// Only the efs and openclaw plugins' EFS calls use it: every AWS CLI v2 has
+// those commands, the installer module has no EFS SDK, and the CLI is a
+// prerequisite anyway (kubectl's token plugin is `aws eks get-token`). The
+// s3files plugin calls S3 Files through the SDK, since a CLI older than S3
+// Files has no s3files command.
+//
+// shortcut: EFS stays on the CLI to keep service/efs out of the installer's
+// go.mod; move it to the SDK if an EFS command the plugins need is ever
+// missing from a CLI release.
 func AWS(ctx context.Context, o plugin.Options, args ...string) (string, error) {
 	argv := append([]string{"aws"}, args...)
 	argv = append(argv, "--region", o.Region)
