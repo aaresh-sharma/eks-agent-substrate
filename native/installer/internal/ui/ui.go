@@ -231,7 +231,7 @@ func (m *Model) longStep(st state.Step) (func(*state.Setup) execx.Spec, []steps.
 	case state.RDS:
 		return m.d.RDS, steps.RDS(), true
 	case state.ControlPlane:
-		return m.d.ControlPlane, steps.ControlPlane(), true
+		return m.d.ControlPlane, steps.ControlPlane(state.HasClass(state.AteSetupClasses(m.s.SandboxClasses), state.ClassMicroVM)), true
 	case state.NitroSandbox:
 		return m.d.Nitro, steps.Plugins(resolved(state.ClassPlugins(m.s.SandboxClasses))), true
 	case state.InstallPlugins:

@@ -6,6 +6,7 @@
 package steps
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
@@ -93,8 +94,20 @@ func Demo(deployed, checked []string) []ChecklistItem {
 
 // ControlPlane tracks the in-process deploy and `ate-setup deploy
 // ate-system`'s `[step]:` markers, the same markers substrate-gke's Deploy
-// checklist keys off.
-func ControlPlane() []ChecklistItem {
+// checklist keys off. The microVM assets row is there only when ate-setup
+// stages them (microvm: its microvm class), so a run without it never shows
+// the row ticked.
+func ControlPlane(microvm bool) []ChecklistItem {
+	items := controlPlane()
+	if !microvm {
+		items = slices.DeleteFunc(items, func(i ChecklistItem) bool { return i.Label == stageMicroVMLabel })
+	}
+	return items
+}
+
+const stageMicroVMLabel = "Stage microVM assets in S3"
+
+func controlPlane() []ChecklistItem {
 	return []ChecklistItem{
 		// The kubeconfig first: Deploy reads the plugin record off the
 		// cluster before it fetches the release (a plugin may replace it).
@@ -109,7 +122,7 @@ func ControlPlane() []ChecklistItem {
 		// manifest is applied (deploy_ate_system -> prepare_microvm_deps ->
 		// deploy_crds), so this row comes before CRDs: a later row that
 		// matched first would tick the rows between as done.
-		{"Stage microVM assets in S3", containsAny("prepare_microvm_deps", "Uploading assets to s3://")},
+		{stageMicroVMLabel, containsAny("prepare_microvm_deps", "Uploading assets to s3://")},
 		{"Apply namespace, CRDs, and RBAC", contains("deploy_crds")},
 		{"Generate CAs, JWT pools, and API server config", contains("ensure_apiserver_prerequisites")},
 		{"Wait for components: postgres, api-server, controller, atenet, atelet", contains("Waiting for ATE system components")},
