@@ -175,7 +175,7 @@ control plane deploy keeps their needs.
 | `db-rotation` | the RDS database | Secrets Manager rotation of the two RDS logins, synced by External Secrets, with the ESO Reloader rolling ate-api-server |
 | `openclaw` | `efs` | an always-on OpenClaw gateway; each conversation's agent is an actor. Its public images are pinned by digest; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE` and `OPENCLAW_DASHBOARD_IMAGE` replace them, pinned by digest too. The gateway UI asks for the gateway token, key `gateway-token` of Secret `openclaw/openclaw-secrets`; the deploy prints the command that reads it. With `llm-gateway` installed, it adds NetworkPolicy `llm-gateway/llm-gateway-from-openclaw`, which admits the gateway's pods (no other openclaw pod) to the LLM gateway, so the gateway's own agent (the gateway UI's chat) gets a model; deploy openclaw again after adding llm-gateway |
 | `mode3` | | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
-| `mode3-iso` | `mode3`, EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
+| `mode3-iso` | EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
 
 On an installed cluster:
 

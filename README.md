@@ -190,7 +190,7 @@ keeps them.
 | `db-rotation` | Secrets Manager login rotation | Rotates the two RDS logins with alternating users; External Secrets syncs them and the ESO Reloader rolls ate-api-server. Needs the RDS database. |
 | `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs`; its public images are pinned by digest. |
 | `mode3` | Mode 3 on Kata | Worker Pods are Kata microVMs on the microvm nodes, with gVisor actors inside. |
-| `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs `mode3` and Auto Mode. |
+| `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode. |
 
 Each one also runs on its own, on an installed cluster. A plugin that
 changes the control plane (`efs`, `s3files`, `credprovider-aws`, `openclaw`,
@@ -307,7 +307,7 @@ keeps a mode 3 worker's actors on a tmpfs in the guest, so the pool gets
 
 `mode3-iso` runs the same worker Pods under RuntimeClass `isolated-sandbox`,
 which EKS Auto Mode ships: each Pod runs in its own sandbox with its own guest
-kernel, on a node Auto Mode launches for it. It needs Auto Mode and `mode3`.
+kernel, on a node Auto Mode launches for it. It needs Auto Mode.
 
 | Piece | What it does |
 |---|---|
