@@ -146,6 +146,37 @@ func TestLLMPolicyNamesTheGatewayAndTheLLMGateway(t *testing.T) {
 		t.Errorf("the policy admits namespace %q, the gateway runs in %q, want %q", ns, gw.GetNamespace(), Namespace)
 	}
 
+	// No other pod in namespace openclaw carries the peer's labels: not the
+	// dashboard's, and not the actors' worker pods, which ate-controller
+	// labels with the WorkerPool's spec.template.labels (none here) plus
+	// ate.dev/worker-pool.
+	var dashLabels map[string]string
+	if err := json.Unmarshal([]byte(field(t, docs(t, dashboardYAML)["Deployment/openclaw-dashboard"], "spec", "template", "metadata", "labels")), &dashLabels); err != nil {
+		t.Fatal(err)
+	}
+	pool := docs(t, workerPoolYAML)["WorkerPool/"+Pool]
+	if pool == nil {
+		t.Fatalf("workerpool.yaml has no WorkerPool/%s", Pool)
+	}
+	workerLabels := map[string]string{}
+	if l, err := pool.Pipe(yaml.Lookup("spec", "template", "labels")); err != nil {
+		t.Fatal(err)
+	} else if l != nil {
+		b, err := l.MarshalJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &workerLabels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workerLabels["ate.dev/worker-pool"] = Pool
+	for who, l := range map[string]map[string]string{"the dashboard's pods": dashLabels, "the actors' worker pods": workerLabels} {
+		if selects(peer.PodSelector.MatchLabels, l) {
+			t.Errorf("the policy admits %s too: they are labeled %v, the policy admits pods labeled %v", who, l, peer.PodSelector.MatchLabels)
+		}
+	}
+
 	b, err := os.ReadFile(filepath.Join("..", "llmgateway", "llm-gateway.yaml"))
 	if err != nil {
 		t.Fatal(err)
