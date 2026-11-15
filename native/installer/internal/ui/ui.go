@@ -239,7 +239,9 @@ func (m *Model) longStep(st state.Step) (func(*state.Setup) execx.Spec, []steps.
 	case state.Demo:
 		return m.d.Demo, steps.Demo(state.DemoClasses(m.s.SandboxClasses), state.ParseClasses(m.s.SandboxClasses)), true
 	case state.RemoveControlPlane:
-		return m.d.RemoveControlPlane, steps.RemoveControlPlane(), true
+		// The teardown flow never reads the plugin record (only the
+		// reinstall guard's probe does), so one row stands for its plugins.
+		return m.d.RemoveControlPlane, steps.RemoveControlPlane(nil, false), true
 	case state.TeardownAWS:
 		return m.d.Teardown, steps.Teardown(), true
 	}
@@ -718,7 +720,7 @@ func (m Model) body(h int) string {
 		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.RemoveControlPlane:
 		b.WriteString(theme.Title.Render("Remove Substrate") + "\n")
-		b.WriteString(theme.Subtle.Render("ate-setup delete ate-system on "+m.s.ClusterName+": every actor, template and the control plane") + "\n\n")
+		b.WriteString(theme.Subtle.Render("The recorded plugins, then ate-setup delete ate-system on "+m.s.ClusterName+": every actor, template and the control plane") + "\n\n")
 		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.TeardownAWS:
 		b.WriteString(theme.Title.Render("Delete AWS resources") + "\n")

@@ -332,10 +332,13 @@ func guardMode(r probe.Result) string {
 
 // startRemoval runs --remove-control-plane against the guarded cluster. The
 // selection is not committed to Setup yet, so it runs from a copy naming it.
+// The probe read the plugin record, so the checklist has a row for each
+// plugin the removal removes first.
 func (m *Model) startRemoval(c awsx.Cluster) tea.Cmd {
 	found := *m.s
 	found.ClusterName = c.Name
-	t := newTask(m.d.RemoveControlPlane(&found), steps.RemoveControlPlane())
+	res := m.cl.probed[c.Name]
+	t := newTask(m.d.RemoveControlPlane(&found), steps.RemoveControlPlane(res.Plugins, res.PluginsRead))
 	m.cl.removal, m.cl.mode = t, "removing"
 	return m.run(t)
 }

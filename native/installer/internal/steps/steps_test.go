@@ -1,7 +1,11 @@
 package steps
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
@@ -140,13 +144,124 @@ func TestDemoChecklistFollowsDeployThenVerify(t *testing.T) {
 	}
 }
 
-func TestRemoveControlPlaneChecklist(t *testing.T) {
-	items := RemoveControlPlane()
-	if got := Progress(items, -1, "Using cached substrate v1.0.0"); got != 0 {
-		t.Errorf("first line lit row %d, want 0", got)
+// Plugins for the removal tests: st-s3 requires st-efs, as S3 Files does EFS
+// in a real install, so the removal order is the reverse of the install's.
+func init() {
+	for _, p := range []plugin.Plugin{
+		{ID: "st-gw", Title: "LLM gateway", Order: 10},
+		{ID: "st-efs", Title: "EFS volumes", Order: 20, SetupAWS: true},
+		{ID: "st-s3", Title: "S3 Files volumes", Order: 30, SetupAWS: true, Requires: []string{"st-efs"}},
+	} {
+		plugin.Register(p)
 	}
-	if got := Progress(items, 0, controlplane.RemovedLine); got != 1 {
-		t.Errorf("RemovedLine lit row %d, want 1", got)
+}
+
+func labels(items []ChecklistItem) []string {
+	var out []string
+	for _, it := range items {
+		out = append(out, it.Label)
+	}
+	return out
+}
+
+// removalLines is what --remove-control-plane prints for a cluster recording
+// rec: Delete's RemovePluginsLine, every line plugin.Run's remove prints (run
+// for real, with a fake Exec that answers the record read), then Delete's
+// ate-setup command line and RemovedLine (TestDeletePrintsTheChecklistLinesInOrder
+// checks Delete prints them in that order).
+func removalLines(t *testing.T, rec string) []string {
+	t.Helper()
+	prev := plugin.Exec
+	t.Cleanup(func() { plugin.Exec = prev })
+	plugin.Exec = func(_ context.Context, _ io.Writer, c plugin.Cmd) error {
+		if c.Stdout != nil && slices.Contains(c.Argv, plugin.RecordName) && slices.Contains(c.Argv, "get") {
+			io.WriteString(c.Stdout, rec)
+		}
+		return nil
+	}
+	var out bytes.Buffer
+	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/k", SetupAWS: "/setup-aws"}
+	if err := plugin.Run(context.Background(), &out, plugin.ActionRemove, nil, o); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{controlplane.RemovePluginsLine}
+	lines = append(lines, strings.Split(strings.TrimSpace(out.String()), "\n")...)
+	return append(lines, controlplane.DeleteLine+" --context demo", `namespace "ate-system" deleted`, controlplane.RemovedLine)
+}
+
+// With the record read, the checklist has a row per recorded plugin in the
+// order the removal takes them, each lit by its own "Removing plugin" line,
+// and every one is lit, so ticked, before the ate-setup row lights.
+func TestRemoveControlPlaneHasARowPerRecordedPlugin(t *testing.T) {
+	rec := []string{"st-efs", "st-gw", "st-s3"}
+	items := RemoveControlPlane(rec, true)
+	want := []string{"Remove S3 Files volumes", "Remove EFS volumes", "Remove LLM gateway",
+		"Delete ate-system with ate-setup", "Wait for the ate-system namespace to be gone"}
+	if !slices.Equal(labels(items), want) {
+		t.Fatalf("rows %q, want %q", labels(items), want)
+	}
+	lightsOn := []string{plugin.RemoveLine + "st-s3", plugin.RemoveLine + "st-efs", plugin.RemoveLine + "st-gw",
+		controlplane.DeleteLine + " --context demo", controlplane.RemovedLine}
+	active := -1
+	for _, line := range removalLines(t, plugin.FormatRecord(rec)) {
+		next := Progress(items, active, line)
+		if next != active {
+			if next != active+1 || line != lightsOn[next] {
+				t.Fatalf("%q lit row %d (%s) after row %d", line, next, items[next].Label, active)
+			}
+			active = next
+		}
+	}
+	if active != len(items)-1 {
+		t.Errorf("the removal ended on row %d of %d", active, len(items))
+	}
+}
+
+// Both ways: a record read and listing no plugin gives no plugin row, and
+// the ate-setup row lights on the ate-setup line, not on the line before
+// the (empty) plugin removal; a record not read gives the one row for all.
+func TestRemoveControlPlaneWithNoRecordedPluginHasNoPluginRow(t *testing.T) {
+	items := RemoveControlPlane(nil, true)
+	if want := []string{"Delete ate-system with ate-setup", "Wait for the ate-system namespace to be gone"}; !slices.Equal(labels(items), want) {
+		t.Fatalf("rows %q, want %q", labels(items), want)
+	}
+	lines := removalLines(t, "")
+	want := map[string]int{controlplane.DeleteLine + " --context demo": 0, controlplane.RemovedLine: 1}
+	active := -1
+	for _, line := range lines {
+		if next := Progress(items, active, line); next != active {
+			if w, ok := want[line]; !ok || next != w {
+				t.Fatalf("%q lit row %d", line, next)
+			}
+			active = next
+		}
+	}
+	if active != 1 {
+		t.Errorf("ended on row %d", active)
+	}
+}
+
+// Unread (the teardown flow), or naming a plugin this installer does not
+// know, the plugins get one row, lit as their removal starts; the plugins'
+// own lines then light nothing past it.
+func TestRemoveControlPlaneWithTheRecordUnreadHasOneRow(t *testing.T) {
+	for name, items := range map[string][]ChecklistItem{
+		"unread":  RemoveControlPlane(nil, false),
+		"unknown": RemoveControlPlane([]string{"st-efs", "not-registered"}, true),
+	} {
+		if len(items) != 3 || items[0].Label != "Remove the recorded plugins" {
+			t.Fatalf("%s: rows %q", name, labels(items))
+		}
+		active := -1
+		for _, line := range []string{controlplane.KubeconfLine + "/k", controlplane.RemovePluginsLine, plugin.RemoveLine + "st-efs", plugin.RemovedLine + "st-efs"} {
+			active = Progress(items, active, line)
+		}
+		if active != 0 {
+			t.Errorf("%s: the plugins' lines left row %d lit, want 0", name, active)
+		}
+		if got := Progress(items, active, controlplane.DeleteLine+" --context demo"); got != 1 {
+			t.Errorf("%s: the ate-setup line lit row %d, want 1", name, got)
+		}
 	}
 }
 

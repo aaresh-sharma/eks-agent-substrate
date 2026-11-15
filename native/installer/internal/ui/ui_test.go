@@ -484,6 +484,57 @@ func TestGuardRemovalNamesTheRecordedPlugins(t *testing.T) {
 	}
 }
 
+// The Remove Substrate checklist names what runs before ate-setup: the guard,
+// whose probe read the record, has a row per recorded plugin in removal
+// order (none when it lists none); the teardown flow, which reads no record,
+// has one row for them.
+func TestRemovalChecklistShowsThePluginsFirst(t *testing.T) {
+	const installed = "SUBSTRATE_EKS_INSTALLED true atelet image=ghcr.io/x/ate-api-server:v1.0.0"
+	tail := []string{"Delete ate-system with ate-setup", "Wait for the ate-system namespace to be gone"}
+	for _, tc := range []struct {
+		probe string
+		want  []string
+	}{
+		{installed + " plugins=t-efs,t-s3files", append([]string{"Remove S3 Files volumes", "Remove EFS volumes"}, tail...)},
+		{installed + " plugins=", tail},
+		{installed, append([]string{"Remove the recorded plugins"}, tail...)},
+	} {
+		r := &recorder{probes: map[string]string{"own-installed": tc.probe}}
+		m := toStep(t, New(testDeps(r), newSetup("own-installed")), state.Cluster)
+		m = press(m, "enter", "t")
+		m = typeIn(m, "own-installed")
+		m = press(m, "enter")
+		if m.cl.removal == nil {
+			t.Fatalf("%s: no removal ran, mode %q", tc.probe, m.cl.mode)
+		}
+		var got []string
+		for _, it := range m.cl.removal.items {
+			got = append(got, it.Label)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: rows %q, want %q", tc.probe, got, tc.want)
+		}
+	}
+
+	r := &recorder{}
+	s := newSetup("own-installed")
+	s.Teardown = true
+	m := toStep(t, New(testDeps(r), s), state.TeardownScope)
+	m = typeIn(m, "own-installed")
+	m = press(m, "enter")
+	tk := m.tasks[state.RemoveControlPlane]
+	if tk == nil {
+		t.Fatalf("teardown: at %s, no Remove Substrate task", m.m.Current().Title())
+	}
+	var got []string
+	for _, it := range tk.items {
+		got = append(got, it.Label)
+	}
+	if want := append([]string{"Remove the recorded plugins"}, tail...); !slices.Equal(got, want) {
+		t.Errorf("teardown: rows %q, want %q", got, want)
+	}
+}
+
 func TestDatabaseChoiceAddsOrOmitsTheRDSStep(t *testing.T) {
 	for _, tc := range []struct {
 		keys    []string

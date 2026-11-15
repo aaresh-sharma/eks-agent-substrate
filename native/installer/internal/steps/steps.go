@@ -67,14 +67,45 @@ func RDS() []ChecklistItem { return FromPhases(phases.RDS) }
 // Teardown tracks `setup-aws teardown`.
 func Teardown() []ChecklistItem { return FromPhases(phases.Teardown) }
 
-// RemoveControlPlane tracks --remove-control-plane (controlplane.Delete). Its
-// only marker is the last line, so the first row lights on any output: the
-// step is under way, and the spinner says so.
-func RemoveControlPlane() []ChecklistItem {
-	return []ChecklistItem{
-		{"Delete ate-system with ate-setup", func(string) bool { return true }},
-		{"Wait for the ate-system namespace to be gone", contains(controlplane.RemovedLine)},
+// RemoveControlPlane tracks --remove-control-plane (controlplane.Delete),
+// which removes every plugin the cluster records, then runs ate-setup
+// delete, then waits for ate-system to go. recorded is the record, when the
+// caller has read it (read, as the reinstall guard's probe does): one row per
+// plugin, in the order they are removed, each lit by its own "Removing plugin"
+// line, and no plugin row when the record lists none. Unread, or naming a
+// plugin this installer does not know, one row stands for them all, lit by
+// the line Delete prints as their removal starts.
+func RemoveControlPlane(recorded []string, read bool) []ChecklistItem {
+	var items []ChecklistItem
+	if ps, known := RemovalOrder(recorded); read && known {
+		for _, p := range ps {
+			items = append(items, ChecklistItem{"Remove " + p.Title, exactly(plugin.RemoveLine + p.ID)})
+		}
+	} else {
+		items = append(items, ChecklistItem{"Remove the recorded plugins", contains(controlplane.RemovePluginsLine)})
 	}
+	return append(items,
+		ChecklistItem{"Delete ate-system with ate-setup", contains(controlplane.DeleteLine)},
+		ChecklistItem{"Wait for the ate-system namespace to be gone", contains(controlplane.RemovedLine)})
+}
+
+// RemovalOrder is the plugins ids name in the order plugin.Run removes them,
+// reverse install order (the reverse of plugin.All), and false when one is
+// not registered: Run then refuses the removal before removing any.
+func RemovalOrder(ids []string) ([]plugin.Plugin, bool) {
+	for _, id := range ids {
+		if _, ok := plugin.Get(id); !ok {
+			return nil, false
+		}
+	}
+	var out []plugin.Plugin
+	all := plugin.All()
+	for i := len(all) - 1; i >= 0; i-- {
+		if slices.Contains(ids, all[i].ID) {
+			out = append(out, all[i])
+		}
+	}
+	return out, true
 }
 
 // Demo tracks --deploy-demo --verify: the counter demo deployed on each of
