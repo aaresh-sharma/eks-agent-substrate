@@ -49,6 +49,19 @@ func CounterImage(ctx context.Context, w io.Writer, o Options, tree, pool, tag s
 	if err != nil {
 		return "", err
 	}
+	return buildCounter(ctx, w, e, o, tree, arch, tag)
+}
+
+// CounterImageFor is CounterImage for arch, read by the caller, for a pool
+// whose nodes do not exist yet: mode3-iso's, which Auto Mode launches for
+// its worker Pods, reads it off its NodePool.
+func CounterImageFor(ctx context.Context, w io.Writer, o Options, tree, arch, tag string) (string, error) {
+	return buildCounter(ctx, w, exportEnv(o), o, tree, arch, tag)
+}
+
+// buildCounter builds the counter for arch and pushes it as
+// <cluster>/counter:<tag>.
+func buildCounter(ctx context.Context, w io.Writer, e *env, o Options, tree, arch, tag string) (string, error) {
 	base, err := counterBase(tree)
 	if err != nil {
 		return "", err
