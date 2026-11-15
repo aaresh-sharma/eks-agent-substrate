@@ -36,6 +36,8 @@ const (
 	Provision
 	RDS
 	ControlPlane
+	// NitroSandbox deploys and checks the AWS Nitro sandbox class's plugin.
+	NitroSandbox
 	// InstallPlugins deploys and checks the chosen plugins.
 	InstallPlugins
 	Demo
@@ -59,6 +61,9 @@ var Order = []Step{Welcome, CheckSetup, Account, Cluster, Database, Settings, Pl
 //     cluster, before Provision, which needs it ACTIVE;
 //   - RDS runs `setup-aws create rds` after Provision when the database is
 //     RDS, before ControlPlane, which connects to it;
+//   - NitroSandbox deploys and checks the plugin of the AWS Nitro sandbox
+//     class (ClassPlugins) after ControlPlane, which carries its needs, and
+//     before the demo, whose check includes the class;
 //   - Demo deploys and checks the counter demo on a demo run (--demo),
 //     after ControlPlane;
 //   - InstallPlugins deploys the chosen plugins last: ControlPlane already
@@ -74,6 +79,9 @@ func InstallOrder(s *Setup) []Step {
 		order = append(order, RDS)
 	}
 	order = append(order, ControlPlane)
+	if len(ClassPlugins(s.SandboxClasses)) > 0 {
+		order = append(order, NitroSandbox)
+	}
 	if s.DemoMode {
 		order = append(order, Demo)
 	}
@@ -117,6 +125,8 @@ func (s Step) Title() string {
 		return "Create the database"
 	case ControlPlane:
 		return "Turn on Substrate"
+	case NitroSandbox:
+		return "Set up Nitro sandboxes"
 	case InstallPlugins:
 		return "Install the plugins"
 	case Demo:
@@ -261,15 +271,45 @@ func (c ClusterConfig) Env() []string {
 	return out
 }
 
-// Summary is the review line the Create the cluster panel and step show.
-func (c ClusterConfig) Summary() string {
+// Summary is the review line the Create the cluster panel and step show,
+// with the node groups the cluster gets (NewNodeGroups).
+func (c ClusterConfig) Summary(groups []string) string {
 	auto := "Auto Mode off"
 	if c.AutoMode == "on" {
 		auto = "Auto Mode on"
 	}
-	return fmt.Sprintf("EKS %s · %s · system %s×%s · gvisor %s×%s · microvm %s×%s · API from %s",
-		c.KubernetesVersion, auto, c.SystemNodes, c.SystemInstanceType, c.GVisorNodes, c.GVisorInstanceType,
-		c.MicroVMNodes, c.MicroVMInstanceType, c.PublicAccessCIDRs)
+	return fmt.Sprintf("EKS %s · %s · %s · API from %s", c.KubernetesVersion, auto, c.GroupsLine(groups), c.PublicAccessCIDRs)
+}
+
+// GroupsLine is groups with their nodes and instance types, such as
+// "system 2×m8i.xlarge · gvisor 2×m8i.2xlarge", or NoNodeGroups.
+func (c ClusterConfig) GroupsLine(groups []string) string {
+	if len(groups) == 0 {
+		return NoNodeGroups
+	}
+	var out []string
+	for _, g := range groups {
+		nodes, typ := c.Group(g)
+		out = append(out, g+" "+nodes+"×"+typ)
+	}
+	return strings.Join(out, " · ")
+}
+
+// NoNodeGroups is what Review and the Create the cluster step say of a
+// cluster with no node group.
+const NoNodeGroups = "no node groups: everything runs on EKS Auto Mode nodes"
+
+// Group is node group g's node count and instance type.
+func (c ClusterConfig) Group(g string) (nodes, instanceType string) {
+	switch g {
+	case "system":
+		return c.SystemNodes, c.SystemInstanceType
+	case "gvisor":
+		return c.GVisorNodes, c.GVisorInstanceType
+	case "microvm":
+		return c.MicroVMNodes, c.MicroVMInstanceType
+	}
+	return "", ""
 }
 
 // Setup is everything the install steps need.
@@ -316,18 +356,25 @@ type Setup struct {
 	// SUBSTRATE_IMAGE_REPO); the control plane and demo steps get both.
 	SubstrateTag string
 	ImageRepo    string
-	// SandboxClasses ate-setup installs, comma-separated: gvisor, microvm or
-	// both (AllSandboxClasses).
+	// SandboxClasses are the run's sandbox classes, comma-separated: one or
+	// more of gvisor, microvm and nitro (classes.go). They decide the node
+	// groups of a cluster the run creates, what ate-setup installs
+	// (AteSetupClasses), the plugins they bring (ClassPlugins) and the
+	// counter demo's classes.
 	SandboxClasses string
+	// ClusterPools are a connected cluster's node groups, the ate.dev/pool
+	// values of its nodes (the probe reads them); nil for a new cluster.
+	ClusterPools []string
 }
 
 // Defaults the installer passes on, and the flag defaults of its
 // subcommands: a child given no --image-repo or --sandbox-classes uses these.
 const (
-	DefaultTag            = "v1.0.0"
-	DefaultImageRepo      = "ghcr.io/agent-substrate/substrate"
-	AllSandboxClasses     = "gvisor,microvm"
-	DefaultSandboxClasses = AllSandboxClasses
+	DefaultTag       = "v1.0.0"
+	DefaultImageRepo = "ghcr.io/agent-substrate/substrate"
+	// DefaultSandboxClasses are config.env's SANDBOX_CLASSES: the gvisor and
+	// microvm classes, so a default install makes the three node groups.
+	DefaultSandboxClasses = "gvisor,microvm"
 	DefaultTags           = "project=agent-substrate auto-delete=no"
 )
 
@@ -347,39 +394,25 @@ func NewSetupFrom(lookup func(string) (string, bool)) *Setup {
 	return &Setup{
 		SubstrateTag:     get("SUBSTRATE_TAG", DefaultTag),
 		ImageRepo:        get("SUBSTRATE_IMAGE_REPO", DefaultImageRepo),
-		SandboxClasses:   DefaultSandboxClasses,
+		SandboxClasses:   get("SANDBOX_CLASSES", DefaultSandboxClasses),
 		Database:         DatabaseRDS,
 		Tags:             get("TAGS", DefaultTags),
 		NewClusterConfig: ClusterConfigFromEnv(lookup),
 	}
 }
 
-// ValidSandboxClasses reports why classes cannot be installed: it must name
-// gvisor, microvm or both, each once, comma-separated.
-func ValidSandboxClasses(classes string) error {
-	seen := map[string]bool{}
-	for _, c := range strings.Split(classes, ",") {
-		if c != "gvisor" && c != "microvm" {
-			return fmt.Errorf("sandbox classes %q: want gvisor, microvm or gvisor,microvm", classes)
-		}
-		if seen[c] {
-			return fmt.Errorf("sandbox classes %q name %s twice", classes, c)
-		}
-		seen[c] = true
-	}
-	return nil
-}
-
-// SelectCluster records an existing cluster as the run's target, and
-// NewCluster a cluster the run will create. Every Cluster* field is written
-// by both, as in substrate-gke: a field one of them forgot would carry an
-// abandoned selection's value into the other path.
-func (s *Setup) SelectCluster(c awsx.Cluster) {
+// SelectCluster records an existing cluster as the run's target, with the
+// node groups its nodes come from (pools: the probe's), and NewCluster a
+// cluster the run will create. Every Cluster* field is written by both, as
+// in substrate-gke: a field one of them forgot would carry an abandoned
+// selection's value into the other path.
+func (s *Setup) SelectCluster(c awsx.Cluster, pools []string) {
 	s.ClusterName = c.Name
 	s.ClusterVersion = c.Version
 	s.AutoMode = c.AutoMode
 	s.ClusterIsNew = false
 	s.ClusterOwned = c.CreatedByInstaller(s.Region)
+	s.ClusterPools = pools
 }
 
 // NewCluster records a cluster the run will create, named name.
@@ -389,6 +422,7 @@ func (s *Setup) NewCluster(name string) {
 	s.AutoMode = s.NewClusterConfig.AutoMode == "on"
 	s.ClusterIsNew = true
 	s.ClusterOwned = true
+	s.ClusterPools = nil
 }
 
 // Names are setup-aws's derived resource names (cmd.deriveNames).

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -55,9 +56,9 @@ func main() {
 		cluster    = flag.String("cluster", os.Getenv("CLUSTER_NAME"), "preselect this cluster, or the name of a new one (CLUSTER_NAME; the wizard also offers config.env's)")
 		tag        = flag.String("tag", conf("SUBSTRATE_TAG", state.DefaultTag), "Substrate release to install (SUBSTRATE_TAG)")
 		imageRepo  = flag.String("image-repo", conf("SUBSTRATE_IMAGE_REPO", state.DefaultImageRepo), "where the release's images come from (SUBSTRATE_IMAGE_REPO)")
-		classes    = flag.String("sandbox-classes", state.DefaultSandboxClasses, "sandbox classes to install and check: gvisor, microvm or both")
+		classes    = flag.String("sandbox-classes", conf("SANDBOX_CLASSES", state.DefaultSandboxClasses), "sandbox classes, comma-separated: gvisor, microvm and nitro (the AWS Nitro sandbox, EKS Auto Mode only), in any combination (SANDBOX_CLASSES)")
 		database   = flag.String("database", controlplane.DatabaseRDS, "the control plane's database: rds (Amazon RDS for PostgreSQL) or bundled (in-cluster PostgreSQL)")
-		demoMode   = flag.Bool("demo", false, "end the install with the counter demo on gVisor and microVM, and check it")
+		demoMode   = flag.Bool("demo", false, "end the install with the counter demo on its sandbox classes, and check it")
 		teardown   = flag.Bool("teardown", false, "open the wizard on the teardown of --cluster: remove Substrate, then its AWS resources")
 		keepClust  = flag.Bool("keep-cluster", false, "with --teardown: remove Substrate and its AWS data but never offer to delete the cluster")
 		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws (default: found above the working directory or the executable)")
@@ -113,6 +114,11 @@ func main() {
 			exitOn(fmt.Errorf("--plugins: unknown plugin %q", id))
 		}
 	}
+	// carried are the plugins the install carries: --plugins and the ones
+	// the sandbox classes install (the AWS Nitro sandbox's). The control
+	// plane deploy carries their needs, and they decide every step's
+	// release; --plugin-action acts on --plugins alone.
+	carried := state.WithClassPlugins(pluginIDs, *classes)
 	pluginOptions := func() plugin.Options {
 		tags, ok := os.LookupEnv("TAGS")
 		if !ok {
@@ -125,9 +131,9 @@ func main() {
 		return controlplane.Options{
 			Cluster: *cluster, Region: *region, Profile: *profile,
 			Tag: *tag, ImageRepo: *imageRepo,
-			SnapBucket: *snapBucket, AssetBucket: *assetBkt, SandboxClasses: *classes,
+			SnapBucket: *snapBucket, AssetBucket: *assetBkt, SandboxClasses: state.AteSetupClasses(*classes),
 			Database: *database, TreeRoot: *treeRoot, Overlay: findOverlay(),
-			Plugins: pluginIDs, Plugin: pluginOptions(),
+			Plugins: carried, Plugin: pluginOptions(),
 		}
 	}
 	// clusterOptions are the plugin options of --cluster on the --tag
@@ -144,7 +150,7 @@ func main() {
 	}
 	demoOptions := demo.Options{
 		Cluster: *cluster, Region: *region, Profile: *profile, Tag: *tag,
-		ImageRepo: *imageRepo, SandboxClasses: *classes,
+		ImageRepo: *imageRepo, SandboxClasses: strings.Join(state.DemoClasses(*classes), ","),
 	}
 
 	// A subcommand's ctx ends on SIGINT (ctrl+c) or SIGTERM instead of the
@@ -165,16 +171,10 @@ func main() {
 		return
 	case *deployDemo || *verify:
 		// The demo runs on the install's release: a fork's when a recorded
-		// or chosen plugin installed one.
-		po, err := clusterRelease(ctx, clusterOptions(), pluginIDs, *deployDemo)
+		// or chosen plugin, or a sandbox class, installed one.
+		po, err := clusterRelease(ctx, clusterOptions(), carried, *deployDemo)
 		exitOn(err)
-		demoOptions.Tag, demoOptions.ImageRepo, demoOptions.Tree = po.Tag, po.ImageRepo, po.Tree
-		if *deployDemo {
-			exitOn(demo.Deploy(ctx, os.Stdout, demoOptions))
-		}
-		if *verify {
-			exitOn(demo.Verify(ctx, os.Stdout, demoOptions))
-		}
+		exitOn(runDemo(ctx, po, demoOptions, *classes, *deployDemo, *verify))
 		return
 	case *pluginAct != "":
 		exitOn(loadPluginSettings(cfg))
@@ -213,7 +213,17 @@ func main() {
 	}
 	s.Database, s.DemoMode, s.Teardown = *database, *demoMode, *teardown
 	s.KeepClusterOnly = *keepClust
-	s.Plugins = pluginIDs
+	// A plugin a sandbox class installs is chosen in Settings as its class,
+	// not on the Plugins screen: --plugins mode3-iso preselects the class.
+	s.Plugins = nil
+	for _, id := range pluginIDs {
+		if p, _ := plugin.Get(id); p.Class != "" {
+			have := s.SandboxClasses
+			s.SandboxClasses = state.FormatClasses(func(c string) bool { return c == p.Class || state.HasClass(have, c) })
+			continue
+		}
+		s.Plugins = append(s.Plugins, id)
+	}
 
 	cache, _ := os.UserCacheDir()
 	if *logPath == "" {
@@ -238,7 +248,7 @@ func main() {
 		stepEnv: cfg.StepEnv(state.RDSKeys)}
 	d := ui.Deps{
 		Probe: b.probe, CreateCluster: b.createCluster, Bootstrap: b.bootstrap, RDS: b.rds,
-		ControlPlane: b.controlPlane, Plugins: b.plugins, Demo: b.demoStep, Verify: b.verify,
+		ControlPlane: b.controlPlane, Nitro: b.nitro, Plugins: b.plugins, Demo: b.demoStep, Verify: b.verify,
 		RemoveControlPlane: b.removeControlPlane, Teardown: b.teardown, Inventory: b.inventory,
 		LogPath: logger.Path(), DryRun: *dryRun,
 		Splash: true, SnapshotDir: *snapDir, Redact: *redact, Config: cfg,
@@ -319,6 +329,41 @@ func simChecks() []doctor.Check {
 		ok("kubectl", "Client Version: v1.37.0"),
 		ok("aws", "aws-cli/2.31.0"),
 	}
+}
+
+// runDemo is --deploy-demo and --verify on o's cluster: the counter demo on
+// the classes it has (gvisor, microvm), each refused when the cluster has no
+// node of its node group, and with --verify each class a plugin installs
+// (the AWS Nitro sandbox) through that plugin's check, its counter pool,
+// which the class's own step deployed.
+func runDemo(ctx context.Context, o plugin.Options, do demo.Options, classes string, deploy, verify bool) error {
+	do.Tag, do.ImageRepo, do.Tree = o.Tag, o.ImageRepo, o.Tree
+	for _, c := range state.DemoClasses(classes) {
+		if !slices.Contains(o.Pools, c) {
+			return fmt.Errorf("the counter demo on %s runs on the %s node group, and %s has no node labeled %s=%s", c, c, o.Cluster, plugin.PoolLabel, c)
+		}
+	}
+	if do.SandboxClasses != "" {
+		if deploy {
+			if err := demo.Deploy(ctx, os.Stdout, do); err != nil {
+				return err
+			}
+		}
+		if verify {
+			if err := demo.Verify(ctx, os.Stdout, do); err != nil {
+				return err
+			}
+		}
+	}
+	for _, c := range state.ParseClasses(classes) {
+		if ids := state.ClassPlugins(c); verify && len(ids) > 0 {
+			fmt.Println(demo.VerifyLine + c)
+			if err := plugin.Run(ctx, os.Stdout, plugin.ActionVerify, ids, o); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // runPlugins is --plugin-action: the plugins, on the install's release

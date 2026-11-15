@@ -26,6 +26,7 @@ MICROVM_NODES=2
 # Space-separated key=value tags.
 TAGS="project=agent-substrate auto-delete=no"
 EKS_PUBLIC_ACCESS_CIDRS='0.0.0.0/0'
+SANDBOX_CLASSES=gvisor,microvm
 SUBSTRATE_TAG=v1.0.0
 SUBSTRATE_IMAGE_REPO=ghcr.io/agent-substrate/substrate
 export DB_STORAGE_GB=20
@@ -165,7 +166,7 @@ func TestValidateConfigBothWays(t *testing.T) {
 	for key, value := range map[string]string{
 		"KUBERNETES_VERSION": "1.36", "AUTO_MODE": "yes", "SYSTEM_INSTANCE_TYPE": "big", "GVISOR_NODES": "0",
 		"MICROVM_NODES": "100", "TAGS": "a=b c", "EKS_PUBLIC_ACCESS_CIDRS": "", "SUBSTRATE_TAG": "latest",
-		"SUBSTRATE_IMAGE_REPO": "Not A Repo",
+		"SUBSTRATE_IMAGE_REPO": "Not A Repo", "SANDBOX_CLASSES": "kata",
 	} {
 		v := map[string]string{}
 		for k, x := range good {

@@ -3,25 +3,28 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
+
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/theme"
 )
 
 // settingsScreen edits what config.env controls for the run: the new
-// cluster's knobs (only when the run creates the cluster), TAGS, the release and its image repository,
-// the sandbox classes and the database. Values are checked with
+// cluster's knobs (only when the run creates the cluster), the sandbox
+// classes, the node groups they make (only those), TAGS, the release and
+// its image repository, and the database. Values are checked with
 // state.ValidateConfig; n applies them to the Setup and moves on, and the
 // install writes them to config.local.env when it starts (Review).
 type settingsScreen struct {
 	fields  []field
 	cursor  int
-	values  map[string]string // config keys, plus classKey and dbKey
+	values  map[string]string // config keys, plus dbKey
 	errs    map[string]string
 	editing bool
 	input   string
@@ -36,14 +39,15 @@ const (
 	fDatabase // RDS or the bundled PostgreSQL
 )
 
-// The values that are not config.env keys.
+// The values that are not edited as text: the classes (config.env's
+// SANDBOX_CLASSES, toggled one class at a time) and the database.
 const (
-	classKey = "sandbox classes"
+	classKey = "SANDBOX_CLASSES"
 	dbKey    = "database"
 )
 
 // field is one focusable setting. Node group rows pair an instance type
-// with a node count (group set); the class row pairs gvisor and microvm.
+// with a node count (group set).
 type field struct {
 	kind    fieldKind
 	key     string // config key, or the sandbox class
@@ -52,14 +56,21 @@ type field struct {
 	group   string
 }
 
-func settingsFields(newCluster bool) []field {
+// settingsFields are the fields for a new or connected cluster, with node
+// group rows for groups, the node groups a new cluster gets.
+func settingsFields(newCluster bool, groups []string) []field {
 	var f []field
 	if newCluster {
 		f = append(f,
 			field{kind: fText, key: "KUBERNETES_VERSION", label: "Kubernetes version", section: "New cluster"},
 			field{kind: fToggle, key: "AUTO_MODE", label: "EKS Auto Mode", section: "New cluster"},
 			field{kind: fText, key: "EKS_PUBLIC_ACCESS_CIDRS", label: "API access CIDRs", section: "New cluster"})
-		for _, g := range []string{"system", "gvisor", "microvm"} {
+	}
+	for _, c := range state.Classes {
+		f = append(f, field{kind: fClass, key: c, label: state.ClassTitle(c), section: "Sandbox classes"})
+	}
+	if newCluster {
+		for _, g := range groups {
 			up := strings.ToUpper(g)
 			f = append(f,
 				field{kind: fText, key: up + "_INSTANCE_TYPE", label: "instance type", section: "Node groups", group: g},
@@ -70,64 +81,187 @@ func settingsFields(newCluster bool) []field {
 		field{kind: fText, key: "TAGS", label: "Tags", section: "Every AWS resource"},
 		field{kind: fText, key: "SUBSTRATE_TAG", label: "Release", section: "Agent Substrate"},
 		field{kind: fText, key: "SUBSTRATE_IMAGE_REPO", label: "Image repository", section: "Agent Substrate"},
-		field{kind: fClass, key: "gvisor", label: "gVisor", section: "Agent Substrate", group: "classes"},
-		field{kind: fClass, key: "microvm", label: "microVM", section: "Agent Substrate", group: "classes"},
 		field{kind: fDatabase, key: dbKey, label: "Database", section: "Agent Substrate"})
 }
+
+// classesHelp is what every class's help ends with: the classes decide the
+// node groups.
+const classesHelp = " The classes decide a new cluster's node groups: gVisor and microVM make theirs, " +
+	"the system group comes with either, and with neither an Auto Mode cluster gets no node group at all " +
+	"(the control plane, the bundled PostgreSQL and every controller run on Auto Mode nodes). Press m for that minimal profile."
 
 // help is a setting's explanation when config.env has no comment above it.
 var help = map[string]string{
 	"KUBERNETES_VERSION":      "The EKS version of the new cluster. Substrate needs 1.37 or newer (the PodCertificate APIs).",
-	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the three node groups. Fixed when the cluster is created.",
+	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the node groups. Fixed when the cluster is created. The AWS Nitro sandbox class needs it.",
 	"EKS_PUBLIC_ACCESS_CIDRS": "Address ranges allowed to reach the Kubernetes API endpoint, space-separated. Requests are still authenticated by IAM.",
 	"TAGS":                    "Space-separated key=value tags on every AWS resource the install creates. The owner tag agent-substrate-on-eks/deployment=<cluster>.<region> is always added.",
-	"SUBSTRATE_TAG":           "The Agent Substrate release to install, such as v1.0.0.",
+	"SUBSTRATE_TAG":           "The Agent Substrate release to install, such as v1.0.0. An install runs one release: with the AWS Nitro sandbox class (or the mode 3 plugin) it is the fork's release that class installs, and this one is kept for a run without it.",
 	"SUBSTRATE_IMAGE_REPO":    "Where the release's images come from.",
-	"gvisor":                  "Sandbox classes ate-setup installs. gVisor runs actors in a user-space kernel on the gvisor node group; at least one class is installed.",
-	"microvm":                 "Sandbox classes ate-setup installs. microVM runs actors in Kata microVMs on the microvm node group, which needs nested virtualization; at least one class is installed.",
-	dbKey:                     "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster.",
-	"SYSTEM_INSTANCE_TYPE":    "The system node group runs the Substrate control plane.",
-	"GVISOR_INSTANCE_TYPE":    "The gvisor node group runs gVisor actors.",
-	"MICROVM_INSTANCE_TYPE":   "The microvm node group runs microVM actors; its instance type needs nested virtualization (m8i, c8i, r8i).",
+	state.ClassGVisor:         "gVisor runs actors in a user-space kernel, on the gvisor node group." + classesHelp,
+	state.ClassMicroVM:        "microVM runs actors in Kata microVMs on the microvm node group, whose instance type needs nested virtualization." + classesHelp,
+	state.ClassNitro: "The AWS Nitro sandbox makes each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox) " +
+		"on nodes Auto Mode launches for it, so it needs Auto Mode and makes no node group. It installs the fork's release " +
+		"(one release per install), and is set up and checked in its own step after the control plane." + classesHelp,
+	dbKey:                   "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster.",
+	"SYSTEM_INSTANCE_TYPE":  "The system node group runs the controllers pinned to it: the control plane with RDS on Auto Mode, and the plugins' controllers.",
+	"GVISOR_INSTANCE_TYPE":  "The gvisor node group runs gVisor actors.",
+	"MICROVM_INSTANCE_TYPE": "The microvm node group runs microVM actors; its instance type needs nested virtualization (m8i, c8i, r8i).",
+}
+
+// noGroupsLine is the Node groups section of a new cluster that gets none.
+const noGroupsLine = "none: everything runs on EKS Auto Mode nodes"
+
+// classNote is a class's note beside its box: where it runs.
+var classNote = map[string]string{
+	state.ClassGVisor:  "gvisor node group",
+	state.ClassMicroVM: "microvm node group",
+	state.ClassNitro:   "on Auto Mode nodes",
+}
+
+// classShort is the note of a class this run cannot have; the panel beside
+// says why in full.
+func (m *Model) classShort(c string) string {
+	if c == state.ClassNitro {
+		return "needs EKS Auto Mode"
+	}
+	return "no " + c + " node group"
 }
 
 func (m *Model) enterSettings() {
 	st := m.set
-	st.fields = settingsFields(m.s.ClusterIsNew)
 	st.values = state.ConfigValues(m.s)
-	st.values[classKey] = m.s.SandboxClasses
 	st.values[dbKey] = m.s.Database
 	st.errs = map[string]string{}
 	st.editing = false
+	m.refreshFields()
+	st.cursor = min(st.cursor, len(st.fields)-1)
+	m.checkSettings()
+}
+
+// autoMode is the run's Auto Mode as Settings has it now: the AUTO_MODE
+// value for a new cluster, the cluster's own otherwise.
+func (m *Model) settingsAutoMode() bool {
+	if m.s.ClusterIsNew {
+		return m.set.values["AUTO_MODE"] == "on"
+	}
+	return m.s.AutoMode
+}
+
+// settingsGroups are the node groups of the cluster as Settings has it now.
+func (m *Model) settingsGroups() []string {
+	if m.s.ClusterIsNew {
+		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[classKey], m.s.Plugins)
+	}
+	return m.s.NodeGroups()
+}
+
+// refreshFields rebuilds the fields for the current values, whose classes
+// and Auto Mode decide the node group rows, keeping the cursor on its key.
+func (m *Model) refreshFields() {
+	st := m.set
+	at := ""
+	if st.cursor >= 0 && st.cursor < len(st.fields) {
+		at = st.fields[st.cursor].key
+	}
+	st.fields = settingsFields(m.s.ClusterIsNew, m.settingsGroups())
+	for i, f := range st.fields {
+		if f.key == at {
+			st.cursor = i
+		}
+	}
 	st.cursor = min(st.cursor, len(st.fields)-1)
 }
 
-func (st *settingsScreen) classOn(c string) bool {
-	return slices.Contains(strings.Split(st.values[classKey], ","), c)
+func (st *settingsScreen) classOn(c string) bool { return state.HasClass(st.values[classKey], c) }
+
+// classProblem is why class c cannot be on for this run, or "".
+func (m *Model) classProblem(c string) string {
+	return state.ClassProblem(c, m.settingsAutoMode(), m.s.ClusterIsNew, m.s.ClusterName, m.s.ClusterPools)
 }
 
-// toggleClass turns a sandbox class on or off, keeping at least one and the
-// order gvisor,microvm.
-func (st *settingsScreen) toggleClass(c string) string {
-	var on []string
-	for _, k := range []string{"gvisor", "microvm"} {
-		if st.classOn(k) != (k == c) {
-			on = append(on, k)
+// toggleClass turns a sandbox class on or off, keeping at least one, in
+// state.Classes' order; a class this run cannot have is not turned on.
+func (m *Model) toggleClass(c string) string {
+	st := m.set
+	if !st.classOn(c) {
+		if why := m.classProblem(c); why != "" {
+			return state.ClassTitle(c) + " " + why
 		}
 	}
-	if len(on) == 0 {
+	on := state.FormatClasses(func(k string) bool { return st.classOn(k) != (k == c) })
+	if on == "" {
 		return "At least one sandbox class is installed."
 	}
-	st.values[classKey] = strings.Join(on, ",")
+	st.values[classKey] = on
 	return ""
 }
 
-// check validates every value, for the screen and for n.
-func (st *settingsScreen) check() {
-	st.errs = state.ValidateConfig(st.values)
-	if err := state.ValidSandboxClasses(st.values[classKey]); err != nil {
-		st.errs[classKey] = err.Error()
+// minimal is the m key: the minimal profile, Auto Mode with the AWS Nitro
+// sandbox class only and the bundled PostgreSQL. A new cluster then gets no
+// node group, and everything runs on Auto Mode nodes.
+func (m *Model) minimal() string {
+	st := m.set
+	if m.s.ClusterIsNew {
+		st.values["AUTO_MODE"] = "on"
+	} else if !m.s.AutoMode {
+		return "The minimal profile needs EKS Auto Mode, and " + m.s.ClusterName + " has it off."
 	}
+	st.values[classKey], st.values[dbKey] = state.ClassNitro, state.DatabaseBundled
+	if m.s.ClusterIsNew {
+		return "Minimal profile: EKS Auto Mode, the AWS Nitro sandbox only, the bundled PostgreSQL; no node group."
+	}
+	return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
+}
+
+// checkSettings validates every value, for the screen and for n: the config
+// keys (only the node groups shown, the ones the cluster gets), each class
+// against the cluster, and the node group rule.
+func (m *Model) checkSettings() {
+	st := m.set
+	st.errs = state.ValidateConfig(st.values)
+	shown := map[string]bool{}
+	for _, f := range st.fields {
+		shown[f.key] = true
+	}
+	for _, g := range nodegroups.All {
+		for _, k := range []string{strings.ToUpper(g) + "_INSTANCE_TYPE", strings.ToUpper(g) + "_NODES"} {
+			if !shown[k] {
+				delete(st.errs, k)
+			}
+		}
+	}
+	if _, bad := st.errs[classKey]; bad {
+		return
+	}
+	// Short, to fit under the classes; the class's panel says why in full.
+	for _, c := range state.ParseClasses(st.values[classKey]) {
+		if m.classProblem(c) != "" {
+			st.errs[classKey] = state.ClassTitle(c) + ": " + m.classShort(c)
+			return
+		}
+	}
+	if m.s.ClusterIsNew {
+		if err := nodegroups.Check(m.settingsAutoMode(), m.settingsGroups()); err != nil {
+			st.errs[classKey] = err.Error()
+		}
+	}
+}
+
+// release is the release the run installs with the current classes, and
+// what sets it when a class or plugin replaces SUBSTRATE_TAG's ("" when
+// none does).
+func (m *Model) settingsRelease() (plugin.Release, string) {
+	st := m.set
+	ids := state.WithClassPlugins(m.s.Plugins, st.values[classKey])
+	rel := plugin.ChosenRelease(ids, st.values["SUBSTRATE_TAG"], st.values["SUBSTRATE_IMAGE_REPO"])
+	if rel.Repo == plugin.UpstreamRepo {
+		return rel, ""
+	}
+	if st.classOn(state.ClassNitro) {
+		return rel, "the AWS Nitro sandbox class"
+	}
+	return rel, "a chosen plugin"
 }
 
 // apply writes the answers to the Setup. A new cluster is recorded again,
@@ -161,7 +295,7 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 		case "enter":
 			st.values[f.key] = strings.TrimSpace(st.input)
 			st.editing = false
-			st.check()
+			m.checkSettings()
 		case "esc":
 			st.editing = false
 		default:
@@ -175,8 +309,7 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 	case "down", "j", "tab":
 		st.cursor = (st.cursor + 1) % len(st.fields)
 	case "left", "right":
-		// Across a paired row: the instance type and its node count, or
-		// the two sandbox classes.
+		// Across a paired row: the instance type and its node count.
 		if f.group != "" {
 			if key == "left" && st.cursor > 0 && st.fields[st.cursor-1].group == f.group {
 				st.cursor--
@@ -184,6 +317,10 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 				st.cursor++
 			}
 		}
+	case "m":
+		m.notice = m.minimal()
+		m.refreshFields()
+		m.checkSettings()
 	case "enter", " ":
 		switch f.kind {
 		case fToggle:
@@ -193,7 +330,7 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 				st.values[f.key] = "on"
 			}
 		case fClass:
-			if why := st.toggleClass(f.key); why != "" {
+			if why := m.toggleClass(f.key); why != "" {
 				m.notice = why
 			}
 		case fDatabase:
@@ -203,13 +340,18 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 				st.values[dbKey] = state.DatabaseRDS
 			}
 		default:
+			if rel, by := m.settingsRelease(); f.key == "SUBSTRATE_TAG" && by != "" {
+				m.notice = by + " installs " + rel.Tag + " (one release per install); turn it off to choose the release"
+				break
+			}
 			if key == "enter" {
 				st.editing, st.input = true, st.values[f.key]
 			}
 		}
-		st.check()
+		m.refreshFields()
+		m.checkSettings()
 	case "n":
-		st.check()
+		m.checkSettings()
 		if len(st.errs) > 0 {
 			m.notice = fmt.Sprintf("%d setting(s) need a fix before the review", len(st.errs))
 			return nil
@@ -247,11 +389,17 @@ func (m Model) settingsView() string {
 		if m.s.AutoMode {
 			auto = "Auto Mode on"
 		}
+		groups := "no node groups: Auto Mode nodes only"
+		if g := m.s.NodeGroups(); len(g) > 0 {
+			groups = "node groups: " + strings.Join(g, ", ")
+		}
 		left = append(left, "", theme.Title.Render("Cluster"),
 			"  "+m.s.ClusterName+theme.Subtle.Render(fmt.Sprintf(" · EKS %s · %s", m.s.ClusterVersion, auto)),
+			"  "+theme.Subtle.Render(truncate(groups, leftW-4)),
 			theme.Fainted.Render(indent(lipgloss.NewStyle().Width(leftW-2).Render(
 				"connected, not created: the new-cluster settings apply only to a cluster this run creates."), "  ")))
 	}
+	rel, relBy := m.settingsRelease()
 	cell := func(i, w int) string {
 		f := st.fields[i]
 		shown := st.values[f.key]
@@ -264,8 +412,11 @@ func (m Model) settingsView() string {
 			}
 		case fClass:
 			box := "[ ]"
-			if st.classOn(f.key) {
+			switch {
+			case st.classOn(f.key):
 				box = "[" + theme.GlyphDone + "]"
+			case m.classProblem(f.key) != "":
+				box = "[–]"
 			}
 			shown = box + " " + f.label
 		case fDatabase:
@@ -273,6 +424,9 @@ func (m Model) settingsView() string {
 			if st.values[dbKey] == state.DatabaseBundled {
 				shown = "Bundled PostgreSQL"
 			}
+		}
+		if f.key == "SUBSTRATE_TAG" && relBy != "" {
+			shown = rel.Tag + " (fork)"
 		}
 		if st.editing && i == st.cursor {
 			in := []rune(st.input)
@@ -285,7 +439,7 @@ func (m Model) settingsView() string {
 			style = theme.Bad
 		}
 		if f.kind == fClass {
-			if _, bad := st.errs[classKey]; bad {
+			if _, bad := st.errs[classKey]; bad && st.classOn(f.key) {
 				style = theme.Bad
 			}
 		}
@@ -298,19 +452,30 @@ func (m Model) settingsView() string {
 	for i := 0; i < len(st.fields); i++ {
 		f := st.fields[i]
 		if f.section != section {
+			// A new cluster without node groups says so where their rows
+			// would be.
+			if f.section == "Every AWS resource" && m.s.ClusterIsNew && len(m.settingsGroups()) == 0 {
+				left = append(left, "", theme.Title.Render("Node groups"), "  "+theme.Subtle.Render(truncate(noGroupsLine, leftW-4)))
+			}
 			section = f.section
 			left = append(left, "", theme.Title.Render(section))
 			if section == "Node groups" {
 				left = append(left, theme.Fainted.Render("  group     instance type      nodes"))
 			}
+			if section == "Sandbox classes" {
+				left = append(left, theme.Fainted.Render(truncate("  m: minimal, Auto Mode with the Nitro sandbox only", leftW)))
+			}
 		}
 		switch {
-		case f.group == "classes":
-			left = append(left, "  "+pad("Sandbox classes", 18)+cell(i, 13)+" "+cell(i+1, 14))
-			i++
+		case f.kind == fClass:
+			note := classNote[f.key]
+			if m.classProblem(f.key) != "" {
+				note = m.classShort(f.key)
+			}
+			left = append(left, " "+cell(i, 24)+" "+theme.Fainted.Render(truncate(note, leftW-27)))
 		case f.group != "":
 			note := ""
-			if f.group == "microvm" {
+			if f.group == nodegroups.MicroVM {
 				note = theme.Fainted.Render(" nested virt")
 			}
 			left = append(left, "  "+pad(f.group, 8)+cell(i, 18)+" "+cell(i+1, 5)+note)
@@ -321,9 +486,11 @@ func (m Model) settingsView() string {
 		if msg, bad := st.errs[f.key]; bad {
 			left = append(left, "  "+pad("", 18)+theme.Bad.Render(truncate(msg, leftW-20)))
 		}
-	}
-	if msg, bad := st.errs[classKey]; bad {
-		left = append(left, "  "+theme.Bad.Render(truncate(msg, leftW-2)))
+		if f.key == state.ClassNitro {
+			if msg, bad := st.errs[classKey]; bad {
+				left = append(left, "  "+theme.Bad.Render(truncate(msg, leftW-2)))
+			}
+		}
 	}
 
 	f := st.fields[st.cursor]
@@ -332,12 +499,22 @@ func (m Model) settingsView() string {
 	if doc := m.d.Config.Defaults.Doc(f.key); doc != "" {
 		text = doc
 	}
+	if f.key == "SUBSTRATE_TAG" && relBy != "" {
+		text = "The install runs " + rel.Tag + " from " + rel.Repo + ": " + relBy + " installs that fork's release, one release per install. " +
+			"SUBSTRATE_TAG (" + st.values["SUBSTRATE_TAG"] + ") is kept for a run without it."
+	}
 	para := lipgloss.NewStyle().Width(rightW)
 	right = append(right, theme.Subtle.Render(para.Render(joinParagraphs(text))))
 	if f.kind == fText || f.kind == fToggle {
 		right = append(right, "", theme.Fainted.Render(para.Render("Now: "+f.key+"="+st.values[f.key])))
 		if def, ok := m.d.Config.Defaults.Get(f.key); ok {
 			right = append(right, theme.Fainted.Render(para.Render("config.env: "+f.key+"="+def)))
+		}
+	}
+	if f.kind == fClass {
+		right = append(right, "", theme.Fainted.Render(para.Render("Now: "+classKey+"="+st.values[classKey])))
+		if why := m.classProblem(f.key); why != "" {
+			right = append(right, theme.Warning.Render(para.Render("Not available: "+why+".")))
 		}
 	}
 	if st.editing {

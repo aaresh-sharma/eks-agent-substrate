@@ -267,7 +267,7 @@ var ManagedKeys = []string{
 	"CLUSTER_NAME", "AWS_REGION", "AWS_PROFILE", "KUBERNETES_VERSION", "AUTO_MODE",
 	"SYSTEM_INSTANCE_TYPE", "SYSTEM_NODES", "GVISOR_INSTANCE_TYPE", "GVISOR_NODES",
 	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
-	"SUBSTRATE_TAG", "SUBSTRATE_IMAGE_REPO",
+	"SUBSTRATE_TAG", "SUBSTRATE_IMAGE_REPO", "SANDBOX_CLASSES",
 }
 
 var alwaysWritten = map[string]bool{"CLUSTER_NAME": true, "AWS_REGION": true, "AWS_PROFILE": true}
@@ -275,7 +275,8 @@ var alwaysWritten = map[string]bool{"CLUSTER_NAME": true, "AWS_REGION": true, "A
 // ConfigValues are s's answers under ManagedKeys.
 func ConfigValues(s *Setup) map[string]string {
 	v := map[string]string{"CLUSTER_NAME": s.ClusterName, "AWS_REGION": s.Region, "AWS_PROFILE": s.Profile,
-		"TAGS": s.Tags, "SUBSTRATE_TAG": s.SubstrateTag, "SUBSTRATE_IMAGE_REPO": s.ImageRepo}
+		"TAGS": s.Tags, "SUBSTRATE_TAG": s.SubstrateTag, "SUBSTRATE_IMAGE_REPO": s.ImageRepo,
+		"SANDBOX_CLASSES": s.SandboxClasses}
 	for _, kv := range s.NewClusterConfig.Env() {
 		k, val, _ := strings.Cut(kv, "=")
 		v[k] = val
@@ -408,6 +409,7 @@ func ValidateConfig(values map[string]string) map[string]string {
 			check("EKS_PUBLIC_ACCESS_CIDRS", cidrRe.MatchString(c), `"auto", or space-separated IPv4 CIDRs such as 203.0.113.0/24`)
 		}
 	}
+	check("SANDBOX_CLASSES", ValidSandboxClasses(values["SANDBOX_CLASSES"]) == nil, "one or more of gvisor, microvm and nitro, comma-separated")
 	check("SUBSTRATE_TAG", releaseRe.MatchString(values["SUBSTRATE_TAG"]), "a release tag such as v1.0.0")
 	check("SUBSTRATE_IMAGE_REPO", imageRe.MatchString(values["SUBSTRATE_IMAGE_REPO"]), "an image repository such as ghcr.io/agent-substrate/substrate")
 	return bad

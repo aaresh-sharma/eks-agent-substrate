@@ -36,7 +36,8 @@ func answerKubectl(answers string) {
 // cluster is the kubectl answers of a cluster whose record lists record and
 // whose control plane runs installed ("" none).
 func cluster(record, installed string) string {
-	a := []string{"substrate-eks-plugins=" + record}
+	// The nodes of the three node groups (plugin.PoolsArgs).
+	a := []string{"substrate-eks-plugins=" + record, "get nodes -l ate.dev/pool=system gvisor microvm"}
 	if installed != "" {
 		a = append(a, "get namespace ate-system=ate-system", "get daemonset atelet=daemonset.apps/atelet",
 			"get deployment ate-api-server=ghcr.io/x/ate-api-server:"+installed)
@@ -120,6 +121,25 @@ func TestDemoRunsOnTheRecordedRelease(t *testing.T) {
 			!strings.Contains(out, "no substrate "+tc.tag+" tree with demos/counter at ") || !strings.Contains(out, "/"+tree+"; ") {
 			t.Errorf("record %q: %v\n%s\nwant the tree %s", tc.record, err, out, tree)
 		}
+	}
+}
+
+// Through main(), the CLI refuses what the cluster cannot run: the counter
+// demo on a class whose node group's nodes are missing (here gvisor, on a
+// cluster with system and microvm nodes), and the AWS Nitro sandbox class
+// on a cluster without Auto Mode (the fake cluster has it off), before
+// anything is fetched or applied. With the nodes there the demo goes on to
+// its tree (TestDemoRunsOnTheRecordedRelease).
+func TestCLIRefusesClassesTheClusterCannotRun(t *testing.T) {
+	answers := "substrate-eks-plugins=\nget nodes -l ate.dev/pool=system microvm"
+	err, out := runMain(t, answers, "--deploy-demo", "--sandbox-classes", "gvisor")
+	if err == nil || !strings.Contains(out, "the counter demo on gvisor runs on the gvisor node group, and demo has no node labeled ate.dev/pool=gvisor") {
+		t.Errorf("demo on gvisor without its nodes: %v\n%s", err, out)
+	}
+	err, out = runMain(t, answers, "--deploy-control-plane", "--sandbox-classes", "nitro", "--database", "bundled",
+		"--snap-bucket", "demo-snap", "--asset-bucket", "demo-assets", "--eks-overlay", "../deploy/eks")
+	if err == nil || !strings.Contains(out, "plugin mode3-iso needs EKS Auto Mode") || strings.Contains(out, "Fetching substrate") {
+		t.Errorf("Nitro class off Auto Mode: %v\n%s", err, out)
 	}
 }
 

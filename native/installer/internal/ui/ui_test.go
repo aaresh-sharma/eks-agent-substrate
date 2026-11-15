@@ -47,7 +47,7 @@ func (r *recorder) Start(ctx context.Context, spec execx.Spec) <-chan execx.Even
 		}
 	}
 	if c, ok := strings.CutPrefix(spec.Label, "remove "); ok {
-		r.probes[c] = probe.Marker + "false"
+		r.probes[c] = probe.Marker + "false pools=gvisor,microvm,system"
 	}
 	fail := n <= r.fails[spec.Label]
 	r.mu.Unlock()
@@ -154,6 +154,13 @@ func testDeps(r *recorder) Deps {
 				sim = append(sim, plugin.DeployLine+p.ID, plugin.VerifyLine+p.ID)
 			}
 			return execx.Spec{Label: "plugins", Display: "substrate-eks --plugin-action deploy --plugins " + plugin.FormatRecord(s.Plugins), SimLines: sim}
+		},
+		Nitro: func(s *state.Setup) execx.Spec {
+			var sim []string
+			for _, p := range resolved(state.ClassPlugins(s.SandboxClasses)) {
+				sim = append(sim, plugin.DeployLine+p.ID, plugin.VerifyLine+p.ID)
+			}
+			return execx.Spec{Label: "nitro", Display: "substrate-eks --plugin-action deploy --plugins " + plugin.FormatRecord(state.ClassPlugins(s.SandboxClasses)), SimLines: sim}
 		},
 		Demo:      spec("demo", "Deploying the counter demo on gvisor"),
 		Verify:    spec("verify"),

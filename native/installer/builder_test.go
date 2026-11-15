@@ -47,11 +47,13 @@ func TestReleaseFlagsReachTheReleaseSteps(t *testing.T) {
 			release := name == "control plane" || name == "demo" || name == "verify" || name == "plugins"
 			i := slices.Index(spec.Argv, "--image-repo")
 			j := slices.Index(spec.Argv, "--sandbox-classes")
-			if (i >= 0) != (custom && release) || (j >= 0) != (custom && release && name != "plugins") {
+			// --sandbox-classes always: a child's default is SANDBOX_CLASSES
+			// from the config files, which Settings may have changed.
+			if (i >= 0) != (custom && release) || (j >= 0) != (release && name != "plugins") {
 				t.Errorf("custom=%v %s: argv %q", custom, name, spec.Argv)
 				continue
 			}
-			if i >= 0 && spec.Argv[i+1] != s.ImageRepo || j >= 0 && spec.Argv[j+1] != "gvisor" {
+			if i >= 0 && spec.Argv[i+1] != s.ImageRepo || j >= 0 && spec.Argv[j+1] != s.SandboxClasses {
 				t.Errorf("%s: argv %q", name, spec.Argv)
 			}
 		}
@@ -105,6 +107,47 @@ func TestEveryStepCarriesTheForkReleaseWithMode3(t *testing.T) {
 		if !strings.Contains(cp.Display, "substrate "+want.Tag+" ") || !slices.Contains(cp.SimLines, controlplane.CachedLine+want.Tag) {
 			t.Errorf("chosen %v: the control plane step shows %q / %q, not %s", chosen, cp.Display, cp.SimLines, want.Tag)
 		}
+	}
+}
+
+// create cluster gets, shown and passed, the node groups of the run's
+// classes and plugins: the default three, unchanged; system and gvisor for
+// the gVisor class alone; system and microvm for mode 3 with the AWS Nitro
+// sandbox; none for the Nitro class alone on Auto Mode (the minimal
+// profile). With the Nitro class the control plane carries mode3-iso and
+// gets ate-setup's gvisor class only, its own step deploys mode3-iso, and
+// the plugins step deploys the chosen plugins alone.
+func TestCreateClusterGetsTheNodeGroupsOfTheSelection(t *testing.T) {
+	for _, tc := range []struct {
+		classes string
+		plugins []string
+		want    string
+	}{
+		{state.DefaultSandboxClasses, nil, "system,gvisor,microvm"},
+		{"gvisor", nil, "system,gvisor"},
+		{"nitro", []string{mode3.ID}, "system,microvm"},
+		{"nitro", nil, "none"},
+	} {
+		b, s := testBuilder()
+		s.SandboxClasses, s.Plugins = tc.classes, tc.plugins
+		s.NewCluster("demo")
+		spec := b.createCluster(s)
+		if !slices.Contains(spec.Env, "NODE_GROUPS="+tc.want) || !strings.HasPrefix(spec.Display, "NODE_GROUPS="+tc.want+" ") {
+			t.Errorf("%s %v: env %q, shown %q; want NODE_GROUPS=%s", tc.classes, tc.plugins, spec.Env, spec.Display, tc.want)
+		}
+	}
+	b, s := testBuilder()
+	s.SandboxClasses, s.Plugins = "nitro", []string{"efs"}
+	cp := b.controlPlane(s)
+	if v := cp.Argv[slices.Index(cp.Argv, "--plugins")+1]; v != "efs,mode3-iso" || !strings.Contains(cp.Display, ", gvisor, database") ||
+		slices.Contains(cp.SimLines, "[step]: prepare_microvm_deps") {
+		t.Errorf("control plane: --plugins %s, shown %q", v, cp.Display)
+	}
+	if n := b.nitro(s); n.Argv[slices.Index(n.Argv, "--plugins")+1] != "mode3-iso" || !slices.Contains(n.Argv, "--plugin-action") {
+		t.Errorf("nitro step argv %q", n.Argv)
+	}
+	if p := b.plugins(s); p.Argv[slices.Index(p.Argv, "--plugins")+1] != "efs" {
+		t.Errorf("plugins step argv %q", p.Argv)
 	}
 }
 

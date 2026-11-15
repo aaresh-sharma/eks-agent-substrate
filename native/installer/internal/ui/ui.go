@@ -39,9 +39,10 @@ type Deps struct {
 	// reads its output).
 	Probe func(cluster string, s *state.Setup) execx.Spec
 	// The long steps' commands, one per step. Plugins is --plugin-action
-	// deploy for the chosen plugins.
-	CreateCluster, Bootstrap, RDS, ControlPlane, Plugins, Demo func(*state.Setup) execx.Spec
-	RemoveControlPlane, Teardown                               func(*state.Setup) execx.Spec
+	// deploy for the chosen plugins, Nitro for the AWS Nitro sandbox
+	// class's.
+	CreateCluster, Bootstrap, RDS, ControlPlane, Nitro, Plugins, Demo func(*state.Setup) execx.Spec
+	RemoveControlPlane, Teardown                                      func(*state.Setup) execx.Spec
 	// Verify and Inventory are commands the Complete screen prints.
 	Verify, Inventory func(*state.Setup) execx.Spec
 	// LogPath is shown on failure and at the end.
@@ -231,10 +232,12 @@ func (m *Model) longStep(st state.Step) (func(*state.Setup) execx.Spec, []steps.
 		return m.d.RDS, steps.RDS(), true
 	case state.ControlPlane:
 		return m.d.ControlPlane, steps.ControlPlane(), true
+	case state.NitroSandbox:
+		return m.d.Nitro, steps.Plugins(resolved(state.ClassPlugins(m.s.SandboxClasses))), true
 	case state.InstallPlugins:
 		return m.d.Plugins, steps.Plugins(resolved(m.s.Plugins)), true
 	case state.Demo:
-		return m.d.Demo, steps.Demo(strings.Split(m.s.SandboxClasses, ",")), true
+		return m.d.Demo, steps.Demo(state.DemoClasses(m.s.SandboxClasses), state.ParseClasses(m.s.SandboxClasses)), true
 	case state.RemoveControlPlane:
 		return m.d.RemoveControlPlane, steps.RemoveControlPlane(), true
 	case state.TeardownAWS:
@@ -622,6 +625,10 @@ func (m Model) body(h int) string {
 		b.WriteString(theme.Title.Render("Install the plugins") + "\n")
 		b.WriteString(theme.Subtle.Render("Deploy and check "+strings.Join(pluginTitles(resolved(m.s.Plugins)), ", ")) + "\n\n")
 		b.WriteString(m.taskView(m.tasks[cur]))
+	case state.NitroSandbox:
+		b.WriteString(theme.Title.Render("Set up Nitro sandboxes") + "\n")
+		b.WriteString(theme.Subtle.Render("The AWS Nitro sandbox class: NodePool ate-isolated on EKS Auto Mode, atelet-iso, and a counter pool on RuntimeClass isolated-sandbox, checked across a suspend and resume") + "\n\n")
+		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.Welcome:
 		b.WriteString(theme.Logo() + "\n\n")
 		if m.s.Teardown {
@@ -681,8 +688,13 @@ func (m Model) body(h int) string {
 		b.WriteString(m.scopeView())
 	case state.CreateCluster:
 		b.WriteString(theme.Title.Render("Create the cluster") + "\n")
-		b.WriteString(theme.Subtle.Render("VPC, IAM roles, EKS cluster "+m.s.ClusterName+" and its system, gvisor and microvm node groups") + "\n")
-		b.WriteString(theme.Subtle.Render(m.s.NewClusterConfig.Summary()) + "\n\n")
+		groups := m.s.NodeGroups()
+		what := "VPC, IAM roles and EKS cluster " + m.s.ClusterName + ", with no node group: everything runs on EKS Auto Mode nodes"
+		if len(groups) > 0 {
+			what = "VPC, IAM roles, EKS cluster " + m.s.ClusterName + " and its " + andList(groups) + " node groups"
+		}
+		b.WriteString(theme.Subtle.Render(what) + "\n")
+		b.WriteString(theme.Subtle.Render(m.s.NewClusterConfig.Summary(groups)) + "\n\n")
 		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.Provision:
 		b.WriteString(theme.Title.Render("Provision AWS resources") + "\n")
@@ -694,8 +706,8 @@ func (m Model) body(h int) string {
 		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.ControlPlane:
 		b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
-		rel := plugin.ChosenRelease(m.s.Plugins, m.s.SubstrateTag, m.s.ImageRepo)
-		b.WriteString(theme.Subtle.Render("ate-setup deploy ate-system "+rel.Tag+" · sandbox classes "+m.s.SandboxClasses+" · database "+m.s.Database) + "\n\n")
+		rel := plugin.ChosenRelease(m.s.InstallPlugins(), m.s.SubstrateTag, m.s.ImageRepo)
+		b.WriteString(theme.Subtle.Render("ate-setup deploy ate-system "+rel.Tag+" · sandbox classes "+state.AteSetupClasses(m.s.SandboxClasses)+" · database "+m.s.Database) + "\n\n")
 		b.WriteString(m.taskView(m.tasks[cur]))
 	case state.Demo:
 		b.WriteString(theme.Title.Render("Deploy the demo") + "\n")

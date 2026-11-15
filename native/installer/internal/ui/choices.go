@@ -211,6 +211,14 @@ func (m Model) scopeView() string {
 	return b.String()
 }
 
+// andList is items as "a", "a and b" or "a, b and c".
+func andList(items []string) string {
+	if n := len(items); n > 1 {
+		return strings.Join(items[:n-1], ", ") + " and " + items[n-1]
+	}
+	return strings.Join(items, "")
+}
+
 func indent(s, prefix string) string {
 	return prefix + strings.ReplaceAll(s, "\n", "\n"+prefix)
 }

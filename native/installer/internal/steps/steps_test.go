@@ -109,7 +109,7 @@ func TestDemoChecklistFollowsDeployThenVerify(t *testing.T) {
 		demo.VerifyLine + "gvisor", demo.VerifyPassLine + "gvisor", demo.VerifyLine + "microvm",
 	}
 	want := []int{0, 1, 2, 2, 3}
-	items, active := Demo([]string{"gvisor", "microvm"}), -1
+	items, active := Demo([]string{"gvisor", "microvm"}, []string{"gvisor", "microvm"}), -1
 	for i, line := range lines {
 		active = Progress(items, active, line)
 		if active != want[i] {

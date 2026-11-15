@@ -76,14 +76,16 @@ func RemoveControlPlane() []ChecklistItem {
 	}
 }
 
-// Demo tracks --deploy-demo --verify: the counter demo deployed on each
-// class, then suspend and resume checked on each (demo.Deploy, demo.Verify).
-func Demo(classes []string) []ChecklistItem {
+// Demo tracks --deploy-demo --verify: the counter demo deployed on each of
+// deployed (the gvisor and microvm classes), then suspend and resume checked
+// on each of checked, every sandbox class (demo.Deploy, demo.Verify; the AWS
+// Nitro sandbox's check is its plugin's).
+func Demo(deployed, checked []string) []ChecklistItem {
 	var items []ChecklistItem
-	for _, c := range classes {
+	for _, c := range deployed {
 		items = append(items, ChecklistItem{"Deploy the counter demo on " + c, contains(demo.DeployLine + c)})
 	}
-	for _, c := range classes {
+	for _, c := range checked {
 		items = append(items, ChecklistItem{"Check suspend and resume on " + c, contains(demo.VerifyLine + c)})
 	}
 	return items
