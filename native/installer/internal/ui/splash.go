@@ -197,14 +197,14 @@ var actors = []struct {
 }
 
 var mascotColors = map[byte]uint32{
-	'k': 0x0C0C10, // outline
-	'h': 0x3A3640, // hood
-	'f': 0x28252D, // folds in the cloak
-	'i': 0x1A191E, // inside the hood
+	'k': 0x0C0C0C, // outline
+	'h': 0x383838, // hood
+	'f': 0x262626, // folds in the cloak
+	'i': 0x1A1A1A, // inside the hood
 	'g': 0x5FCF65, // skin
 	'l': 0x8EEC8C, // spots and cheeks
 	'd': 0x3C8C42, // skin in the hood's shadow
-	'E': 0x161618, // eyes
+	'E': 0x161616, // eyes
 	'W': 0xFFFFFF, // eye highlights
 	'm': 0xE274AC, // tongue
 	'b': inkOrange,
@@ -221,7 +221,7 @@ var (
 	inkDim    = rgb(theme.Faint)
 )
 
-const inkEyes uint32 = 0x0C0C10
+const inkEyes uint32 = 0x0C0C0C
 
 // rgb is a theme color, "#RRGGBB", as 0xRRGGBB.
 func rgb(c lipgloss.Color) uint32 {
