@@ -143,8 +143,15 @@ fetch_release() {
     download "${base}/${archive}" "${tmp}/${archive}"
     download "${base}/checksums.txt" "${tmp}/checksums.txt"
 
-    local want got sum_re='^[0-9a-f]{64}$'
-    want="$(awk -v f="${archive}" '$2 == f { print $1 }' "${tmp}/checksums.txt")"
+    # The archive's own line is exactly "<sha256>  <archive>", once: a line
+    # with more fields is not it, and two lines naming it are refused.
+    local want got listed sum_re='^[0-9a-f]{64}$'
+    listed="$(awk -v f="${archive}" '$2 == f { n++ } END { print n + 0 }' "${tmp}/checksums.txt")"
+    if [ "${listed}" -gt 1 ]; then
+        echo "error: ${archive} is listed ${listed} times in the ${version} checksums.txt; refusing it." >&2
+        exit 1
+    fi
+    want="$(awk -v f="${archive}" 'NF == 2 && $2 == f { print $1 }' "${tmp}/checksums.txt")"
     if [[ ! "${want}" =~ ${sum_re} ]]; then
         echo "error: the ${version} checksums.txt has no sha256 line for ${archive}; refusing it." >&2
         exit 1
