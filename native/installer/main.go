@@ -45,7 +45,8 @@ func main() {
 	// The checkout's (or the extracted release's) config.env and
 	// config.local.env, under the environment, give the defaults; Settings
 	// writes config.local.env.
-	cfg, err := state.FindConfig(os.LookupEnv, cwd, exeDir)
+	starts := searchStarts(cwd, exeDir)
+	cfg, err := state.FindConfig(os.LookupEnv, starts...)
 	exitOn(err)
 	conf := func(key, def string) string {
 		if v, ok := cfg.Lookup(key); ok && v != "" {
@@ -68,7 +69,7 @@ func main() {
 		keepClust  = flag.Bool("keep-cluster", false, "with --teardown: remove Substrate and its AWS data but never offer to delete the cluster")
 		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws, or to a setup-aws binary (default: the setup-aws binary beside the executable, as a release has it, else native/tools/setup-aws found above the working directory or the executable)")
 		showVer    = flag.Bool("version", false, "print the installer's version and exit")
-		overlay    = flag.String("eks-overlay", "", "path to native/deploy/eks (default: found above the working directory or the executable)")
+		overlay    = flag.String("eks-overlay", "", "path to native/deploy/eks (default: a release's own deploy/eks, else found above the working directory or the executable)")
 		treeRoot   = flag.String("tree-root", controlplane.DefaultTreeRoot(), "where fetched Substrate trees are cached")
 		logPath    = flag.String("log", "", "log file (default: a timestamped file under the user cache dir)")
 
@@ -114,7 +115,7 @@ func main() {
 	exitOn(state.ValidSandboxClasses(*classes))
 
 	findOverlay := func() string {
-		dir, err := eksoverlay.Find(*overlay, cwd, exeDir)
+		dir, err := eksoverlay.Find(*overlay, starts...)
 		exitOn(err)
 		return dir
 	}
@@ -302,6 +303,19 @@ func main() {
 			fmt.Println(l)
 		}
 	}
+}
+
+// searchStarts are the directories config.env, config.local.env and
+// deploy/eks are searched above, in order. A release binary (exeDir holds a
+// release, state.IsRelease) searches its own directory first, so started
+// from inside a checkout it still uses its archive's files, which belong to
+// its version, not the checkout's. A source build searches above the
+// working directory first, then the executable.
+func searchStarts(cwd, exeDir string) []string {
+	if state.IsRelease(exeDir) {
+		return []string{exeDir, cwd}
+	}
+	return []string{cwd, exeDir}
 }
 
 // simCluster is a dry-run cluster: ACTIVE 1.37 Auto Mode, carrying the tags
