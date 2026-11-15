@@ -191,6 +191,8 @@ type fake struct {
 	// applies is the stdin of every `kubectl apply -f -`, in order.
 	applies []string
 	tmpls   map[string]string
+	// actors are the actors the ate API holds, each running on pod-1.
+	actors map[string]bool
 	// deleted are the counter image tags Remove deleted.
 	deleted []string
 }
@@ -206,7 +208,7 @@ func testAppliedPool(arch string) string {
 }
 
 func newFake(t *testing.T) *fake {
-	f := &fake{t: t, out: map[string][]string{}, stdin: map[string]string{}, tmpls: map[string]string{}}
+	f := &fake{t: t, out: map[string][]string{}, stdin: map[string]string{}, tmpls: map[string]string{}, actors: map[string]bool{}}
 	prevExec, prevDemo, prevInterval, prevHere, prevDelete := plugin.Exec, mode3.Demo, mode3.Interval, createdHere, deleteImage
 	t.Cleanup(func() {
 		plugin.Exec, mode3.Demo, mode3.Interval, createdHere, deleteImage = prevExec, prevDemo, prevInterval, prevHere, prevDelete
@@ -278,10 +280,24 @@ func newFake(t *testing.T) *fake {
 			case "create actor-template":
 				b, _ := os.ReadFile(args[3])
 				f.tmpls["counter-iso"], f.stdin["template"] = "ecr/c1/counter@sha256:c0ffee", string(b)
+			case "get actor":
+				if _, ok := f.actors[args[2]]; !ok {
+					return nil, errors.New("actor not found")
+				}
+				return []byte(`{"metadata":{"uid":"uid-` + args[2] + `"},"status":{"state":"ACTOR_STATE_RUNNING","workerAssignment":{"workerPod":"pod-1"}}}`), nil
+			case "create actor":
+				f.actors[args[2]] = true
 			case "delete actor":
-				return nil, errors.New("actor not found")
+				if !f.actors[args[2]] {
+					return nil, errors.New("actor not found")
+				}
+				delete(f.actors, args[2])
 			}
 			return nil, nil
+		},
+		RoundTrip: func(_ context.Context, _ io.Writer, _ demo.Options, p demo.Pool) (string, error) {
+			f.log = append(f.log, "roundtrip "+p.Atespace+"/"+p.Template+"/"+p.Actor)
+			return "resumed", nil
 		},
 		WaitGolden: func(context.Context, io.Writer, demo.Options, demo.Pool) error {
 			f.log = append(f.log, "golden")
@@ -512,6 +528,45 @@ func TestPoolArch(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), strings.TrimSpace(want)) {
 			t.Errorf("%s: err = %v, want %q", reqs, err, want)
 		}
+	}
+}
+
+// Both ways: Verify passes a worker under isolated-sandbox on an
+// ate-isolated node, runs the round trip and the delete check on its own
+// pool, and reads nothing of mode 3's; a worker on another node fails it.
+func TestVerify(t *testing.T) {
+	const nodes = `{"items":[{"metadata":{"name":"n1","labels":{"ate.dev/pool":"isolated","karpenter.sh/nodepool":"ate-isolated"}}},
+ {"metadata":{"name":"n2","labels":{"ate.dev/pool":"microvm"}}}]}`
+	pods := func(node string) string {
+		return `{"items":[{"metadata":{"name":"pod-1"},"spec":{"runtimeClassName":"isolated-sandbox","nodeName":"` + node + `"}}]}`
+	}
+	f := newFake(t)
+	f.out["-n ate-demo-counter-iso get pods -l ate.dev/worker-transport=network"] = []string{pods("n1")}
+	f.out["get nodes -o json"] = []string{nodes}
+	f.out["-n ate-demo-counter-iso logs pod-1"] = []string{"x Handle RPC method=TerminateWorkload actor=uid-demo-iso-delete\n"}
+	var out bytes.Buffer
+	if err := Iso.Verify(context.Background(), &out, testOptions(t, true)); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if err := f.has("build kubectl-ate", "kubectl -n ate-demo-counter-iso get pods", "kubectl get nodes -o json",
+		"roundtrip ate-demo-counter-iso/counter-iso/demo-iso", "ate create actor demo-iso-delete -a ate-demo-counter-iso --template counter-iso",
+		"ate delete actor demo-iso-delete", "kubectl -n ate-demo-counter-iso logs pod-1 --all-containers"); err != nil {
+		t.Error(err)
+	}
+	for _, l := range f.log {
+		if strings.Contains(l, mode3.Kata.Name) || strings.Contains(l, mode3.Kata.Namespace) || strings.Contains(l, "kata") {
+			t.Errorf("Verify read mode 3's objects: %q", l)
+		}
+	}
+	if !strings.Contains(out.String(), "PASS: the worker in Pod pod-1 tore down demo-iso-delete's sandbox") {
+		t.Errorf("output:\n%s", out.String())
+	}
+
+	f = newFake(t)
+	f.out["-n ate-demo-counter-iso get pods -l ate.dev/worker-transport=network"] = []string{pods("n2")}
+	f.out["get nodes -o json"] = []string{nodes}
+	if err := Iso.Verify(context.Background(), io.Discard, testOptions(t, true)); err == nil || !strings.Contains(err.Error(), `whose ate.dev/pool is "microvm", not "isolated"`) {
+		t.Errorf("worker on a microvm node: %v", err)
 	}
 }
 
