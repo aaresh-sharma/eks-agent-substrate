@@ -2,8 +2,10 @@
 # - ClusterIP only; nothing outside the cluster can reach it.
 # - Credentials: EKS Pod Identity on the llm-gateway ServiceAccount
 #   (`setup-aws plugin llm-gateway`). No keys in the pod, none in the actors.
-# - Ingress: only atenet-egress (where actor traffic leaves the sandbox) and
-#   the llm-gateway namespace itself (for smoke tests).
+# - Ingress: atenet-egress (where actor traffic leaves the sandbox) and the
+#   llm-gateway namespace itself (for smoke tests). A plugin whose own pod
+#   calls the gateway adds a NetworkPolicy here that names only that caller:
+#   openclaw's llm-gateway-from-openclaw admits its gateway's pods.
 # - Actors speak the Anthropic Messages or OpenAI Chat Completions API and
 #   send a model name: "claude" (the default), "claude-haiku",
 #   "claude-sonnet" or "claude-opus". The gateway pins each to a Bedrock
@@ -131,6 +133,8 @@ spec:
 ---
 # Once a NetworkPolicy selects a pod, only the traffic it lists gets in: here
 # atenet-egress in ate-system, and any pod in this namespace (podSelector {}).
+# NetworkPolicies add up: another policy that selects these pods (openclaw's
+# llm-gateway-from-openclaw) admits its callers too.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

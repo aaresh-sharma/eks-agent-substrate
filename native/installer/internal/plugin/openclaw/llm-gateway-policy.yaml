@@ -1,0 +1,42 @@
+# Lets the OpenClaw gateway's own agent reach the LLM gateway.
+#
+# The gateway answers anything no binding sends to an actor (its Control UI
+# chat and its /v1/chat/completions) with its own agent, which calls the LLM
+# gateway from the gateway pod. llm-gateway-ingress (the llm-gateway plugin's
+# llm-gateway.yaml) admits only atenet-egress and the llm-gateway namespace,
+# so without this policy that call times out.
+#
+# The LLM gateway checks no caller token, so a NetworkPolicy is the only
+# boundary in front of Bedrock. This one adds exactly one caller: pods labeled
+# app=openclaw-gateway in namespace openclaw. The namespaceSelector and
+# podSelector are one peer, so both must match; the actors' worker pods in
+# namespace openclaw do not carry that label and stay out. NetworkPolicies add
+# up, so llm-gateway-ingress stays as it is.
+#
+# The openclaw plugin (openclaw.go) applies it on deploy, checks it on verify
+# and deletes it on remove.
+#
+# Learn more:
+#   https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-gateway-from-openclaw
+  namespace: llm-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: llm-gateway
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openclaw
+      podSelector:
+        matchLabels:
+          app: openclaw-gateway
+    ports:
+    - port: 4000
+      protocol: TCP

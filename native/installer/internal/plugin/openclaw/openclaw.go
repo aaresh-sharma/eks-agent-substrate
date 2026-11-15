@@ -13,6 +13,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -46,7 +47,16 @@ const (
 	// not own; EFS ignores a pod's fsGroup, so its access point is 1000's.
 	gatewayUID = "1000"
 	secretName = "openclaw-secrets"
+	// LLMPolicy is the NetworkPolicy in the LLM gateway's namespace that
+	// admits the gateway's pods (llm-gateway-policy.yaml).
+	LLMPolicy    = "llm-gateway-from-openclaw"
+	llmNamespace = "llm-gateway"
 )
+
+// The NetworkPolicy that lets the gateway's own agent reach the LLM gateway.
+//
+//go:embed llm-gateway-policy.yaml
+var llmPolicyYAML string
 
 // The demo's images, pinned by digest (actor snapshots require a pinned
 // image). They are public on GHCR, each one linux/amd64 manifest, built by
@@ -437,6 +447,9 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 		return err
 	}
 
+	if err := llmGatewayPolicy(ctx, w, o); err != nil {
+		return err
+	}
 	fmt.Fprintln(w, "Gateway")
 	if err := efs.Apply(ctx, w, o, m.gatewayConfig); err != nil {
 		return err
@@ -827,13 +840,68 @@ console.log('actor ` + Actor + ` /readyz through atenet-router:', r.status);
 if (r.status !== 200) process.exit(1);
 `
 
+// hasLLMGateway reports whether the LLM gateway's namespace is there.
+func hasLLMGateway(ctx context.Context, o plugin.Options) (bool, error) {
+	ns, err := efs.Out(ctx, o, "get", "namespace", llmNamespace, "--ignore-not-found", "-o", "name")
+	return strings.TrimSpace(ns) != "", err
+}
+
+// llmGatewayPolicy applies LLMPolicy, so the gateway's own agent reaches the
+// LLM gateway. Without the LLM gateway there is nothing to admit to; deploy
+// openclaw again after it.
+func llmGatewayPolicy(ctx context.Context, w io.Writer, o plugin.Options) error {
+	ok, err := hasLLMGateway(ctx, o)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintf(w, "No namespace %s: skipping NetworkPolicy %s; deploy openclaw again after the LLM gateway\n", llmNamespace, LLMPolicy)
+		return nil
+	}
+	fmt.Fprintf(w, "NetworkPolicy %s/%s: the gateway's pods reach the LLM gateway\n", llmNamespace, LLMPolicy)
+	return efs.Apply(ctx, w, o, []byte(llmPolicyYAML))
+}
+
+// samePolicy reports whether live, the spec of LLMPolicy as kubectl prints
+// it (jsonpath {.spec}), is exactly llm-gateway-policy.yaml's: one more
+// selector, peer, port or rule is a difference.
+func samePolicy(live string) error {
+	if strings.TrimSpace(live) == "" {
+		return fmt.Errorf("no NetworkPolicy %s/%s", llmNamespace, LLMPolicy)
+	}
+	n, err := yaml.Parse(llmPolicyYAML)
+	if err != nil {
+		return err
+	}
+	b, err := n.Pipe(yaml.Lookup("spec"))
+	if err != nil || b == nil {
+		return fmt.Errorf("llm-gateway-policy.yaml has no spec: %v", err)
+	}
+	wantJSON, err := b.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	var want, got any
+	if err := json.Unmarshal(wantJSON, &want); err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(live), &got); err != nil {
+		return fmt.Errorf("read NetworkPolicy %s/%s: %w", llmNamespace, LLMPolicy, err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		return fmt.Errorf("NetworkPolicy %s/%s is %s, not %s", llmNamespace, LLMPolicy, strings.TrimSpace(live), wantJSON)
+	}
+	return nil
+}
+
 // verify checks the demo natively, in about 2 minutes (the first wake of the
 // actor restores it from its golden snapshot): the router admits the
 // gateway's and dashboard's SPIFFE IDs, every Service is ClusterIP and there
-// is no Ingress, the gateway's state is on an owner-tagged EFS access point,
-// the gateway answers /healthz and /readyz over kubectl port-forward, and
-// the gateway reaches the demo actor through atenet-router. It sends no
-// model turn, so it needs no LLM gateway.
+// is no Ingress, LLMPolicy admits exactly the gateway's pods to the LLM
+// gateway (when it is there), the gateway's state is on an owner-tagged EFS
+// access point, the gateway answers /healthz and /readyz over kubectl
+// port-forward, and the gateway reaches the demo actor through
+// atenet-router. It sends no model turn, so it needs no LLM gateway.
 func verify(ctx context.Context, w io.Writer, o plugin.Options) error {
 	im, err := pinnedImages(os.LookupEnv)
 	if err != nil {
@@ -854,6 +922,23 @@ func verify(ctx context.Context, w io.Writer, o plugin.Options) error {
 		return err
 	}
 	fmt.Fprintln(w, "PASS: every Service in namespace openclaw is ClusterIP, and there is no Ingress")
+
+	llm, err := hasLLMGateway(ctx, o)
+	if err != nil {
+		return err
+	}
+	if !llm {
+		fmt.Fprintf(w, "No namespace %s: the gateway's own agent has no LLM gateway to reach\n", llmNamespace)
+	} else {
+		live, err := efs.Out(ctx, o, "-n", llmNamespace, "get", "networkpolicy", LLMPolicy, "--ignore-not-found", "-o", "jsonpath={.spec}")
+		if err != nil {
+			return err
+		}
+		if err := samePolicy(live); err != nil {
+			return fmt.Errorf("%w: deploy the openclaw plugin again", err)
+		}
+		fmt.Fprintf(w, "PASS: NetworkPolicy %s/%s admits only the gateway's pods to the LLM gateway, on TCP 4000\n", llmNamespace, LLMPolicy)
+	}
 
 	for _, d := range []struct{ name, timeout, image string }{
 		{"openclaw-gateway", "600s", im.gateway}, {"openclaw-dashboard", "180s", im.dashboard}} {
@@ -951,9 +1036,9 @@ func exposure(ctx context.Context, o plugin.Options) error {
 }
 
 // remove deletes the demo: its actors and their egress policies, the
-// template and the atespace, then the namespace (its claim, and with it the
-// gateway's access point), the cluster roles, the dashboard's role in
-// ate-system, and the StorageClass.
+// template and the atespace, then LLMPolicy, the namespace (its claim, and
+// with it the gateway's access point), the cluster roles, the dashboard's
+// role in ate-system, and the StorageClass.
 func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if k, err := efs.BuildAte(ctx, w, o); err != nil {
 		fmt.Fprintf(w, "WARNING: %v; leaving atespace %s to the control plane's removal\n", err, Atespace)
@@ -961,6 +1046,7 @@ func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 		return err
 	}
 	for _, args := range [][]string{
+		{"-n", llmNamespace, "delete", "networkpolicy", LLMPolicy, "--ignore-not-found"},
 		{"delete", "namespace", Namespace, "--ignore-not-found", "--timeout=10m"},
 		{"delete", "clusterrolebinding,clusterrole", "openclaw-gateway-eks", "openclaw-dashboard", "--ignore-not-found"},
 		{"-n", "ate-system", "delete", "rolebinding,role", "openclaw-dashboard-mint-ate-token", "--ignore-not-found"},

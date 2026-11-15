@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -340,7 +341,28 @@ func TestExposure(t *testing.T) {
 // ends by saying how to read that token for the gateway UI, which asks for
 // it, and prints the token itself nowhere (review of 86ba13f, finding 2).
 func TestDeploySaysHowToReadTheGatewayToken(t *testing.T) {
-	const tok = "tok-0123456789abcdef"
+	out, _, err := fakeDeploy(t, nil)
+	if err != nil {
+		t.Fatalf("deploy: %v\n%s", err, out)
+	}
+	want := "  its token:   kubectl --kubeconfig /kc -n openclaw get secret openclaw-secrets -o jsonpath='{.data.gateway-token}' | base64 -d\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("the output does not say how to read the token, %q:\n%s", want, out)
+	}
+	if strings.Contains(out, deployTok) {
+		t.Errorf("the output holds the gateway token:\n%s", out)
+	}
+}
+
+// deployTok is the gateway token fakeDeploy's cluster already holds.
+const deployTok = "tok-0123456789abcdef"
+
+// fakeDeploy runs a whole deploy against a fake cluster that already holds
+// deployTok, with extra answers added, and returns what it printed and what
+// it gave a child on stdin.
+func fakeDeploy(t *testing.T, extra map[string]string) (string, []string, error) {
+	t.Helper()
+	const tok = deployTok
 	for _, k := range append(slices.Clone(imageVars), "WHATSAPP_PEER", "OPENCLAW_WORKERS") {
 		t.Setenv(k, "")
 	}
@@ -354,7 +376,7 @@ func TestDeploySaysHowToReadTheGatewayToken(t *testing.T) {
 	o := plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc",
 		Release: plugin.Release{Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate", Tree: tree}}
 	kc, ate := "kubectl --kubeconfig /kc ", efs.KubectlAtePath(o.Tag)+" "
-	fakeExec(t, map[string]string{
+	answers := map[string]string{
 		kc + "-n ate-system get deployment ate-api-server":                              "deployment.apps/ate-api-server",
 		kc + "get storageclass " + efs.StorageClass + " --ignore-not-found -o jsonpath": "fs-0123",
 		kc + "-n openclaw get secret openclaw-secrets":                                  base64.StdEncoding.EncodeToString([]byte(tok)),
@@ -364,18 +386,21 @@ func TestDeploySaysHowToReadTheGatewayToken(t *testing.T) {
 		ate + "get access-policy": `{"bindings":[{"role":"editor","members":["` + gatewayPrincipal + `"]}]}`,
 		ate + "get actor-template": fmt.Sprintf(`{"containers":[{"image":%q,"env":[{"name":"OPENCLAW_GATEWAY_TOKEN","value":%q}]}],`+
 			`"status":{"goldenSnapshotStatus":{"goldenTag":{"name":"g1"}}}}`, ActorImage, tok),
-	})
+	}
+	maps.Copy(answers, extra)
+	fakeExec(t, answers)
+	var stdins []string
+	inner := plugin.Exec
+	plugin.Exec = func(ctx context.Context, w io.Writer, c plugin.Cmd) error {
+		if c.Stdin != nil {
+			stdins = append(stdins, string(c.Stdin))
+		}
+		return inner(ctx, w, c)
+	}
+	t.Cleanup(func() { plugin.Exec = inner })
 	var out strings.Builder
-	if err := deploy(context.Background(), &out, o); err != nil {
-		t.Fatalf("deploy: %v\n%s", err, out.String())
-	}
-	want := "  its token:   kubectl --kubeconfig /kc -n openclaw get secret openclaw-secrets -o jsonpath='{.data.gateway-token}' | base64 -d\n"
-	if !strings.Contains(out.String(), want) {
-		t.Errorf("the output does not say how to read the token, %q:\n%s", want, out.String())
-	}
-	if strings.Contains(out.String(), tok) {
-		t.Errorf("the output holds the gateway token:\n%s", out.String())
-	}
+	err := deploy(context.Background(), &out, o)
+	return out.String(), stdins, err
 }
 
 // recordExec records every child and fails each one, so a hook stops at
