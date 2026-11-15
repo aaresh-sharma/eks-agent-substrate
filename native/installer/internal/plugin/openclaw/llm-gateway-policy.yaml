@@ -6,12 +6,15 @@
 # llm-gateway.yaml) admits only atenet-egress and the llm-gateway namespace,
 # so without this policy that call times out.
 #
-# The LLM gateway checks no caller token, so a NetworkPolicy is the only
-# boundary in front of Bedrock. This one adds exactly one caller: pods labeled
-# app=openclaw-gateway in namespace openclaw. The namespaceSelector and
-# podSelector are one peer, so both must match; the actors' worker pods in
-# namespace openclaw do not carry that label and stay out. NetworkPolicies add
-# up, so llm-gateway-ingress stays as it is.
+# The LLM gateway checks no caller token, so NetworkPolicy is the only
+# boundary on in-cluster network callers. Kubernetes identities that can
+# port-forward or exec into the LLM gateway's pods (cluster admins, and the
+# openclaw dashboard, whose ClusterRole grants pods/portforward everywhere)
+# reach it around any NetworkPolicy. This one adds exactly one network caller:
+# pods labeled app=openclaw-gateway in namespace openclaw. The
+# namespaceSelector and podSelector are one peer, so both must match; the
+# actors' worker pods in namespace openclaw do not carry that label and stay
+# out. NetworkPolicies add up, so llm-gateway-ingress stays as it is.
 #
 # The openclaw plugin (openclaw.go) applies it on deploy, checks it on verify
 # and deletes it on remove.

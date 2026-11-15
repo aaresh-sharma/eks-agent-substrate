@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -287,6 +288,12 @@ func TestVerifyComparesImagesByDigest(t *testing.T) {
 	}
 }
 
+// failAnswer, as fakeExec's answer to an argv prefix, makes that child fail
+// with errKubectl and print nothing.
+const failAnswer = "\x00fail"
+
+var errKubectl = errors.New("the server is currently unable to handle the request")
+
 // fakeExec answers kubectl reads by argv prefix and fails on a shell.
 func fakeExec(t *testing.T, answers map[string]string) *[]string {
 	var log []string
@@ -300,6 +307,11 @@ func fakeExec(t *testing.T, answers map[string]string) *[]string {
 			}
 		}
 		log = append(log, argv)
+		for p, a := range answers {
+			if a == failAnswer && strings.HasPrefix(argv, p) {
+				return errKubectl
+			}
+		}
 		for p, a := range answers {
 			if strings.HasPrefix(argv, p) && c.Stdout != nil {
 				io.WriteString(c.Stdout, a)

@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -94,6 +95,17 @@ func field(t *testing.T, n *yaml.RNode, path ...string) string {
 	return string(b)
 }
 
+// selects reports whether a matchLabels selector matches a pod with labels:
+// every entry of sel is in labels.
+func selects(sel, labels map[string]string) bool {
+	for k, v := range sel {
+		if got, ok := labels[k]; !ok || got != v {
+			return false
+		}
+	}
+	return true
+}
+
 // The policy names what the other manifests make: the gateway Deployment's
 // pod labels and namespace, and the LLM gateway's pods and the port its
 // Service sends to.
@@ -135,11 +147,49 @@ func TestLLMPolicyNamesTheGatewayAndTheLLMGateway(t *testing.T) {
 		t.Errorf("the policy admits namespace %q, the gateway runs in %q, want %q", ns, gw.GetNamespace(), Namespace)
 	}
 
+	// No other pod in namespace openclaw carries the peer's labels: not the
+	// dashboard's, and not the actors' worker pods, which ate-controller
+	// labels with the WorkerPool's spec.template.labels (none here) plus
+	// ate.dev/worker-pool.
+	var dashLabels map[string]string
+	if err := json.Unmarshal([]byte(field(t, docs(t, dashboardYAML)["Deployment/openclaw-dashboard"], "spec", "template", "metadata", "labels")), &dashLabels); err != nil {
+		t.Fatal(err)
+	}
+	pool := docs(t, workerPoolYAML)["WorkerPool/"+Pool]
+	if pool == nil {
+		t.Fatalf("workerpool.yaml has no WorkerPool/%s", Pool)
+	}
+	workerLabels := map[string]string{}
+	if l, err := pool.Pipe(yaml.Lookup("spec", "template", "labels")); err != nil {
+		t.Fatal(err)
+	} else if l != nil {
+		b, err := l.MarshalJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &workerLabels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workerLabels["ate.dev/worker-pool"] = Pool
+	for who, l := range map[string]map[string]string{"the dashboard's pods": dashLabels, "the actors' worker pods": workerLabels} {
+		if selects(peer.PodSelector.MatchLabels, l) {
+			t.Errorf("the policy admits %s too: they are labeled %v, the policy admits pods labeled %v", who, l, peer.PodSelector.MatchLabels)
+		}
+	}
+
 	b, err := os.ReadFile(filepath.Join("..", "llmgateway", "llm-gateway.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	llm := docs(t, string(b))
+	var llmLabels map[string]string
+	if err := json.Unmarshal([]byte(field(t, llm["Deployment/llm-gateway"], "spec", "template", "metadata", "labels")), &llmLabels); err != nil {
+		t.Fatal(err)
+	}
+	if !selects(spec.PodSelector.MatchLabels, llmLabels) {
+		t.Errorf("the LLM gateway's pods are labeled %v; the policy applies to pods labeled %v", llmLabels, spec.PodSelector.MatchLabels)
+	}
 	if got, want := field(t, llm["NetworkPolicy/llm-gateway-ingress"], "spec", "podSelector"), `{"matchLabels":{"app":"llm-gateway"}}`; got != want {
 		t.Errorf("llm-gateway-ingress selects %s, want %s", got, want)
 	}
@@ -216,6 +266,33 @@ func TestVerifyChecksTheLLMPolicy(t *testing.T) {
 	out, err = run(false, "")
 	if strings.Contains(out, pass) || !strings.Contains(out, "No namespace llm-gateway") || err == nil || !strings.Contains(err.Error(), imageErr) {
 		t.Errorf("no LLM gateway: %v\n%s", err, out)
+	}
+}
+
+// When kubectl cannot say whether the LLM gateway is there, Deploy and
+// Verify return that error. Neither reads it as "no LLM gateway", which
+// would skip the policy (Deploy) or its check (Verify).
+func TestLLMGatewayLookupErrorIsReturned(t *testing.T) {
+	const lookup = "kubectl --kubeconfig /kc get namespace llm-gateway"
+	const skipped = "No namespace llm-gateway"
+	out, stdins, err := fakeDeploy(t, map[string]string{lookup: failAnswer})
+	if !errors.Is(err, errKubectl) || strings.Contains(out, skipped) || slices.Contains(stdins, llmPolicyYAML) {
+		t.Errorf("deploy, with the namespace lookup failing: %v\n%s", err, out)
+	}
+
+	for _, k := range imageVars {
+		t.Setenv(k, "")
+	}
+	kc := "kubectl --kubeconfig /kc "
+	fakeExec(t, map[string]string{
+		kc + "-n ate-system get deployment atenet-router": GatewayID + " " + DashboardID,
+		kc + "-n openclaw get services":                   `{"items":[{"metadata":{"name":"s0"},"spec":{"type":"ClusterIP"}}]}`,
+		lookup:                                            failAnswer,
+	})
+	var vout strings.Builder
+	err = verify(context.Background(), &vout, plugin.Options{Cluster: "demo", Region: "us-west-2", Kubeconfig: "/kc"})
+	if !errors.Is(err, errKubectl) || strings.Contains(vout.String(), skipped) {
+		t.Errorf("verify, with the namespace lookup failing: %v\n%s", err, vout.String())
 	}
 }
 
