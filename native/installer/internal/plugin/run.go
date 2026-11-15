@@ -184,6 +184,37 @@ func hasNeeds(p Plugin) bool {
 	return len(n.Preview)+len(n.CredentialProviders)+len(n.IngressIDs) > 0 || n.Source != nil
 }
 
+// recordedNeeds is what the control plane carries: the merged needs of the
+// recorded plugins (and what they require). A record this installer cannot
+// resolve gives none, so only a recorded ID counts as carried.
+func recordedNeeds(rec []string) Needs {
+	ps, err := Resolve(rec)
+	if err != nil {
+		return Needs{}
+	}
+	n, err := Merge(ps)
+	if err != nil {
+		return Needs{}
+	}
+	return n
+}
+
+// carries reports whether n includes all of m: m's Source, when it sets
+// one, is n's, and each of m's gates, providers and ingress IDs is in n.
+func (n Needs) carries(m Needs) bool {
+	if m.Source != nil && (n.Source == nil || *n.Source != *m.Source) {
+		return false
+	}
+	for _, l := range [][2][]string{{n.Preview, m.Preview}, {n.CredentialProviders, m.CredentialProviders}, {n.IngressIDs, m.IngressIDs}} {
+		for _, v := range l[1] {
+			if !slices.Contains(l[0], v) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Run deploys, checks or removes plugins on o's cluster. A deploy or verify
 // first runs every resolved plugin's Check on the environment, and a
 // refusal stops it before any child starts.
@@ -191,9 +222,11 @@ func hasNeeds(p Plugin) bool {
 //   - deploy: ids and what they require, in order. Each plugin's AWS half
 //     (`setup-aws plugin <id>`), then Deploy, then Verify; then it is
 //     recorded. A plugin with Needs is refused unless the control plane
-//     already carries them (its ID is in the record), since its objects would
-//     not work: run --deploy-control-plane --plugins <id> first, or, for one
-//     that replaces the release, remove the control plane and install again.
+//     already carries them (its ID is in the record, or the recorded plugins'
+//     needs include its own, as mode3's do mode3-iso's), since its objects
+//     would not work: run --deploy-control-plane --plugins <id> first, or,
+//     for one that replaces the release, remove the control plane and install
+//     again.
 //   - verify: Verify for ids and what they require.
 //   - remove: ids (every recorded plugin when ids is empty), in reverse
 //     order: Remove, then `setup-aws plugin <id> --delete`, then dropped from
@@ -237,8 +270,9 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 		if err != nil {
 			return err
 		}
+		carried := recordedNeeds(rec)
 		for _, p := range ps {
-			if !hasNeeds(p) || slices.Contains(rec, p.ID) {
+			if !hasNeeds(p) || slices.Contains(rec, p.ID) || carried.carries(p.Needs) {
 				continue
 			}
 			if p.Needs.Source != nil {

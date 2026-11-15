@@ -82,17 +82,17 @@ func argvRelease(t *testing.T, argv []string) plugin.Release {
 	return r
 }
 
-// Both ways: with mode3 chosen, every step that installs or uses the release
-// (the control plane, the demo, its check and the plugins) carries the fork's
-// release from the first of them, and the control plane step says so; without
-// it, each carries v1.0.0. The control plane removal is left out: it reads the
+// Both ways: with mode3 or mode3-iso chosen (alone or together), every step
+// that installs or uses the release (the control plane, the demo, its check
+// and the plugins) carries the fork's release from the first of them, and the
+// control plane step says so; without them, each carries v1.0.0. The control plane removal is left out: it reads the
 // release of the install it removes off the cluster's record (the reinstall
 // guard runs it on a found install, which the chosen plugins say nothing about).
 func TestEveryStepCarriesTheForkReleaseWithMode3(t *testing.T) {
-	for _, chosen := range [][]string{{"mode3", "efs", "credprovider-aws"}, {"efs", "credprovider-aws"}} {
+	for _, chosen := range [][]string{{"mode3", "efs", "credprovider-aws"}, {"mode3-iso"}, {"mode3", "mode3-iso"}, {"efs", "credprovider-aws"}} {
 		b, s := testBuilder()
 		s.Plugins = chosen
-		fork := slices.Contains(chosen, mode3.ID)
+		fork := slices.Contains(chosen, mode3.ID) || slices.Contains(chosen, "mode3-iso")
 		want := plugin.Release{Tag: state.DefaultTag, ImageRepo: state.DefaultImageRepo, Repo: plugin.UpstreamRepo, Ref: state.DefaultTag}
 		if fork {
 			want = plugin.Release{Tag: mode3.Tag, ImageRepo: mode3.ImageRepo, Repo: mode3.Repo, Ref: mode3.Commit}

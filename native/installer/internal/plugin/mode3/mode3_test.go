@@ -538,7 +538,7 @@ func TestDeleteCounterImage(t *testing.T) {
 	} {
 		f := newFake(t)
 		f.ecr.out, f.ecr.err, f.ecr.descErr = c.out, c.err, c.descErr
-		if err := deleteCounterImage(context.Background(), io.Discard, o); (err != nil) != c.wantErr {
+		if err := DeleteCounterImage(context.Background(), io.Discard, o, CounterTag); (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -553,7 +553,7 @@ func TestDeleteCounterImageOnlyFromAnOwnedRepository(t *testing.T) {
 		f := newFake(t)
 		f.ecr.owner = owner
 		var out bytes.Buffer
-		if err := deleteCounterImage(context.Background(), &out, o); err != nil {
+		if err := DeleteCounterImage(context.Background(), &out, o, CounterTag); err != nil {
 			t.Fatalf("owner %q: %v", owner, err)
 		}
 		if (f.ecr.in != nil) != deletes {
@@ -561,6 +561,26 @@ func TestDeleteCounterImageOnlyFromAnOwnedRepository(t *testing.T) {
 		}
 		if !deletes && !strings.Contains(out.String(), "is not owned by c1.us-east-1") {
 			t.Errorf("owner %q: no reason given:\n%s", owner, out.String())
+		}
+	}
+}
+
+// Both ways: DeleteCounterImage deletes exactly the tag it is given, one
+// image ID and no other tag (mode3-iso passes its own; mode3 CounterTag).
+func TestDeleteCounterImageDeletesOnlyTheGivenTag(t *testing.T) {
+	o := testOptions(t)
+	for _, tag := range []string{CounterTag, "mode3-iso-" + Tag} {
+		f := newFake(t)
+		var out bytes.Buffer
+		if err := DeleteCounterImage(context.Background(), &out, o, tag); err != nil {
+			t.Fatal(err)
+		}
+		in := f.ecr.in
+		if in == nil || len(in.ImageIds) != 1 || aws.ToString(in.ImageIds[0].ImageTag) != tag || in.ImageIds[0].ImageDigest != nil {
+			t.Errorf("%s: ECR delete = %+v", tag, in)
+		}
+		if !strings.Contains(out.String(), "Deleted the counter image c1/counter:"+tag+"\n") {
+			t.Errorf("%s: output:\n%s", tag, out.String())
 		}
 	}
 }

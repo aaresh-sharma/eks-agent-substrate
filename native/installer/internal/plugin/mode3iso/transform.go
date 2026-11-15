@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // obj is a Kubernetes object as `kubectl get -o json` prints it.
@@ -79,6 +81,67 @@ func NodePool(generalPurpose []byte) (np []byte, nodeClass string, err error) {
 	np, err = json.Marshal(obj{"apiVersion": gp["apiVersion"], "kind": "NodePool",
 		"metadata": obj{"name": NodePoolName}, "spec": spec})
 	return np, nodeClass, err
+}
+
+// archKey is the node label a NodePool requirement names to choose the CPU
+// architecture of the nodes it launches.
+const archKey = "kubernetes.io/arch"
+
+// PoolArch is the one CPU architecture NodePool ate-isolated (`kubectl get
+// nodepool ate-isolated -o json`) lets Auto Mode launch, which the counter
+// image is built for: the values its kubernetes.io/arch requirements, all
+// with operator In, leave between them. A NodePool that allows more than
+// one architecture, any (no such requirement, or another operator), or
+// none is refused.
+//
+// shortcut: one single-architecture image, as the demo builds; push an
+// index if the isolated nodes ever need two architectures.
+func PoolArch(nodePool []byte) (string, error) {
+	var np struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Requirements []struct {
+						Key      string   `json:"key"`
+						Operator string   `json:"operator"`
+						Values   []string `json:"values"`
+					} `json:"requirements"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(nodePool, &np); err != nil {
+		return "", fmt.Errorf("read NodePool %s: %w", NodePoolName, err)
+	}
+	why := func(s string) error {
+		return fmt.Errorf("NodePool %s %s: mode3-iso builds its counter image for one architecture, so the NodePool must allow exactly one (%s In [amd64] or [arm64])",
+			NodePoolName, s, archKey)
+	}
+	var allowed []string
+	seen := false
+	for _, r := range np.Spec.Template.Spec.Requirements {
+		if r.Key != archKey {
+			continue
+		}
+		if r.Operator != "In" {
+			return "", why(fmt.Sprintf("requires %s %s %v, which allows more than one architecture", archKey, r.Operator, r.Values))
+		}
+		if !seen {
+			allowed, seen = slices.Clone(r.Values), true
+			continue
+		}
+		allowed = slices.DeleteFunc(allowed, func(v string) bool { return !slices.Contains(r.Values, v) })
+	}
+	allowed = slices.Compact(slices.Sorted(slices.Values(allowed)))
+	switch {
+	case !seen:
+		return "", why("has no " + archKey + " requirement, so it allows every architecture")
+	case len(allowed) == 0:
+		return "", why("allows no architecture")
+	case len(allowed) > 1:
+		return "", why("allows " + strings.Join(allowed, " and "))
+	}
+	return allowed[0], nil
 }
 
 // NodeClass is NodeClass ate-isolated: a copy of the Auto Mode NodeClass
