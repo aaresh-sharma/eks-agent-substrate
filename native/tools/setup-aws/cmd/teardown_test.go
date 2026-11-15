@@ -242,6 +242,43 @@ func TestTeardownDeletesEverythingInOrder(t *testing.T) {
 	}
 }
 
+// A deployment created with NODE_GROUPS=none (Auto Mode only): no node
+// group, launch template, node role or node instance. Inventory lists the
+// rest, the teardown deletes it without a node group or template call, and
+// inventory then finds nothing.
+func TestTeardownWithNoNodeGroups(t *testing.T) {
+	f := fullDeployment()
+	for k, o := range f.objs {
+		if o.kind == "nodegroup" || o.kind == kLT || o.id == "demo-us-west-2-eks-node" || o.tags["eks:nodegroup-name"] != "" {
+			delete(f.objs, k)
+		}
+	}
+	e, _, logs := tdTestEnv(t, f, false, false)
+	rows, err := e.inventory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRow(rows, "EKS cluster demo") || hasRow(rows, "EKS node group system") {
+		t.Errorf("inventory before: %+v", rows)
+	}
+	if err := e.teardown(context.Background()); err != nil {
+		t.Fatalf("teardown: %v\n%s", err, logs)
+	}
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "DeleteNodegroup ") || strings.HasPrefix(c, "DeleteLaunchTemplate ") || c == "DeleteRole demo-us-west-2-eks-node" {
+			t.Errorf("deleted what was never made: %s", c)
+		}
+	}
+	if idx(f.calls, "DeleteCluster demo") < 0 || idx(f.calls, "DeleteRole demo-us-west-2-eks-auto-node") < 0 || idx(f.calls, "DeleteVpc vpc-1") < 0 {
+		t.Errorf("teardown left the cluster, its Auto Mode node role or the VPC:\n  %s", strings.Join(f.calls, "\n  "))
+	}
+	phaseOrder(t, logs.String())
+	e, _, _ = tdTestEnv(t, f, false, false)
+	if rows, err := e.inventory(context.Background()); err != nil || len(rows) != 0 {
+		t.Errorf("inventory after: %+v, %v; want nothing left", rows, err)
+	}
+}
+
 func TestTeardownSecondRunDeletesNothing(t *testing.T) {
 	f := fullDeployment()
 	e, _, _ := tdTestEnv(t, f, false, false)
