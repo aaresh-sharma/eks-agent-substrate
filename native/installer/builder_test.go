@@ -113,29 +113,35 @@ func TestEveryStepCarriesTheForkReleaseWithMode3(t *testing.T) {
 }
 
 // create cluster gets, shown and passed, the node groups of the run's
-// classes and plugins: the default three, unchanged; system and gvisor for
-// the gVisor class alone; system and microvm for mode 3 with the AWS Nitro
-// sandbox; none for the Nitro class alone on Auto Mode (the minimal
-// profile). With the Nitro class the control plane carries mode3-iso and
+// classes, database and plugins: the default three, unchanged; with RDS,
+// system and gvisor for the gVisor class alone, system and microvm for
+// mode 3 with the AWS Nitro sandbox; none for the Nitro class alone on Auto
+// Mode (the minimal profile); with the bundled PostgreSQL, gvisor alone for
+// the gVisor class, the system group too with the LLM gateway, which runs
+// on it, and microvm alone for mode 3 with the Nitro sandbox. With the Nitro class the control plane carries mode3-iso and
 // gets ate-setup's gvisor class only, its own step deploys mode3-iso, and
 // the plugins step deploys the chosen plugins alone.
 func TestCreateClusterGetsTheNodeGroupsOfTheSelection(t *testing.T) {
 	for _, tc := range []struct {
-		classes string
-		plugins []string
-		want    string
+		database string
+		classes  string
+		plugins  []string
+		want     string
 	}{
-		{state.DefaultSandboxClasses, nil, "system,gvisor,microvm"},
-		{"gvisor", nil, "system,gvisor"},
-		{"nitro", []string{mode3.ID}, "system,microvm"},
-		{"nitro", nil, "none"},
+		{state.DatabaseRDS, state.DefaultSandboxClasses, nil, "system,gvisor,microvm"},
+		{state.DatabaseRDS, "gvisor", nil, "system,gvisor"},
+		{state.DatabaseRDS, "nitro", []string{mode3.ID}, "system,microvm"},
+		{state.DatabaseRDS, "nitro", nil, "none"},
+		{state.DatabaseBundled, "gvisor", nil, "gvisor"},
+		{state.DatabaseBundled, "gvisor", []string{"llm-gateway"}, "system,gvisor"},
+		{state.DatabaseBundled, "nitro", []string{mode3.ID}, "microvm"},
 	} {
 		b, s := testBuilder()
-		s.SandboxClasses, s.Plugins = tc.classes, tc.plugins
+		s.Database, s.SandboxClasses, s.Plugins = tc.database, tc.classes, tc.plugins
 		s.NewCluster("demo")
 		spec := b.createCluster(s)
 		if !slices.Contains(spec.Env, "NODE_GROUPS="+tc.want) || !strings.HasPrefix(spec.Display, "NODE_GROUPS="+tc.want+" ") {
-			t.Errorf("%s %v: env %q, shown %q; want NODE_GROUPS=%s", tc.classes, tc.plugins, spec.Env, spec.Display, tc.want)
+			t.Errorf("%s %s %v: env %q, shown %q; want NODE_GROUPS=%s", tc.database, tc.classes, tc.plugins, spec.Env, spec.Display, tc.want)
 		}
 	}
 	b, s := testBuilder()
@@ -375,14 +381,19 @@ func TestStepSettingsReachOnlyTheirSteps(t *testing.T) {
 	}
 }
 
-// Both ways: with a setup-aws binary beside the executable, as a release
-// archive has it, every setup-aws step runs that binary with the same
-// arguments and environment, shown as the binary; without one, the steps
-// run `go -C <tools/setup-aws> run .` from the checkout, as they always did.
+// Both ways: from a release (its setup-aws binary beside config.env and the
+// executable), every setup-aws step runs that binary with the same
+// arguments and environment, shown as the binary; from a source build, the
+// steps run `go -C <tools/setup-aws> run .` from the checkout, as they
+// always did, even with a setup-aws binary built beside the executable
+// into native/bin, which may be stale.
 func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
 	release := t.TempDir()
 	bin := filepath.Join(release, "setup-aws")
 	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "config.env"), []byte("SUBSTRATE_TAG=v2.0.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	co := t.TempDir()
@@ -391,6 +402,13 @@ func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(co, "native", "bin", "setup-aws")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_, s := testBuilder()

@@ -691,7 +691,10 @@ func (m Model) body(h int) string {
 		groups := m.s.NodeGroups()
 		what := "VPC, IAM roles and EKS cluster " + m.s.ClusterName + ", with no node group: everything runs on EKS Auto Mode nodes"
 		if len(groups) > 0 {
-			what = "VPC, IAM roles, EKS cluster " + m.s.ClusterName + " and its " + andList(groups) + " node groups"
+			what = "VPC, IAM roles, EKS cluster " + m.s.ClusterName + " and its " + andList(groups) + " node group"
+			if len(groups) > 1 {
+				what += "s"
+			}
 		}
 		b.WriteString(theme.Subtle.Render(what) + "\n")
 		b.WriteString(theme.Subtle.Render(m.s.NewClusterConfig.Summary(groups)) + "\n\n")

@@ -52,6 +52,7 @@ func init() {
 		// controller pod each: cents a month.
 		HourlyUSD: 0,
 		Nodes:     []string{"system"}, // External Secrets and the Reloader are pinned there
+		NeedsRDS:  "rotates the RDS logins, so it needs the RDS database",
 		Deploy:    deploy,
 		Verify:    verify,
 		Remove:    remove,

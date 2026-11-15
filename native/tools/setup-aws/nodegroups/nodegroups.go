@@ -9,9 +9,9 @@
 // (the control plane with RDS on Auto Mode, the plugins' controllers). A
 // cluster without EKS Auto Mode has no other nodes, so it always needs the
 // system group and a sandbox group. With Auto Mode, Auto Mode's nodes run
-// everything else, so the system group comes only with a sandbox group, and
-// a cluster may have no node group at all (its sandboxes are Auto Mode's,
-// such as the AWS Nitro sandbox class's).
+// everything else, so the system group is made only for what is pinned to
+// it, and a cluster may have no node group at all (its sandboxes are Auto
+// Mode's, such as the AWS Nitro sandbox class's).
 package nodegroups
 
 import (
@@ -39,12 +39,22 @@ var Default = Format(All)
 
 // For is the node groups of a cluster whose sandboxes need the sandbox
 // groups in sandbox (gvisor, microvm), in All's order: those, plus the
-// system group when Auto Mode is off or any sandbox group is made.
-func For(autoMode bool, sandbox []string) []string {
+// system group when something runs on it:
+//   - without Auto Mode, everything that is not a sandbox: there are no
+//     other nodes;
+//   - with Auto Mode and RDS (rds) and a sandbox group, the control plane,
+//     which the install then cordons onto the system group
+//     (--cordon-system-infra-components);
+//   - pinned: the Pods of a chosen plugin (the LLM gateway, EFS, ...).
+//
+// With Auto Mode and the bundled PostgreSQL nothing else is pinned there:
+// the control plane and its database run on Auto Mode's nodes, so without a
+// pinned plugin no system group is made.
+func For(autoMode, rds, pinned bool, sandbox []string) []string {
 	var out []string
 	for _, g := range All {
 		if g == System {
-			if !autoMode || hasSandbox(sandbox) {
+			if !autoMode || pinned || (rds && hasSandbox(sandbox)) {
 				out = append(out, g)
 			}
 			continue
@@ -60,9 +70,11 @@ func hasSandbox(groups []string) bool {
 	return slices.Contains(groups, GVisor) || slices.Contains(groups, MicroVM)
 }
 
-// Check refuses groups unless they are what For gives for their own sandbox
-// groups: without Auto Mode, the system group and at least one sandbox
-// group; with it, the system group exactly when a sandbox group is made.
+// Check refuses an unknown or repeated group, and without Auto Mode a list
+// that lacks the system group or a sandbox group: such a cluster has no
+// other nodes. With Auto Mode any of the groups, or none, makes a cluster
+// that works: Auto Mode's nodes run what no group is made for, and the
+// control plane is cordoned onto the system group only when it exists.
 func Check(autoMode bool, groups []string) error {
 	for i, g := range groups {
 		if !slices.Contains(All, g) {
@@ -79,10 +91,6 @@ func Check(autoMode bool, groups []string) error {
 		return errors.New("a cluster without EKS Auto Mode needs the gvisor or microvm node group: no other nodes run sandboxes")
 	case !autoMode && !system:
 		return errors.New("a cluster without EKS Auto Mode needs the system node group: no other nodes run the control plane")
-	case sandbox && !system:
-		return errors.New("the gvisor and microvm node groups need the system node group too: the controllers pinned to it run there")
-	case autoMode && system && !sandbox:
-		return errors.New("with EKS Auto Mode the system node group comes only with the gvisor or microvm node group: Auto Mode's nodes run the control plane")
 	}
 	return nil
 }

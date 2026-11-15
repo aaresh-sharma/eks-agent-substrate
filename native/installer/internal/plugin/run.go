@@ -127,6 +127,21 @@ func NodePools(ctx context.Context, w io.Writer, o Options) ([]string, error) {
 	return ParsePools(out.String()), nil
 }
 
+// BundledDatabaseArgs are the kubectl arguments that name the StatefulSet
+// of ate-setup's bundled PostgreSQL, ate-system/postgres, when it exists.
+var BundledDatabaseArgs = []string{"-n", "ate-system", "get", "statefulset", "postgres", "--ignore-not-found", "-o", "name"}
+
+// BundledDatabase reports whether o's control plane runs on the bundled
+// PostgreSQL (Options.BundledDatabase): its StatefulSet exists. With RDS,
+// or no control plane, it does not.
+func BundledDatabase(ctx context.Context, w io.Writer, o Options) (bool, error) {
+	var out bytes.Buffer
+	if err := Kubectl(ctx, w, o, nil, &out, BundledDatabaseArgs...); err != nil {
+		return false, fmt.Errorf("read whether %s runs the bundled PostgreSQL: %w", o.Cluster, err)
+	}
+	return strings.TrimSpace(out.String()) != "", nil
+}
+
 // ReadRecord returns the IDs the cluster records as installed (none when the
 // record is missing).
 func ReadRecord(ctx context.Context, w io.Writer, o Options) ([]string, error) {
@@ -257,6 +272,12 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 		for _, p := range ps {
 			if p.NeedsAutoMode != "" && !o.AutoMode {
 				return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
+			}
+			// Before its AWS half, which would otherwise be made for an
+			// install it cannot work on.
+			if p.NeedsRDS != "" && o.BundledDatabase {
+				return fmt.Errorf("plugin %s %s; %s's control plane uses the bundled PostgreSQL: install it with --database rds to use the plugin",
+					p.ID, p.NeedsRDS, o.Cluster)
 			}
 		}
 		// Before the record is read and before any plugin's AWS half or

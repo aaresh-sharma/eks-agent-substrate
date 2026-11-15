@@ -80,9 +80,10 @@ func runMainIn(t *testing.T, cwd string, extra []string, answers string, args ..
 		"AWS_PROFILE=", "AWS_CONFIG_FILE="+dir+"/none", "AWS_SHARED_CREDENTIALS_FILE="+dir+"/none",
 		"AWS_ACCESS_KEY_ID=placeholder", "AWS_SECRET_ACCESS_KEY=placeholder", "AWS_SESSION_TOKEN=",
 		"AWS_EC2_METADATA_DISABLED=true", "AWS_ENDPOINT_URL="+srv.URL, "XDG_CACHE_HOME="+dir,
-		// Empty is unset to main's conf(): --sandbox-classes defaults to
-		// gvisor,microvm whatever a checkout's config.local.env says.
-		"SANDBOX_CLASSES=",
+		// Empty is unset to main's conf(): --sandbox-classes, --tag and
+		// --image-repo take their defaults (gvisor,microvm, v1.0.0 and
+		// upstream's images) whatever a checkout's config.local.env says.
+		"SANDBOX_CLASSES=", "SUBSTRATE_TAG=", "SUBSTRATE_IMAGE_REPO=",
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), kubectlAnswers+"="+answers)
 	cmd.Env, cmd.Dir = append(cmd.Env, extra...), cwd
 	var out bytes.Buffer
@@ -143,6 +144,30 @@ func TestCLIRefusesClassesTheClusterCannotRun(t *testing.T) {
 		"--snap-bucket", "demo-snap", "--asset-bucket", "demo-assets", "--eks-overlay", "../deploy/eks")
 	if err == nil || !strings.Contains(out, "plugin mode3-iso needs EKS Auto Mode") || strings.Contains(out, "Fetching substrate") {
 		t.Errorf("Nitro class off Auto Mode: %v\n%s", err, out)
+	}
+}
+
+// Both ways, through main(): db-rotation on a control plane on the bundled
+// PostgreSQL (StatefulSet ate-system/postgres exists) is refused, deploy and
+// verify alike, before the plugin's first step: no "Deploying plugin", so
+// its AWS half never runs. With RDS (no StatefulSet) verify goes on to the
+// plugin's own check.
+func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
+	overlay, err := filepath.Abs("../deploy/eks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundled := cluster("", "v1.0.0") + "\nget statefulset postgres=statefulset.apps/postgres"
+	for _, action := range []string{"deploy", "verify"} {
+		err, out := runMain(t, bundled, "--plugin-action", action, "--plugins", "db-rotation", "--eks-overlay", overlay)
+		if err == nil || !strings.Contains(out, "plugin db-rotation rotates the RDS logins, so it needs the RDS database; demo's control plane uses the bundled PostgreSQL") ||
+			strings.Contains(out, plugin.DeployLine) || strings.Contains(out, plugin.VerifyLine) {
+			t.Errorf("%s on the bundled PostgreSQL: %v\n%s", action, err, out)
+		}
+	}
+	_, out := runMain(t, cluster("", "v1.0.0"), "--plugin-action", "verify", "--plugins", "db-rotation", "--eks-overlay", overlay)
+	if strings.Contains(out, "uses the bundled PostgreSQL") || !strings.Contains(out, plugin.VerifyLine+"db-rotation") {
+		t.Errorf("verify with RDS did not reach the plugin's check:\n%s", out)
 	}
 }
 

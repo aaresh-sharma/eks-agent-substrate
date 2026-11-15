@@ -145,6 +145,20 @@ func TestRunDeployOfASourceTheRecordAlreadyCarries(t *testing.T) {
 			t.Errorf("ingress ID %s: %v, ran %q", id, err, f.log)
 		}
 	}
+
+	// And for a credential provider, credprovider-aws's only need: cred's
+	// provider is carried once cred is recorded; another one is not.
+	for provider, carried := range map[string]bool{`{"name":"aws"}`: true, `{"name":"other"}`: false} {
+		f = &fakeCluster{record: "base,cred"}
+		o = releaseFixture(t, f)
+		Register(Plugin{ID: "cred", Order: 8, Needs: Needs{CredentialProviders: []string{`{"name":"aws"}`}}})
+		Register(Plugin{ID: "cred-b", Order: 9, Needs: Needs{CredentialProviders: []string{provider}}, Deploy: hook(f, "deploy cred-b", nil)})
+		err := Run(context.Background(), io.Discard, ActionDeploy, []string{"cred-b"}, o)
+		if carried && (err != nil || !slices.Contains(f.log, "deploy cred-b")) ||
+			!carried && (err == nil || !strings.Contains(err.Error(), "run --deploy-control-plane --plugins cred-b first") || len(f.log) != 0) {
+			t.Errorf("credential provider %s: %v, ran %q", provider, err, f.log)
+		}
+	}
 }
 
 // Both ways: removing the plugin that replaced the release says the release
