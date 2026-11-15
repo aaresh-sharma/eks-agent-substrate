@@ -27,7 +27,12 @@ same skills. Add a new skill under `.agents/skills/` only.
   - `native/deploy/eks/` is the kustomize Component and Go patch that make
     upstream's install run on EKS with S3.
   - `native/install.sh` is the launcher: it builds the installer and starts
-    it. It runs no install step.
+    it, or with `--from-release` downloads a release archive, checks its
+    sha256 and starts that. It runs no install step.
+- `.goreleaser.yaml` builds the release archives (both binaries,
+  `config.env`, `deploy/eks`); `.github/workflows/release.yaml` publishes
+  them when a person pushes a `v*` tag. `goreleaser release --snapshot
+  --clean` checks it locally into the gitignored `dist/`.
   - `native/upstream.lock` records the substrate-gke commit the shared code
     follows.
 - Settings come from `config.env`, then `config.local.env` (gitignored), under
