@@ -26,7 +26,10 @@
 #   - No Gemini anywhere. The gateway's own agent, which answers anything no
 #     binding sends to an actor, uses the same llm-gateway provider as the
 #     actors. It calls the LLM gateway from a plain pod, so no egress injection
-#     applies and it sends the placeholder bearer token as is.
+#     applies and it sends the placeholder bearer token as is. The LLM
+#     gateway's own NetworkPolicy admits only atenet-egress and its own
+#     namespace, so the plugin adds llm-gateway-from-openclaw
+#     (llm-gateway-policy.yaml), which admits exactly this gateway's pods.
 #
 # gateway.auth.token is "${OPENCLAW_GATEWAY_TOKEN}", an env SecretRef: the
 # gateway resolves it from the openclaw-secrets token in its environment, so
