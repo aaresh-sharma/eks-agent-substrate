@@ -10,6 +10,7 @@ import (
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/phases"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/demo"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/eksoverlay"
@@ -93,8 +94,8 @@ func (b builder) rel(p string) string {
 // and creates nothing, and KEEP_CLUSTER would override the teardown choice
 // (review F4). teardown sets KEEP_CLUSTER from s.KeepCluster itself.
 func (b builder) env(s *state.Setup) []string {
-	return []string{"CLUSTER_NAME=" + s.ClusterName, "AWS_REGION=" + s.Region, "AWS_PROFILE=" + s.Profile, "TAGS=" + s.Tags,
-		"PLAN=false", "KEEP_CLUSTER=" + strconv.FormatBool(s.KeepCluster)}
+	env := append([]string{"CLUSTER_NAME=" + s.ClusterName, "AWS_REGION=" + s.Region}, awsx.ProfileEnv(s.Profile)...)
+	return append(env, "TAGS="+s.Tags, "PLAN=false", "KEEP_CLUSTER="+strconv.FormatBool(s.KeepCluster))
 }
 
 // setupAWSSpec runs setup-aws with args: the release's binary, or `go -C

@@ -152,3 +152,14 @@ func TestFreshLoadsCredentialsForEveryCall(t *testing.T) {
 		t.Errorf("loaded %d clients for 2 calls", loads)
 	}
 }
+
+// ProfileEnv leaves AWS_PROFILE out when the profile is empty: the AWS CLI
+// exits 255 on AWS_PROFILE="" ("The config profile () could not be found").
+func TestProfileEnv(t *testing.T) {
+	if got := ProfileEnv(""); len(got) != 0 {
+		t.Errorf(`ProfileEnv("") = %q, want nothing`, got)
+	}
+	if got := ProfileEnv("eks-sandbox"); len(got) != 1 || got[0] != "AWS_PROFILE=eks-sandbox" {
+		t.Errorf(`ProfileEnv("eks-sandbox") = %q`, got)
+	}
+}

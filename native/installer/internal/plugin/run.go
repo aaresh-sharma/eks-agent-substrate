@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 )
 
 // Lines Run prints, for the wizard's checklist (steps.Plugins) and its
@@ -86,8 +88,8 @@ func SetupAWS(ctx context.Context, w io.Writer, o Options, args ...string) error
 	if o.SetupAWS == "" {
 		return errors.New("plugin: no setup-aws path")
 	}
-	env := []string{"CLUSTER_NAME=" + o.Cluster, "AWS_REGION=" + o.Region, "AWS_PROFILE=" + o.Profile,
-		"PLAN=false", "KEEP_CLUSTER=false"}
+	env := append([]string{"CLUSTER_NAME=" + o.Cluster, "AWS_REGION=" + o.Region},
+		append(awsx.ProfileEnv(o.Profile), "PLAN=false", "KEEP_CLUSTER=false")...)
 	if o.Tags != "" {
 		env = append(env, "TAGS="+o.Tags)
 	}

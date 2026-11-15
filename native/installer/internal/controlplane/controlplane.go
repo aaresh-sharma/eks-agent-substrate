@@ -250,20 +250,19 @@ const (
 // AteSetupEnv is the environment of the ate-setup run. It holds names only,
 // never a secret; with RDS, Deploy adds the connection strings to it.
 func AteSetupEnv(o Options, kubeconfig string) []string {
-	return []string{
-		"KUBECONFIG=" + kubeconfig,
-		"AWS_REGION=" + o.Region,
-		"AWS_PROFILE=" + o.Profile,
+	return append(awsx.ProfileEnv(o.Profile),
+		"KUBECONFIG="+kubeconfig,
+		"AWS_REGION="+o.Region,
 		// The EKS code patch (deploy/eks/patches): stage microVM assets in S3.
 		"ATE_INSTALL_STORAGE_BACKEND=s3",
-		"ATE_ASSET_BUCKET=" + o.AssetBucket,
+		"ATE_ASSET_BUCKET="+o.AssetBucket,
 		"NO_DEV_ENV=1",
 		// ate-setup would otherwise prefer an exported context over --context.
 		"KUBECTL_CONTEXT=",
 		// Carlos's build hosts sinkhole proxy.golang.org.
 		"GOTOOLCHAIN=local",
 		"GOFLAGS=-mod=vendor",
-	}
+	)
 }
 
 // Deploy fetches the tree, adds deploy/eks, writes the installer's own

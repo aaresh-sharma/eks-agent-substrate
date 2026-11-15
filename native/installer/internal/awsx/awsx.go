@@ -224,6 +224,20 @@ func KubeconfigPath(cluster, region string) string {
 	return filepath.Join(dir, "substrate-eks", "kubeconfig", cluster+"."+region+".yaml")
 }
 
+// ProfileEnv is the AWS_PROFILE entry for a child's environment: none when
+// profile is empty, so the child uses the default credential chain. The AWS
+// SDK for Go reads AWS_PROFILE="" as unset, but the AWS CLI looks for a
+// profile named "" and exits 255 ("The config profile () could not be
+// found"), which broke ate-setup's microVM asset upload and every aws eks
+// get-token under it. main unsets an exported AWS_PROFILE when --profile is
+// empty, so leaving the entry out cannot let one through.
+func ProfileEnv(profile string) []string {
+	if profile == "" {
+		return nil
+	}
+	return []string{"AWS_PROFILE=" + profile}
+}
+
 // WriteKubeconfig writes a mode-600 kubeconfig for cl. kubectl gets a token
 // from `aws eks get-token`, the same exec plugin `aws eks update-kubeconfig`
 // writes; nothing secret is stored in the file.
