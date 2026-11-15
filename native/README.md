@@ -23,11 +23,12 @@ rerun the failed step.
 
 | Step | Command | What it creates |
 |---|---|---|
-| Cluster | `setup-aws create cluster` | A VPC with public and private subnets across two or more Availability Zones and a NAT gateway. The cluster and node IAM roles. An EKS cluster (Auto Mode by default, standard optional) whose public endpoint accepts only `EKS_PUBLIC_ACCESS_CIDRS` (default `auto`: this machine's public address as a /32 on a new cluster, refused when the network reaches the internet from several addresses; then set the variable to your egress ranges, or to `0.0.0.0/0`, since IAM still authenticates every call; an existing cluster keeps its ranges unless the variable is set), checked by connecting to the endpoint once the cluster is active, with an access entry for you and the add-ons. A launch template with nested virtualization, IMDSv2 (hop limit 1) and encrypted gp3. The `system`, `gvisor` and `microvm` managed node groups, labeled `ate.dev/pool` and tainted for their sandbox class. |
+| Cluster | `setup-aws create cluster` | A VPC with public and private subnets across two or more Availability Zones and a NAT gateway. The cluster and node IAM roles. An EKS cluster (Auto Mode by default, standard optional) whose public endpoint accepts only `EKS_PUBLIC_ACCESS_CIDRS` (default `auto`: this machine's public address as a /32 on a new cluster, refused when the network reaches the internet from several addresses; then set the variable to your egress ranges, or to `0.0.0.0/0`, since IAM still authenticates every call; an existing cluster keeps its ranges unless the variable is set), checked by connecting to the endpoint once the cluster is active, with an access entry for you and the add-ons. The managed node groups `NODE_GROUPS` names (the wizard derives it from the sandbox classes and plugins: see [Sandbox classes and node groups](#sandbox-classes-and-node-groups); by default `system`, `gvisor` and `microvm`), labeled `ate.dev/pool` and tainted for their sandbox class, each with a launch template (IMDSv2, hop limit 1, encrypted gp3, nested virtualization on `microvm`). `NODE_GROUPS=none` on Auto Mode makes no node group, no launch template and no node IAM role. |
 | Provision | `setup-aws bootstrap` | S3 buckets for snapshots and microVM assets. EKS Pod Identity roles for ate-api-server and atelet. Private ECR repositories. |
 | Database | `setup-aws create rds` | A private RDS for PostgreSQL instance in the private subnets. Port 5432 is open only to the cluster security group. RDS manages the admin password, and the owner and read-write logins are in Secrets Manager. The schema is created from inside the cluster. With `--database=bundled`, Substrate's bundled PostgreSQL runs in the cluster instead, on an encrypted gp3 EBS volume from the installer's StorageClass. |
-| Control plane | `ate-setup deploy ate-system` | A StorageClass for encrypted gp3 EBS volumes that carry the owner tag and `TAGS` (`substrate-eks-auto-ebs` on Auto Mode, `substrate-eks-ebs` on a standard cluster), the default class on a cluster the installer created. The pinned Substrate release with its published images, the gVisor and microVM sandbox classes, the microVM assets staged in S3, and the EKS changes in `deploy/eks`. |
-| Demo (`--demo`) | the counter image build, `kubectl apply`, `kubectl ate create` | The counter image, built from the release source and pushed to the private ECR repository `<cluster>/counter`. The counter demo on gVisor and on microVM, each pinned to its node group. |
+| Control plane | `ate-setup deploy ate-system` | A StorageClass for encrypted gp3 EBS volumes that carry the owner tag and `TAGS` (`substrate-eks-auto-ebs` on Auto Mode, `substrate-eks-ebs` on a standard cluster), the default class on a cluster the installer created. The pinned Substrate release with its published images (the fork's with the `nitro` class or `mode3`), ate-setup's gVisor sandbox class and, with the `microvm` class, its microVM class with the assets staged in S3, and the EKS changes in `deploy/eks`. |
+| Nitro sandboxes (`nitro` class) | `substrate-eks --plugin-action deploy --plugins mode3-iso` | NodePool `ate-isolated` on EKS Auto Mode, atelet-iso, and the counter pool `counter-iso` on RuntimeClass `isolated-sandbox`, checked across a suspend and resume. |
+| Demo (`--demo`) | the counter image build, `kubectl apply`, `kubectl ate create` | The counter image, built from the release source and pushed to the private ECR repository `<cluster>/counter`. The counter demo on the `gvisor` and `microvm` classes, each pinned to its node group; with `nitro`, its check runs `counter-iso`'s too. |
 | Plugins (`--plugins`) | `substrate-eks --plugin-action deploy`, then `verify` | Each chosen plugin's AWS resources (`setup-aws plugin <id>`) and Kubernetes objects, then its check. See [Plugins](#plugins). |
 
 Every AWS resource carries the owner tag
@@ -145,17 +146,21 @@ one), Choose the database, Settings, Choose plugins, Review the plan, then one
 screen per step, and Complete. Nothing changes in AWS before Review.
 
 - **Settings** edits what `config.env` controls for this run: the new
-  cluster's Kubernetes version, Auto Mode, API access ranges and node groups
-  (only when the run creates the cluster), `TAGS`, the release
-  (`SUBSTRATE_TAG`) and its image repository (`SUBSTRATE_IMAGE_REPO`), the
-  sandbox classes and the database. The right side shows the setting's help,
-  taken from the comment above its key in `config.env`, and its default.
-  `n` checks every value and moves on once they are valid.
+  cluster's Kubernetes version, Auto Mode and API access ranges (only when
+  the run creates the cluster), the sandbox classes (`SANDBOX_CLASSES`), the
+  node groups they make (only those; "none" when there are none), `TAGS`,
+  the release (`SUBSTRATE_TAG`; with the `nitro` class, the fork's, which
+  the screen says) and its image repository (`SUBSTRATE_IMAGE_REPO`), and
+  the database. A class the cluster cannot have is shown `[–]` with the
+  reason. `m` picks the minimal profile. The right side shows the setting's
+  help, taken from the comment above its key in `config.env`, and its
+  default. `n` checks every value and moves on once they are valid.
   ![Settings](installer/docs/settings.png)
-- **Choose plugins** lists every plugin with its time and hourly cost.
-  `space` picks one, and the plugins it needs with it; dropping one drops the
-  plugins that need it. A plugin that needs EKS Auto Mode is refused on a
-  cluster without it, and one built on the counter demo turns the demo on.
+- **Choose plugins** lists every plugin but `mode3-iso` (the `nitro` class)
+  with its time and hourly cost. `space` picks one, and the plugins it needs
+  with it; dropping one drops the plugins that need it. A plugin that needs
+  EKS Auto Mode, or a node group the cluster will not have, is refused with
+  the reason, and one built on the counter demo turns the demo on.
 - **Review the plan** shows each step's command, its time and its cost an
   hour, the total time, and the cost until teardown at us-west-2 on-demand
   prices. `y` starts the install; `esc` goes back.
@@ -193,7 +198,7 @@ the notes printed on exit.
 | `--region`, `--profile` | `AWS_REGION`, `AWS_PROFILE` | The AWS Region and shared config profile. |
 | `--tag` | `SUBSTRATE_TAG` (`v1.0.0`) | The Substrate release to install. |
 | `--image-repo` | `SUBSTRATE_IMAGE_REPO` (`ghcr.io/agent-substrate/substrate`) | Where the release's images come from. |
-| `--sandbox-classes` | `gvisor,microvm` | The sandbox classes to install and check: `gvisor`, `microvm` or both. |
+| `--sandbox-classes` | `SANDBOX_CLASSES` (`gvisor,microvm`) | The sandbox classes, in any combination of `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox, Auto Mode only). They decide a new cluster's node groups. |
 | `--database` | `rds` | `rds` (Amazon RDS for PostgreSQL) or `bundled` (in-cluster PostgreSQL). |
 | `--demo` | off | End the install with the counter demo, and check it. |
 | `--plugins` | none (the wizard preselects `llm-gateway`) | Comma-separated plugin IDs to preselect. |
@@ -209,6 +214,56 @@ also runs on its own: `--deploy-control-plane`, `--deploy-demo`, `--verify`,
 `--plugin-action deploy|verify|remove`, `--remove-control-plane`,
 `--probe-installed` and `--doctor`. `go run . --help` lists them. Paths on
 macOS are under `~/Library/Caches/substrate-eks/` instead.
+
+## Sandbox classes and node groups
+
+The classes are `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox: each
+worker Pod an EKS Auto Mode isolated sandbox, Auto Mode only), in any
+combination. A cluster the run creates gets these node groups, which the
+wizard passes `setup-aws create cluster` as `NODE_GROUPS`
+(`tools/setup-aws/nodegroups` holds the rule, and setup-aws refuses a list
+outside it):
+
+| Selection | Node groups created |
+|---|---|
+| Default: Auto Mode, `gvisor,microvm` | `system`, `gvisor`, `microvm` (unchanged) |
+| `gvisor` class | `gvisor` |
+| `microvm` class | `microvm` (nested virtualization) |
+| `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
+| `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
+| `system` | without Auto Mode, always (required); with Auto Mode, when a `gvisor` or `microvm` group is created |
+| Auto Mode and only `nitro` | none (`NODE_GROUPS=none`): no launch template, no node IAM role; the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
+| No Auto Mode with nothing to run sandboxes on (`nitro` alone) | refused |
+
+`ate-setup` gets `--sandbox-classes gvisor`, plus `microvm` with the
+`microvm` class: in v1.0.0 its `gvisor` class is the `gvisor-default`
+SandboxConfig, which every gVisor-class pool resolves (the Nitro sandbox's
+`counter-iso` and mode 3's too), and `microvm` stages the Kata assets in S3
+and applies their SandboxConfig. The `nitro` class installs `mode3-iso`,
+whose release is the fork's (one release per install), in its own step after
+the control plane; the counter demo runs on `gvisor` and `microvm`, and
+`--verify` checks `nitro` through `mode3-iso`'s counter pool. With RDS and no
+`system` group nothing is cordoned, and the bootstrap Job runs on Auto Mode
+nodes. On a cluster you connect nothing is created: the probe reads the
+`ate.dev/pool` labels of its nodes, and a class or plugin whose nodes are
+missing is refused, naming them.
+
+The minimal profile (Auto Mode, bundled PostgreSQL, `nitro` only) is `m` on
+Settings, or:
+
+```bash
+./install.sh --sandbox-classes nitro --database bundled
+```
+
+or, step by step from `native/`:
+
+```bash
+NODE_GROUPS=none CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . create cluster
+CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . bootstrap
+go -C installer run . --deploy-control-plane --cluster $C --region $R --profile $P --database bundled \
+  --sandbox-classes nitro --snap-bucket $C-snap-<account>-$R --asset-bucket $C-assets-<account>-$R
+go -C installer run . --plugin-action deploy --plugins mode3-iso --cluster $C --region $R --profile $P
+```
 
 ## Plugins
 
@@ -230,8 +285,15 @@ control plane deploy keeps their needs.
 | `credprovider-aws` | | egress credential injection from AWS Secrets Manager |
 | `db-rotation` | the RDS database | Secrets Manager rotation of the two RDS logins, synced by External Secrets, with the ESO Reloader rolling ate-api-server |
 | `openclaw` | `efs` | an always-on OpenClaw gateway; each conversation's agent is an actor. Its public images are pinned by digest; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE` and `OPENCLAW_DASHBOARD_IMAGE` replace them, pinned by digest too. The gateway UI asks for the gateway token, key `gateway-token` of Secret `openclaw/openclaw-secrets`; the deploy prints the command that reads it. With `llm-gateway` installed, it adds NetworkPolicy `llm-gateway/llm-gateway-from-openclaw`, which admits the gateway's pods (no other openclaw pod) to the LLM gateway, so the gateway's own agent (the gateway UI's chat) gets a model; deploy openclaw again after adding llm-gateway |
-| `mode3` | | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
-| `mode3-iso` | EKS Auto Mode | mode 3 worker Pods as EKS Auto Mode isolated sandboxes |
+| `mode3` | the `microvm` node group (a new cluster gets it) | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
+| `mode3-iso` | EKS Auto Mode | the `nitro` sandbox class (not on the Plugins screen): worker Pods as EKS Auto Mode isolated sandboxes, no node group |
+
+A plugin pinned to a node group (`Plugin.Nodes`) needs that group's nodes:
+`llm-gateway`, `efs`, `db-rotation` and `credprovider-aws` run on `system`,
+`openclaw` and `credprovider-aws`'s probe on `gvisor`, `mode3` on `microvm`.
+The wizard refuses one the cluster will not have, with the reason, and
+`--plugin-action deploy|verify` refuses it on a cluster whose nodes lack the
+`ate.dev/pool` label.
 
 On an installed cluster:
 

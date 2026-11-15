@@ -33,11 +33,14 @@ address of the machine that creates the cluster.
 
 ![Agent Substrate on Amazon EKS: every AWS service, the EKS cluster and the Agent Substrate components](slides/agent-substrate-on-eks.png)
 
-One EKS cluster with three node groups: `system` for the Substrate control
-plane, atenet and the LLM gateway; `gvisor` for gVisor workers; `microvm` for
-Kata and Cloud Hypervisor workers on EC2 with nested virtualization. EKS
-Auto Mode is on as well (`AUTO_MODE=on`, the default), with its two built-in
-NodePools, `general-purpose` and `system`, for any other workloads. Around
+By default, one EKS cluster with three node groups: `system` for the
+Substrate control plane, atenet and the LLM gateway; `gvisor` for gVisor
+workers; `microvm` for Kata and Cloud Hypervisor workers on EC2 with nested
+virtualization. EKS Auto Mode is on as well (`AUTO_MODE=on`, the default),
+with its two built-in NodePools, `general-purpose` and `system`, for any
+other workloads. The sandbox classes you choose decide which node groups the
+cluster gets, down to none at all
+([Sandbox classes and node groups](#sandbox-classes-and-node-groups)). Around
 it: Amazon S3 for actor snapshots and microVM guest assets, Amazon RDS for
 PostgreSQL (TLS verify-full), Secrets Manager for the database logins, ECR
 for the demo images, and Bedrock for agent inference through the in-cluster
@@ -132,16 +135,19 @@ or create a new one:
 ![Connect your cluster: the EKS clusters in the Region with their version and install badges, and Create a new cluster](native/installer/docs/cluster.png)
 
 **Settings** edits what `config.env` controls for this run: the new
-cluster's Kubernetes version, Auto Mode, API access ranges and node groups,
-the tags on every AWS resource, the release and its image repository, the
-sandbox classes and the database. The right side explains the setting under
-the cursor. `n` moves on.
+cluster's Kubernetes version, Auto Mode and API access ranges, the sandbox
+classes (gVisor, microVM and the AWS Nitro sandbox), the node groups those
+classes make (only those are listed), the tags on every AWS resource, the
+release and its image repository, and the database. The right side explains
+the setting under the cursor. `m` picks the minimal profile, `n` moves on.
 
 ![Settings: the new cluster, its node groups, the tags, and the Agent Substrate release, sandbox classes and database](native/installer/docs/settings.png)
 
 **Choose plugins** lists the optional parts with their time and hourly cost.
-`space` picks one, and the plugins it needs with it; a plugin that needs Auto
-Mode is refused on a cluster without it.
+`space` picks one, and the plugins it needs with it. A plugin is refused,
+with the reason, when it needs Auto Mode on a cluster without it, or runs on
+a node group the cluster will not have (the LLM gateway on the `system`
+group, OpenClaw on `gvisor`).
 
 ![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata and on isolated sandboxes](native/installer/docs/plugins.png)
 
@@ -200,11 +206,78 @@ TAGS="project=my-substrate team=platform"
 
 Flags preselect the same answers: `--cluster`, `--region`, `--profile`,
 `--tag` (the release), `--image-repo`, `--sandbox-classes` (`gvisor`,
-`microvm` or both), `--database` (`rds` or `bundled`), `--demo` and
-`--plugins`. Use a different `CLUSTER_NAME` for each cluster: S3 buckets, IAM
+`microvm` and `nitro`, in any combination; `SANDBOX_CLASSES`), `--database`
+(`rds` or `bundled`), `--demo` and `--plugins`. Use a different `CLUSTER_NAME` for each cluster: S3 buckets, IAM
 roles, the RDS instance and the ECR repositories are all named from it. The
 installer keeps one kubeconfig per cluster under the user cache dir, so one
 checkout can install several clusters.
+
+## Sandbox classes and node groups
+
+Three sandbox classes, chosen on Settings or with `--sandbox-classes`
+(`SANDBOX_CLASSES` in `config.env`), in any combination:
+
+| Class | Where its actors run |
+|---|---|
+| `gvisor` | gVisor workers on the `gvisor` node group. |
+| `microvm` | Kata microVM workers on the `microvm` node group, whose instances have nested virtualization. |
+| `nitro` (AWS Nitro sandbox) | Each worker Pod is an EKS Auto Mode isolated sandbox (RuntimeClass `isolated-sandbox`) on nodes Auto Mode launches for it (NodePool `ate-isolated`). Auto Mode only; no node group. |
+
+A cluster the installer creates gets the node groups its selection needs,
+and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
+
+| Selection | Node groups created |
+|---|---|
+| Default: Auto Mode, `gvisor,microvm` | `system`, `gvisor`, `microvm` (as before) |
+| `gvisor` class | `gvisor` |
+| `microvm` class | `microvm` (nested virtualization) |
+| `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
+| `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
+| `system` | always without Auto Mode; with Auto Mode only when a `gvisor` or `microvm` group is created |
+| Auto Mode and only `nitro` (the minimal profile) | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
+| No Auto Mode | `system` and at least one of `gvisor` and `microvm`; `nitro` is refused |
+
+What else follows from the classes:
+- `ate-setup` gets `--sandbox-classes gvisor` always (it applies the
+  `gvisor-default` SandboxConfig, which every gVisor-class worker pool
+  resolves, the Nitro sandbox's and mode 3's included) and `microvm` with
+  the `microvm` class (the Kata assets in S3 and their SandboxConfig).
+- `nitro` installs the `mode3-iso` plugin, which installs the fork's release
+  (one release per install, as `mode3` does), in its own step, *Set up Nitro
+  sandboxes*, after the control plane. The cluster records it as
+  `mode3-iso`, so teardown removes it.
+- The counter demo runs on `gvisor` and `microvm`; `--verify` checks `nitro`
+  through its counter pool, `counter-iso`.
+- A plugin pinned to a node group is offered only when the cluster gets that
+  group: the LLM gateway, EFS (and so S3 Files and OpenClaw), login rotation
+  and the credential provider run on `system`, OpenClaw and the credential
+  provider's probe on `gvisor`. On the minimal profile the LLM gateway is
+  therefore not selected.
+- With RDS and no `system` group, nothing is cordoned: the database
+  bootstrap Job and the control plane run on Auto Mode nodes.
+- On a cluster you connect, nothing is created: the node groups its nodes
+  are labeled with (`ate.dev/pool`) decide, and a class or plugin whose
+  nodes are missing is refused, naming the label.
+
+### The minimal profile
+
+Auto Mode, the bundled PostgreSQL and the AWS Nitro sandbox only: no node
+group. In the wizard, press `m` on Settings, or start it with:
+
+```bash
+./native/install.sh --sandbox-classes nitro --database bundled
+```
+
+Step by step, from `native/` with `C`, `R` and `P` as in
+[Run each step yourself](#run-each-step-yourself):
+
+```bash
+NODE_GROUPS=none CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . create cluster
+CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . bootstrap
+go -C installer run . --deploy-control-plane --cluster $C --region $R --profile $P --database bundled \
+  --sandbox-classes nitro --snap-bucket $C-snap-<account>-$R --asset-bucket $C-assets-<account>-$R
+go -C installer run . --plugin-action deploy --plugins mode3-iso --cluster $C --region $R --profile $P
+```
 
 ## Try it
 
@@ -232,7 +305,8 @@ curl -s localhost:8001          # resumes the actor; the counts continue
 
 Each plugin is Go code in the installer: its Kubernetes objects, its check,
 and its AWS resources (made by `setup-aws plugin <id>`). Pick them on the
-Plugins screen, or name them with `--plugins`. The control plane is installed
+Plugins screen, or name them with `--plugins`; `mode3-iso` comes with the
+`nitro` sandbox class instead. The control plane is installed
 once with what the chosen plugins need, and the cluster records which ones it
 runs (ConfigMap `kube-system/substrate-eks-plugins`), so a later install
 keeps them.
@@ -246,7 +320,7 @@ keeps them.
 | `db-rotation` | Secrets Manager login rotation | Rotates the two RDS logins with alternating users; External Secrets syncs them and the ESO Reloader rolls ate-api-server. Needs the RDS database. |
 | `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs`; its public images are pinned by digest. |
 | `mode3` | Mode 3 on Kata | Worker Pods are Kata microVMs on the microvm nodes, with gVisor actors inside. |
-| `mode3-iso` | Mode 3 on isolated sandboxes | Each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode. |
+| `mode3-iso` | AWS Nitro sandbox | The `nitro` sandbox class: each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode. Chosen as the class (Settings, `--sandbox-classes nitro`), not on the Plugins screen. |
 
 Each one also runs on its own, on an installed cluster. A plugin that
 changes the control plane (`efs`, `s3files`, `credprovider-aws`, `openclaw`,
@@ -361,9 +435,10 @@ keeps a mode 3 worker's actors on a tmpfs in the guest, so the pool gets
 | WorkerPool | A counter pool with `spec.networkTransport.runtimeClassName: kata`: the controller runs the worker Pods under Kata, and atelet reaches them over mutual TLS on the Pod network instead of the node's shared files and Unix sockets. |
 | Check | Every worker Pod of the pool runs under RuntimeClass `kata`, and a counter suspends and resumes on it. |
 
-`mode3-iso` runs the same worker Pods under RuntimeClass `isolated-sandbox`,
-which EKS Auto Mode ships: each Pod runs in its own sandbox with its own guest
-kernel, on a node Auto Mode launches for it. It needs Auto Mode.
+`mode3-iso`, the `nitro` sandbox class (the AWS Nitro sandbox), runs the
+same worker Pods under RuntimeClass `isolated-sandbox`, which EKS Auto Mode
+ships: each Pod runs in its own sandbox with its own guest kernel, on a node
+Auto Mode launches for it. It needs Auto Mode, no node group and no Kata.
 
 | Piece | What it does |
 |---|---|
@@ -378,7 +453,7 @@ demos on isolated sandboxes.
 ## EKS Auto Mode
 
 With `AUTO_MODE=on` (the default), the cluster runs EKS Auto Mode next to
-the three node groups, with its two built-in NodePools, `general-purpose` and
+its node groups, with its two built-in NodePools, `general-purpose` and
 `system`. The node groups only take the pods meant for them: `gvisor` and
 `microvm` the worker pods, `system` the Substrate control plane (pinned by
 `ate-setup --cordon-system-infra-components`) and the installer's system
