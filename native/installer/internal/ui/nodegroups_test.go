@@ -352,3 +352,38 @@ func TestPluginsScreenRefusesLoginRotationOnTheBundledDatabase(t *testing.T) {
 		}
 	}
 }
+
+// m after the Plugins screen: the chosen plugins that would add a node group
+// under the minimal profile, the default gateway (system) and t-kata
+// (microvm), are cleared and named; t-efs, which adds none, stays. The run
+// then makes no node group, as m says. Choosing one again on the Plugins
+// screen makes its group, as before.
+func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
+	s := newSetup("fresh")
+	s.Plugins = nil // the defaults: the gateway, which the default run's system group fits
+	m := press(toSettings(t, testDeps(&recorder{}), s), "n")
+	m = press(pluginAt(m, "t-kata"), " ")
+	m = press(pluginAt(m, "t-efs"), " ")
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-gateway", "t-efs", "t-kata"}) {
+		t.Fatalf("at %s, plugins %v", m.m.Current().Title(), s.Plugins)
+	}
+	m = press(m, "esc", "esc")
+	if m.m.Current() != state.Settings {
+		t.Fatalf("at %s", m.m.Current().Title())
+	}
+	m = press(m, "m")
+	if m.notice != "Cleared t-gateway and t-kata for the minimal profile (no node group); choose again on the Plugins screen to keep the group" ||
+		len(groupRows(m)) != 0 || !strings.Contains(m.View(), noGroupsLine) {
+		t.Fatalf("notice %q, rows %v\n%s", m.notice, groupRows(m), m.View())
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.pl.chosen["t-kata"] || !m.pl.chosen["t-efs"] {
+		t.Fatalf("at %s, chosen %v", m.m.Current().Title(), m.pl.chosen)
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 ||
+		!strings.Contains(m.View(), "No node groups: everything runs on EKS Auto Mode nodes") {
+		t.Errorf("at %s, plugins %v, groups %v\n%s", m.m.Current().Title(), s.Plugins, s.NodeGroups(), m.View())
+	}
+}

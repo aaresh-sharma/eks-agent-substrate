@@ -139,7 +139,8 @@ cluster's Kubernetes version, Auto Mode and API access ranges, the sandbox
 classes (gVisor, microVM and the AWS Nitro sandbox), the node groups those
 classes make (only those are listed), the tags on every AWS resource, the
 release and its image repository, and the database. The right side explains
-the setting under the cursor. `m` picks the minimal profile, `n` moves on.
+the setting under the cursor. `m` picks the minimal profile (and clears a
+chosen plugin that would add a node group, naming it), `n` moves on.
 
 ![Settings: the new cluster, its node groups, the tags, and the Agent Substrate release, sandbox classes and database](native/installer/docs/settings.png)
 

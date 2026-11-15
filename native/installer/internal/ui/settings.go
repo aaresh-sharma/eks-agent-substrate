@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -204,7 +205,8 @@ func (m *Model) toggleClass(c string) string {
 
 // minimal is the m key: the minimal profile, Auto Mode with the AWS Nitro
 // sandbox class only and the bundled PostgreSQL. A new cluster then gets no
-// node group, and everything runs on Auto Mode nodes.
+// node group, and everything runs on Auto Mode nodes: a chosen plugin that
+// would add one is cleared, and the notice names it.
 func (m *Model) minimal() string {
 	st := m.set
 	if m.s.ClusterIsNew {
@@ -213,10 +215,44 @@ func (m *Model) minimal() string {
 		return "The minimal profile needs EKS Auto Mode, and " + m.s.ClusterName + " has it off."
 	}
 	st.values[classKey], st.values[dbKey] = state.ClassNitro, state.DatabaseBundled
-	if m.s.ClusterIsNew {
-		return "Minimal profile: EKS Auto Mode, the AWS Nitro sandbox only, the bundled PostgreSQL; no node group."
+	if !m.s.ClusterIsNew {
+		return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
 	}
-	return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
+	if cleared := m.clearGroupPlugins(); len(cleared) > 0 {
+		return "Cleared " + andList(cleared) + " for the minimal profile (no node group); choose again on the Plugins screen to keep the group"
+	}
+	return "Minimal profile: EKS Auto Mode, the AWS Nitro sandbox only, the bundled PostgreSQL; no node group."
+}
+
+// clearGroupPlugins clears every chosen plugin that would give the minimal
+// profile's new cluster a node group (mode 3's microvm group, the system
+// group of a plugin that runs on it), so the profile keeps its promise, and
+// returns their IDs. Plugins that add no group stay chosen. A selection the
+// Plugins screen has not made yet is only the defaults, which it then
+// preselects for the minimal profile's settings (enterPlugins).
+func (m *Model) clearGroupPlugins() []string {
+	ids := m.s.Plugins
+	if m.pl.shown {
+		ids = m.chosenIDs()
+	}
+	var cleared []string
+	for _, id := range ids {
+		if len(state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, []string{id})) > 0 {
+			cleared = append(cleared, id)
+		}
+	}
+	if len(cleared) == 0 {
+		return nil
+	}
+	if m.pl.shown {
+		for _, id := range cleared {
+			m.setPlugin(id, false)
+		}
+		m.s.Plugins = m.chosenIDs()
+	} else {
+		m.s.Plugins = slices.DeleteFunc(slices.Clone(m.s.Plugins), func(id string) bool { return slices.Contains(cleared, id) })
+	}
+	return cleared
 }
 
 // checkSettings validates every value, for the screen and for n: the config
