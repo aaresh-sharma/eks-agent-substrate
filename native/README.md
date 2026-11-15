@@ -304,7 +304,10 @@ On a cluster the run creates, one on `system` makes the `system` group (and
 sandbox group whose class is off, or on a group a connected cluster lacks.
 `llm-gateway` is preselected only where the `system` group is made anyway.
 `--plugin-action deploy|verify` refuses a plugin on a cluster whose nodes
-lack the `ate.dev/pool` label.
+lack the `ate.dev/pool` label. `db-rotation` needs RDS (`Plugin.NeedsRDS`):
+with the bundled PostgreSQL the wizard refuses it on the Plugins screen, and
+`--plugin-action deploy|verify` refuses it before its first step on a control
+plane whose StatefulSet `ate-system/postgres` exists.
 
 On an installed cluster:
 

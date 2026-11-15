@@ -26,6 +26,7 @@ func init() {
 		{ID: "s-kata", Order: 4, Nodes: []string{"microvm"}, AddsNodes: true},
 		{ID: "s-nitro", Order: 5, Class: ClassNitro, NeedsAutoMode: "needs EKS Auto Mode"},
 		{ID: "s-agent", Order: 6, Nodes: []string{"gvisor"}, Requires: []string{"s-gw"}},
+		{ID: "s-rot", Order: 7, Nodes: []string{"system"}, NeedsRDS: "rotates the RDS logins"},
 	} {
 		plugin.Register(p)
 	}
@@ -150,6 +151,22 @@ func TestClassAndPluginRefusals(t *testing.T) {
 	s.SelectCluster(awsxCluster("c"), []string{"system"})
 	if why := s.PluginProblem(get("s-claw"), nil); why != "runs on the gvisor node group, which c does not have" {
 		t.Errorf("connected without gvisor: %q", why)
+	}
+	// A plugin that needs RDS (db-rotation) is refused with the bundled
+	// PostgreSQL, new cluster or connected, and offered with RDS.
+	for _, connected := range []bool{false, true} {
+		r := &Setup{NewClusterConfig: ClusterConfig{AutoMode: "on"}, SandboxClasses: "gvisor", Database: DatabaseBundled}
+		r.NewCluster("c")
+		if connected {
+			r.SelectCluster(awsxCluster("c"), []string{"system", "gvisor"})
+		}
+		if why := r.PluginProblem(get("s-rot"), nil); why != "rotates the RDS logins; the run uses the bundled PostgreSQL (Settings: Database)" {
+			t.Errorf("connected=%v, bundled: %q", connected, why)
+		}
+		r.Database = DatabaseRDS
+		if why := r.PluginProblem(get("s-rot"), nil); why != "" {
+			t.Errorf("connected=%v, RDS: %q", connected, why)
+		}
 	}
 	// A connected cluster's nodes decide: without a system node, a plugin
 	// on the system group is refused, since nothing is created there.

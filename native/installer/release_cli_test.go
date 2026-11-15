@@ -147,6 +147,30 @@ func TestCLIRefusesClassesTheClusterCannotRun(t *testing.T) {
 	}
 }
 
+// Both ways, through main(): db-rotation on a control plane on the bundled
+// PostgreSQL (StatefulSet ate-system/postgres exists) is refused, deploy and
+// verify alike, before the plugin's first step: no "Deploying plugin", so
+// its AWS half never runs. With RDS (no StatefulSet) verify goes on to the
+// plugin's own check.
+func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
+	overlay, err := filepath.Abs("../deploy/eks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundled := cluster("", "v1.0.0") + "\nget statefulset postgres=statefulset.apps/postgres"
+	for _, action := range []string{"deploy", "verify"} {
+		err, out := runMain(t, bundled, "--plugin-action", action, "--plugins", "db-rotation", "--eks-overlay", overlay)
+		if err == nil || !strings.Contains(out, "plugin db-rotation rotates the RDS logins, so it needs the RDS database; demo's control plane uses the bundled PostgreSQL") ||
+			strings.Contains(out, plugin.DeployLine) || strings.Contains(out, plugin.VerifyLine) {
+			t.Errorf("%s on the bundled PostgreSQL: %v\n%s", action, err, out)
+		}
+	}
+	_, out := runMain(t, cluster("", "v1.0.0"), "--plugin-action", "verify", "--plugins", "db-rotation", "--eks-overlay", overlay)
+	if strings.Contains(out, "uses the bundled PostgreSQL") || !strings.Contains(out, plugin.VerifyLine+"db-rotation") {
+		t.Errorf("verify with RDS did not reach the plugin's check:\n%s", out)
+	}
+}
+
 // Both ways: a deploy (--deploy-demo, --plugin-action deploy) on a release
 // the control plane does not run is refused before it applies anything, with
 // the fix: here mode3 was removed, so the record names no fork while the

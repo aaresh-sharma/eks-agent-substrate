@@ -314,6 +314,41 @@ func TestRunDeployNeedsAutoMode(t *testing.T) {
 	}
 }
 
+// Both ways: a plugin that needs RDS (db-rotation) is refused, deploy and
+// verify alike, before any child (its `setup-aws plugin` AWS half among
+// them), on a control plane on the bundled PostgreSQL, and deployed and
+// checked on one with RDS. Removing it is never refused.
+func TestRunRefusesAPluginThatNeedsRDSOnTheBundledDatabase(t *testing.T) {
+	f := &fakeCluster{}
+	o := runFixture(t, f, nil)
+	Register(Plugin{ID: "rot", Order: 4, SetupAWS: true, NeedsRDS: "rotates the RDS logins",
+		Deploy: hook(f, "deploy rot", nil), Verify: hook(f, "verify rot", nil), Remove: hook(f, "remove rot", nil)})
+	o.BundledDatabase = true
+	for _, action := range []string{ActionDeploy, ActionVerify} {
+		err := Run(context.Background(), io.Discard, action, []string{"rot"}, o)
+		if err == nil || !strings.Contains(err.Error(), "plugin rot rotates the RDS logins; demo's control plane uses the bundled PostgreSQL") {
+			t.Errorf("%s: want the RDS refusal, got %v", action, err)
+		}
+	}
+	if len(f.log) != 0 {
+		t.Errorf("ran after the refusal: %q", f.log)
+	}
+	if err := Run(context.Background(), io.Discard, ActionRemove, []string{"rot"}, o); err != nil || !slices.Contains(f.log, "remove rot") {
+		t.Errorf("remove on the bundled PostgreSQL: %v, %q", err, f.log)
+	}
+	f.log = nil
+	o.BundledDatabase = false
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"rot"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), io.Discard, ActionVerify, []string{"rot"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.log, "setup-aws rot") || !slices.Contains(f.log, "deploy rot") || !slices.Contains(f.log, "verify rot") {
+		t.Errorf("not deployed and checked with RDS: %q", f.log)
+	}
+}
+
 // Both ways: a plugin pinned to a node group the cluster's nodes lack is
 // refused, deploy and verify alike, before anything runs, naming the group;
 // with the group's nodes (Options.Pools) it deploys and checks. A plugin it

@@ -145,8 +145,9 @@ the setting under the cursor. `m` picks the minimal profile, `n` moves on.
 
 **Choose plugins** lists the optional parts with their time and hourly cost.
 `space` picks one, and the plugins it needs with it. A plugin is refused,
-with the reason, when it needs Auto Mode on a cluster without it, or runs on
-a sandbox node group whose class is off (OpenClaw on `gvisor`) or that a
+with the reason, when it needs Auto Mode on a cluster without it, needs the
+RDS database on a run with the bundled PostgreSQL (login rotation), or runs
+on a sandbox node group whose class is off (OpenClaw on `gvisor`) or that a
 cluster you connect lacks. One that runs on the `system` group makes that
 group on a new cluster, and the screen says so.
 

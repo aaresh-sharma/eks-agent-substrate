@@ -295,6 +295,8 @@ func (m Model) pluginsView() string {
 		switch {
 		case why != "" && p.NeedsAutoMode != "" && !m.s.AutoMode:
 			note = "needs Auto Mode"
+		case why != "" && p.NeedsRDS != "" && m.s.Database == state.DatabaseBundled:
+			note = "needs RDS"
 		case why != "":
 			note = "unavailable"
 		case len(m.requiredBy(p.ID)) > 0:

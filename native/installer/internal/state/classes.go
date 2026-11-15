@@ -211,7 +211,8 @@ func ClassProblem(c string, autoMode, newCluster bool, cluster string, pools []s
 
 // PluginProblem is why plugin p cannot be chosen, with chosen already
 // chosen, on s's cluster with s's sandbox classes, or "": it needs Auto
-// Mode, or nodes of a node group the cluster lacks or the run does not make,
+// Mode, or the RDS database when the run uses the bundled PostgreSQL, or
+// nodes of a node group the cluster lacks or the run does not make,
 // or (a plugin built on the counter demo) a gvisor or microvm class to run
 // the demo on. What p requires counts too. A new cluster is never short of
 // the system group: a plugin that runs on it makes it (nodegroups.For).
@@ -228,6 +229,9 @@ func (s *Setup) PluginProblem(p plugin.Plugin, chosen []string) string {
 		return err.Error()
 	}
 	for _, q := range ps {
+		if q.NeedsRDS != "" && s.Database == DatabaseBundled {
+			return q.NeedsRDS + "; the run uses the bundled PostgreSQL (Settings: Database)"
+		}
 		miss := plugin.MissingNodes(q, groups)
 		switch {
 		case len(miss) == 0:

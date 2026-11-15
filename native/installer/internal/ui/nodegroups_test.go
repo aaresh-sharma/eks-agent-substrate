@@ -318,3 +318,37 @@ func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 		}
 	}
 }
+
+// Both ways: login rotation (t-rot, db-rotation's shape) is refused on the
+// Plugins screen with the bundled PostgreSQL, with the reason and the row
+// note "needs RDS", so it can neither add the system group nor fail in the
+// plugins step; with RDS it is chosen.
+func TestPluginsScreenRefusesLoginRotationOnTheBundledDatabase(t *testing.T) {
+	for _, db := range []string{state.DatabaseBundled, state.DatabaseRDS} {
+		s := newSetup("fresh")
+		m := toSettings(t, testDeps(&recorder{}), s)
+		m = cursorTo(t, m, state.ClassMicroVM)
+		m = press(m, "enter")
+		if db == state.DatabaseBundled {
+			m = cursorTo(t, m, dbKey)
+			m = press(m, "enter")
+		}
+		m = press(m, "n")
+		m = press(pluginAt(m, "t-rot"), " ")
+		v := m.View()
+		if db == state.DatabaseBundled {
+			if m.pl.chosen["t-rot"] || m.notice != "Login rotation rotates the RDS logins, so it needs the RDS database; the run uses the bundled PostgreSQL (Settings: Database)" ||
+				!strings.Contains(v, "needs RDS") {
+				t.Errorf("bundled: chosen %v, notice %q\n%s", m.pl.chosen, m.notice, v)
+			}
+			m = press(m, "enter")
+			if m.m.Current() != state.Review || len(s.Plugins) != 0 || !slices.Equal(s.NodeGroups(), []string{"gvisor"}) {
+				t.Errorf("bundled: at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
+			}
+			continue
+		}
+		if !m.pl.chosen["t-rot"] || strings.Contains(v, "needs RDS") {
+			t.Errorf("RDS: chosen %v, notice %q\n%s", m.pl.chosen, m.notice, v)
+		}
+	}
+}
