@@ -279,13 +279,13 @@ func Page(title, ansi string) string {
 	return `<!doctype html>
 <html><head><meta charset="utf-8"><title>` + html.EscapeString(title) + `</title>
 <style>
-:root { --bg: #0f1923; --fg: #d5dbdb; }
+:root { --bg: #181818; --fg: #dadada; }
 html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden;
-  background: radial-gradient(ellipse at 30% 20%, #23344a 0%, #121c28 55%, #0b121a 100%); }
+  background: radial-gradient(ellipse at 30% 20%, #333333 0%, #1b1b1b 55%, #111111 100%); }
 .win { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  background: var(--bg); border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 0 0 1px #2c3e50; overflow: hidden; }
-.bar { height: 40px; background: #1b2735; display: flex; align-items: center; padding: 0 18px; gap: 9px;
-  font: 15px "DejaVu Sans", sans-serif; color: #8d99a6; }
+  background: var(--bg); border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 0 0 1px #3c3c3c; overflow: hidden; }
+.bar { height: 40px; background: #262626; display: flex; align-items: center; padding: 0 18px; gap: 9px;
+  font: 15px "DejaVu Sans", sans-serif; color: #989898; }
 .dot { width: 13px; height: 13px; border-radius: 50%; }
 .bar .t { flex: 1; text-align: center; margin-right: 60px; }
 pre { margin: 0; padding: 18px 24px 22px; color: var(--fg);
