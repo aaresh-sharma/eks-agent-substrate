@@ -207,17 +207,6 @@ func ClassProblem(c string, autoMode, newCluster bool, cluster string, pools []s
 	return ""
 }
 
-// ClassesProblem is the first class of classes that cannot be chosen for
-// s's cluster, with why, or "".
-func (s *Setup) ClassesProblem(classes string) string {
-	for _, c := range ParseClasses(classes) {
-		if why := ClassProblem(c, s.AutoMode, s.ClusterIsNew, s.ClusterName, s.ClusterPools); why != "" {
-			return ClassTitle(c) + " " + why
-		}
-	}
-	return ""
-}
-
 // PluginProblem is why plugin p cannot be chosen, with chosen already
 // chosen, on s's cluster with s's sandbox classes, or "": it needs Auto
 // Mode, or nodes of a node group the cluster lacks or the run does not make,
