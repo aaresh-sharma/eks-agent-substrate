@@ -70,6 +70,30 @@ func init() {
 	plugin.Register(plugin.Plugin{ID: "cp-test-fork", Order: 2, Needs: plugin.Needs{
 		Source: &plugin.Source{Repo: "https://example.invalid/fork.git", Commit: forkCommit, Tag: "v1.0.0-fork", ImageRepo: "ghcr.io/example/fork"},
 	}})
+	plugin.Register(plugin.Plugin{ID: "cp-test-auto", Order: 3, NeedsAutoMode: "needs EKS Auto Mode"})
+}
+
+// A plugin that needs Auto Mode (the AWS Nitro sandbox class's) stops a
+// deploy on a standard cluster before the tree is fetched, naming it; on an
+// Auto Mode cluster the same deploy goes on.
+func TestDeployRefusesAnAutoModePluginOffAutoMode(t *testing.T) {
+	for _, auto := range []bool{false, true} {
+		f := &deployFakes{}
+		o := deployEnv(t, f)
+		describeCluster = func(context.Context, string, string, string) (awsx.Cluster, error) {
+			return awsx.Cluster{Name: "demo", Status: "ACTIVE", AutoMode: auto, Endpoint: "https://example.invalid",
+				CA: base64.StdEncoding.EncodeToString([]byte("ca"))}, nil
+		}
+		o.Plugins = []string{"cp-test-auto"}
+		err := Deploy(context.Background(), io.Discard, o)
+		fetched := slices.ContainsFunc(f.calls, func(c string) bool { return strings.HasPrefix(c, "fetch") })
+		if auto != (err == nil) || auto != fetched {
+			t.Errorf("auto=%v: %v, fetched %v", auto, err, fetched)
+		}
+		if !auto && (err == nil || !strings.Contains(err.Error(), "cp-test-auto needs EKS Auto Mode")) {
+			t.Errorf("auto=false: %v", err)
+		}
+	}
 }
 
 // Both directions: with no plugin the flags are install.sh's defaults (one

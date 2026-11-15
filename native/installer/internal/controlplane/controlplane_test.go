@@ -68,17 +68,19 @@ func TestAteSetupArgsForEKS(t *testing.T) {
 // standard cluster has no default class).
 func TestStorageClassFlagPerModeAndDatabase(t *testing.T) {
 	for _, tc := range []struct {
-		auto           bool
+		auto, system   bool
 		db, class      string
 		cordon, caFile bool
 	}{
-		{auto: true, db: DatabaseRDS, cordon: true, caFile: true},
-		{auto: false, db: DatabaseRDS, caFile: true},
-		{auto: true, db: DatabaseBundled, class: "substrate-eks-auto-ebs"},
-		{auto: false, db: DatabaseBundled, class: "substrate-eks-ebs"},
+		{auto: true, system: true, db: DatabaseRDS, cordon: true, caFile: true},
+		// No system node group (NODE_GROUPS=none): nothing to cordon to.
+		{auto: true, db: DatabaseRDS, caFile: true},
+		{auto: false, system: true, db: DatabaseRDS, caFile: true},
+		{auto: true, system: true, db: DatabaseBundled, class: "substrate-eks-auto-ebs"},
+		{auto: false, system: true, db: DatabaseBundled, class: "substrate-eks-ebs"},
 	} {
 		o := opts()
-		o.AutoMode, o.Database, o.caFile = tc.auto, tc.db, "/tmp/x/rds-ca.pem"
+		o.AutoMode, o.systemPool, o.Database, o.caFile = tc.auto, tc.system, tc.db, "/tmp/x/rds-ca.pem"
 		a := AteSetupArgs(o, "demo")
 		if got := flag(a, "--ateapi-postgres-storage-class"); got != tc.class || (tc.class == "") == slices.Contains(a, "--ateapi-postgres-storage-class") {
 			t.Errorf("auto=%v %s: storage class %q, want %q: %v", tc.auto, tc.db, got, tc.class, a)
@@ -327,18 +329,66 @@ func TestRDSRefusesAnotherDeploymentsInstance(t *testing.T) {
 }
 
 // A missing pool fails at once, naming the label, instead of leaving the
-// Job or the cordoned control plane Pending.
+// Job or the cordoned control plane Pending: the system pool on a standard
+// cluster, and on Auto Mode a system pool without the infra label.
 func TestMissingNodePoolStopsBeforeTheDatabase(t *testing.T) {
-	for _, sel := range []string{systemPoolSelector, systemInfraSelector} {
-		k := &fakeKube{noNodes: sel}
+	for _, tc := range []struct {
+		sel  string
+		auto bool
+	}{{systemPoolSelector, false}, {systemInfraSelector, true}} {
+		k := &fakeKube{noNodes: tc.sel}
 		o, tree := rdsFixture(t, k, "demo.us-west-2")
+		o.AutoMode = tc.auto
 		newDBClients = func(context.Context, string, string) (RDSAPI, SecretsAPI, error) {
 			t.Fatal("read the database before checking the nodes")
 			return nil, nil, nil
 		}
 		err := install(context.Background(), io.Discard, o, "demo", "/k", tree)
-		if err == nil || !strings.Contains(err.Error(), sel) {
-			t.Errorf("%s: want an error naming it, got %v", sel, err)
+		if err == nil || !strings.Contains(err.Error(), tc.sel) {
+			t.Errorf("%s: want an error naming it, got %v", tc.sel, err)
+		}
+	}
+}
+
+// RDS on an Auto Mode cluster with no system node group (NODE_GROUPS=none):
+// no cordon, and the bootstrap Job pinned to Auto Mode's nodes with no
+// toleration. With the system group (the other direction) the Job keeps its
+// system pin and toleration and ate-setup cordons.
+func TestRDSOnAutoModeWithoutASystemGroup(t *testing.T) {
+	for _, system := range []bool{false, true} {
+		k := &fakeKube{}
+		if !system {
+			k.noNodes = systemPoolSelector
+		}
+		o, tree := rdsFixture(t, k, "demo.us-west-2")
+		var log bytes.Buffer
+		if err := install(context.Background(), &log, o, "demo", "/k", tree); err != nil {
+			t.Fatalf("system=%v: %v", system, err)
+		}
+		ate := k.find("./cmd/ate-setup")
+		if ate == nil || slices.Contains(ate.Argv, "--cordon-system-infra-components") != system {
+			t.Errorf("system=%v: ate-setup %v", system, ate)
+		}
+		var job []byte
+		for _, c := range k.cmds {
+			if bytes.Contains(c.Stdin, []byte("kind: Job")) {
+				job = c.Stdin
+			}
+		}
+		// Each property on its own, so a Job that loses only one of them
+		// is caught.
+		for what, want := range map[string]bool{
+			"ate.dev/pool: system":                 system,
+			"tolerations:":                         system,
+			"eks.amazonaws.com/compute-type: auto": !system,
+			bootstrapImage:                         true,
+		} {
+			if bytes.Contains(job, []byte(what)) != want {
+				t.Errorf("system=%v: the Job has %q: %v, want %v:\n%s", system, what, !want, want, job)
+			}
+		}
+		if strings.Contains(log.String(), NoSystemPoolLine) == system {
+			t.Errorf("system=%v: log %q", system, log.String())
 		}
 	}
 }

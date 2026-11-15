@@ -55,8 +55,9 @@ type Options struct {
 	SnapBucket, AssetBucket string
 	SandboxClasses          string
 	// AutoMode, read off the cluster by Deploy, pins the control plane to
-	// the system node group (--cordon-system-infra-components) with RDS, and
-	// picks the StorageClass's EBS driver (storageclass.go).
+	// the system node group (--cordon-system-infra-components) with RDS when
+	// the cluster has one, and picks the StorageClass's EBS driver
+	// (storageclass.go).
 	AutoMode bool
 	// Database is DatabaseRDS (the default, also when empty) or
 	// DatabaseBundled; main.go sets it from --database.
@@ -76,6 +77,9 @@ type Options struct {
 
 	// caFile is the RDS CA bundle Deploy downloaded, for ate-setup.
 	caFile string
+	// systemPool is a node labeled ate.dev/pool=system, read with RDS
+	// (prepareRDS): without one, on Auto Mode, nothing is cordoned.
+	systemPool bool
 	// clusterOwned is a cluster this installer created, read by Deploy;
 	// volumeTags are the owner tag and TAGS, for the StorageClass.
 	clusterOwned bool
@@ -217,10 +221,12 @@ func AteSetupArgs(o Options, kubeContext string) []string {
 		extra = append(extra, "--ateapi-postgres-server-ca-file", o.caFile)
 		// The Auto Mode system node group is tainted, so other pods go to
 		// Auto Mode nodes; this pins every control plane Deployment there,
-		// with the matching toleration (AUTO_MODE=on). Not with
-		// the bundled PostgreSQL: ate-setup then also needs a dedicated
-		// ate.dev/workloadType=ate-postgres pool, which no cluster here has.
-		if o.AutoMode {
+		// with the matching toleration (AUTO_MODE=on). Not without a system
+		// group (NODE_GROUPS=none): the control plane then runs on Auto
+		// Mode's nodes. Not with the bundled PostgreSQL: ate-setup then also
+		// needs a dedicated ate.dev/workloadType=ate-postgres pool, which no
+		// cluster here has.
+		if o.AutoMode && o.systemPool {
 			extra = append(extra, "--cordon-system-infra-components")
 		}
 	case o.db() == DatabaseBundled:
@@ -365,6 +371,14 @@ func resolvePlugins(ctx context.Context, w io.Writer, o *Options, po *plugin.Opt
 	ps, err := plugin.Resolve(append(rec, o.Plugins...))
 	if err != nil {
 		return nil, err
+	}
+	// Before anything is fetched or applied: a control plane carrying a
+	// plugin that cannot run here (the AWS Nitro sandbox class's, off Auto
+	// Mode) would install its release for nothing.
+	for _, p := range ps {
+		if p.NeedsAutoMode != "" && !o.AutoMode {
+			return nil, fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
+		}
 	}
 	if o.Needs, err = plugin.Merge(ps); err != nil {
 		return nil, err
