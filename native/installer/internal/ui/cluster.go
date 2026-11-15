@@ -460,7 +460,7 @@ func (m Model) clusterPanel() string {
 		}
 		lines = append(lines, "",
 			theme.Subtle.Render("Created in "+m.s.Region+" by setup-aws create cluster, with:"),
-			para.Render(m.s.NewClusterConfig.Summary(state.NewNodeGroups(m.s.NewClusterConfig.AutoMode == "on", m.s.SandboxClasses, m.s.Plugins))),
+			para.Render(m.s.NewClusterConfig.Summary(state.NewNodeGroups(m.s.NewClusterConfig.AutoMode == "on", m.s.Database, m.s.SandboxClasses, m.s.Plugins))),
 			theme.Subtle.Render("Tags: "+m.s.Tags+" (from TAGS), plus the deployment owner tag."),
 			theme.Fainted.Render("Change these with KUBERNETES_VERSION, AUTO_MODE, SANDBOX_CLASSES, *_INSTANCE_TYPE, *_NODES, EKS_PUBLIC_ACCESS_CIDRS."))
 	case "probing":

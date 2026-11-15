@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/theme"
 )
 
@@ -61,17 +62,27 @@ func (m Model) unavailable(p plugin.Plugin) string {
 
 // enterPlugins preselects, the first time, --plugins or else the Default
 // plugins, with what they require. A preselected plugin this cluster cannot
-// take is dropped, and the screen says why.
+// take is dropped, and the screen says why. On a cluster the run creates, a
+// Default plugin that would add a node group is not preselected: the LLM
+// gateway on Auto Mode with the bundled PostgreSQL (or the AWS Nitro
+// sandbox alone) runs on a system group the selection does not otherwise
+// make. Choosing it makes the group.
 func (m *Model) enterPlugins() {
 	pl := m.pl
 	if !pl.shown {
 		pl.shown = true
 		ids := m.s.Plugins
 		if ids == nil {
+			groups := m.s.NodeGroups()
 			for _, p := range choosable() {
-				if p.Default {
-					ids = append(ids, p.ID)
+				if !p.Default {
+					continue
 				}
+				if with := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, []string{p.ID}); m.s.ClusterIsNew && !slices.Equal(with, groups) {
+					m.notice = fmt.Sprintf("not preselected: %s (adds the %s node group)", p.ID, strings.Join(added(groups, with), " and "))
+					continue
+				}
+				ids = append(ids, p.ID)
 			}
 		}
 		pl.chosen = map[string]bool{}
@@ -83,6 +94,30 @@ func (m *Model) enterPlugins() {
 	}
 	m.dropUnavailable()
 	pl.cursor = min(pl.cursor, max(len(choosable())-1, 0))
+}
+
+// addedGroups are the node groups choosing p adds to a cluster the run
+// creates, given the rest of the selection: the system group for a plugin
+// that runs on it where nothing else makes it, the microvm group for
+// mode 3 without the microvm class.
+func (m Model) addedGroups(p plugin.Plugin) []string {
+	if !m.s.ClusterIsNew {
+		return nil
+	}
+	rest := slices.DeleteFunc(m.chosenIDs(), func(id string) bool { return id == p.ID })
+	without := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, rest)
+	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, append(rest, p.ID)))
+}
+
+// added are the groups of with that groups lacks.
+func added(groups, with []string) []string {
+	var out []string
+	for _, g := range with {
+		if !slices.Contains(groups, g) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // dropUnavailable clears every chosen plugin this run cannot take (and what
@@ -160,7 +195,7 @@ func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		m.setPlugin(p.ID, !pl.chosen[p.ID])
 		// Clearing one may take away what another runs on (mode 3's
-		// microvm group brings the system group on Auto Mode).
+		// microvm group).
 		m.dropUnavailable()
 	case "enter":
 		if m.dropUnavailable() {
@@ -253,6 +288,8 @@ func (m Model) pluginsView() string {
 	}
 	if why := m.unavailable(p); why != "" {
 		b.WriteString(theme.Warning.Render(indent(para.Render("Not available: "+why+"."), "  ")) + "\n")
+	} else if g := m.addedGroups(p); len(g) > 0 {
+		b.WriteString(theme.Subtle.Render(indent(para.Render("Adds the "+strings.Join(g, " and ")+" node group to the new cluster (Review shows its cost)."), "  ")) + "\n")
 	}
 	ps := resolved(m.chosenIDs())
 	minutes, usd := 0, 0.0

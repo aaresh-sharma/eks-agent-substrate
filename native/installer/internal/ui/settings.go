@@ -86,8 +86,9 @@ func settingsFields(newCluster bool, groups []string) []field {
 
 // classesHelp is what every class's help ends with: the classes decide the
 // node groups.
-const classesHelp = " The classes decide a new cluster's node groups: gVisor and microVM make theirs, " +
-	"the system group comes with either, and with neither an Auto Mode cluster gets no node group at all " +
+const classesHelp = " The classes decide a new cluster's node groups: gVisor and microVM make theirs. " +
+	"The system group comes without Auto Mode, with either of them and RDS (the control plane is pinned there), " +
+	"and with a plugin that runs on it. With neither class and no such plugin an Auto Mode cluster gets no node group at all " +
 	"(the control plane, the bundled PostgreSQL and every controller run on Auto Mode nodes). Press m for that minimal profile."
 
 // help is a setting's explanation when config.env has no comment above it.
@@ -103,7 +104,9 @@ var help = map[string]string{
 	state.ClassNitro: "The AWS Nitro sandbox makes each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox) " +
 		"on nodes Auto Mode launches for it, so it needs Auto Mode and makes no node group. It installs the fork's release " +
 		"(one release per install), and is set up and checked in its own step after the control plane." + classesHelp,
-	dbKey:                   "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster.",
+	dbKey: "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster. " +
+		"On a new Auto Mode cluster with a gVisor or microVM group, RDS pins the control plane to the system node group, which is made for it; " +
+		"with the bundled PostgreSQL the control plane runs on Auto Mode nodes, and the system group is made only for a plugin that runs on it.",
 	"SYSTEM_INSTANCE_TYPE":  "The system node group runs the controllers pinned to it: the control plane with RDS on Auto Mode, and the plugins' controllers.",
 	"GVISOR_INSTANCE_TYPE":  "The gvisor node group runs gVisor actors.",
 	"MICROVM_INSTANCE_TYPE": "The microvm node group runs microVM actors; its instance type needs nested virtualization (m8i, c8i, r8i).",
@@ -151,7 +154,7 @@ func (m *Model) settingsAutoMode() bool {
 // settingsGroups are the node groups of the cluster as Settings has it now.
 func (m *Model) settingsGroups() []string {
 	if m.s.ClusterIsNew {
-		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[classKey], m.s.Plugins)
+		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[dbKey], m.set.values[classKey], m.s.Plugins)
 	}
 	return m.s.NodeGroups()
 }

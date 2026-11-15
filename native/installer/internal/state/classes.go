@@ -13,11 +13,13 @@ package state
 //     by the plugin whose Class it is (mode3-iso), which also sets the
 //     install's release to the fork that plugin installs.
 //
-// A cluster the run creates gets the node groups its classes and plugins
-// need, by the rule setup-aws applies (nodegroups.For): the gvisor and
-// microvm groups of those classes, plus the microvm group for a plugin that
-// adds it (mode 3), plus the system group without Auto Mode or with any
-// sandbox group. So Auto Mode with the nitro class alone makes no node group.
+// A cluster the run creates gets the node groups its classes, database and
+// plugins need, by the rule setup-aws applies (nodegroups.For): the gvisor
+// and microvm groups of those classes, plus the microvm group for a plugin
+// that adds it (mode 3), plus the system group without Auto Mode, with RDS
+// and a sandbox group (the control plane is cordoned onto it), or with a
+// plugin that runs on it. So Auto Mode with the bundled PostgreSQL makes
+// only the sandbox groups, and with the nitro class alone no node group.
 // A connected cluster's node groups are the ones its nodes are labeled with
 // (Setup.ClusterPools), and a class or plugin whose nodes are missing is
 // refused.
@@ -149,17 +151,17 @@ func WithClassPlugins(ids []string, classes string) []string {
 }
 
 // NewNodeGroups are the node groups `setup-aws create cluster` makes for a
-// cluster with autoMode, these classes and these chosen plugins (and what
-// they require): the gvisor and microvm groups of the classes and of the
-// plugins that add theirs (plugin.AddsNodes), and the system group as
-// nodegroups.For decides.
-func NewNodeGroups(autoMode bool, classes string, plugins []string) []string {
-	var sandbox []string
-	for _, c := range DemoClasses(classes) {
-		sandbox = append(sandbox, c)
-	}
+// cluster with autoMode, this database (DatabaseRDS, also when empty, or
+// DatabaseBundled), these classes and these chosen plugins (and what they
+// require): the gvisor and microvm groups of the classes and of the plugins
+// that add theirs (plugin.AddsNodes), and the system group as
+// nodegroups.For decides, pinned when one of the plugins runs on it.
+func NewNodeGroups(autoMode bool, database, classes string, plugins []string) []string {
+	sandbox := DemoClasses(classes)
+	pinned := false
 	ps, _ := plugin.Resolve(WithClassPlugins(plugins, classes))
 	for _, p := range ps {
+		pinned = pinned || slices.Contains(p.Nodes, nodegroups.System)
 		if !p.AddsNodes {
 			continue
 		}
@@ -169,7 +171,7 @@ func NewNodeGroups(autoMode bool, classes string, plugins []string) []string {
 			}
 		}
 	}
-	return nodegroups.For(autoMode, sandbox)
+	return nodegroups.For(autoMode, database != DatabaseBundled, pinned, sandbox)
 }
 
 // InstallPlugins are the plugins the install carries: the chosen ones and
@@ -182,7 +184,7 @@ func (s *Setup) InstallPlugins() []string { return WithClassPlugins(s.Plugins, s
 // nodes come from.
 func (s *Setup) NodeGroups() []string {
 	if s.ClusterIsNew {
-		return NewNodeGroups(s.AutoMode, s.SandboxClasses, s.Plugins)
+		return NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, s.Plugins)
 	}
 	var out []string
 	for _, g := range nodegroups.All {
@@ -222,14 +224,15 @@ func (s *Setup) ClassesProblem(classes string) string {
 // chosen, on s's cluster with s's sandbox classes, or "": it needs Auto
 // Mode, or nodes of a node group the cluster lacks or the run does not make,
 // or (a plugin built on the counter demo) a gvisor or microvm class to run
-// the demo on. What p requires counts too.
+// the demo on. What p requires counts too. A new cluster is never short of
+// the system group: a plugin that runs on it makes it (nodegroups.For).
 func (s *Setup) PluginProblem(p plugin.Plugin, chosen []string) string {
 	if p.NeedsAutoMode != "" && !s.AutoMode {
 		return p.NeedsAutoMode + "; " + s.ClusterName + " has Auto Mode off"
 	}
 	groups := s.NodeGroups()
 	if s.ClusterIsNew {
-		groups = NewNodeGroups(s.AutoMode, s.SandboxClasses, append(slices.Clone(chosen), p.ID))
+		groups = NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, append(slices.Clone(chosen), p.ID))
 	}
 	ps, err := plugin.Resolve([]string{p.ID})
 	if err != nil {
@@ -241,8 +244,6 @@ func (s *Setup) PluginProblem(p plugin.Plugin, chosen []string) string {
 		case len(miss) == 0:
 		case !s.ClusterIsNew:
 			return fmt.Sprintf("runs on the %s node group, which %s does not have", strings.Join(miss, " and "), s.ClusterName)
-		case slices.Contains(miss, nodegroups.System):
-			return "runs on the system node group, which an Auto Mode cluster gets only with the gVisor or microVM sandbox class (Settings)"
 		default:
 			return fmt.Sprintf("runs on the %s node group: turn on its sandbox class in Settings", strings.Join(miss, " and "))
 		}

@@ -523,17 +523,41 @@ func TestCreateClusterSomeNodeGroups(t *testing.T) {
 	}
 }
 
-// The rule refuses, before any write, a selection that has nothing to run
-// sandboxes on (no Auto Mode, no sandbox group) or a sandbox group without
-// the system group.
+// NODE_GROUPS=gvisor on Auto Mode (the bundled PostgreSQL with no plugin on
+// the system group): the gvisor group and its template, and no system group
+// or template. The node IAM role is still made: the gvisor group's nodes
+// use it.
+func TestCreateClusterSandboxGroupWithoutSystem(t *testing.T) {
+	f := newClusterFake()
+	if err := clusterTestRun(t, f, false, func(c *clusterConfig) { c.NodeGroups = "gvisor" }).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := creates(f.writes)
+	for _, k := range []string{"CreateNodegroup gvisor", "CreateLaunchTemplate demo-gvisor-nodes", "CreateRole demo-us-west-2-eks-node"} {
+		if got[k] != 1 {
+			t.Errorf("%s: %d, want 1", k, got[k])
+		}
+	}
+	for _, k := range []string{"CreateNodegroup system", "CreateLaunchTemplate demo-system-nodes", "CreateNodegroup microvm", "CreateLaunchTemplate demo-microvm-nested-virt"} {
+		if got[k] != 0 {
+			t.Errorf("%s: %d, want 0", k, got[k])
+		}
+	}
+	if len(f.ngIn) != 1 || f.ngIn["gvisor"] == nil {
+		t.Errorf("node groups %v, want gvisor only", sortedKeysOf(f.ngIn))
+	}
+}
+
+// The rule refuses, before any write, a standard cluster with nothing to
+// run sandboxes or the control plane on (no sandbox group, or no system
+// group) and an unknown group. On Auto Mode a sandbox group without the
+// system group is a cluster (TestCreateClusterSandboxGroupWithoutSystem).
 func TestCreateClusterRefusesNodeGroupsOutsideTheRule(t *testing.T) {
 	for _, c := range []struct {
 		auto, groups, want string
 	}{
 		{"", "none", "needs the gvisor or microvm node group"},
 		{"", "gvisor", "needs the system node group"},
-		{"on", "microvm", "need the system node group too"},
-		{"on", "system", "comes only with the gvisor or microvm node group"},
 		{"on", "system,kata", `unknown node group "kata"`},
 	} {
 		f := newClusterFake()

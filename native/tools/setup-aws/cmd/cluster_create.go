@@ -70,9 +70,9 @@ for the caller; the add-ons; and the managed node groups NODE_GROUPS names
 (by default system, gvisor and microvm), each with its launch template
 (IMDSv2 only, hop limit 1, encrypted gp3, nested virtualization on microvm).
 Without Auto Mode the system group and a gvisor or microvm group are
-required; with it the system group comes with a gvisor or microvm group, and
-NODE_GROUPS=none makes no node group (and no node IAM role): Auto Mode's
-nodes run everything. Idempotent: a rerun creates only what is missing, and
+required. With it any of the three, or none, will do: Auto Mode's nodes run
+what no group is made for, and NODE_GROUPS=none makes no node group (and no
+node IAM role). Idempotent: a rerun creates only what is missing, and
 --plan changes nothing.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		e, err := newEnv(cmd.Context())
