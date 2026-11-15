@@ -351,7 +351,8 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 	sum := sha256.Sum256(archive)
 	good := hex.EncodeToString(sum[:])
 	wrong := strings.Repeat("0", 64)
-	names := []string{"substrate-eks_9.8.7_linux_amd64.tar.gz", "substrate-eks_9.8.7_linux_arm64.tar.gz", "substrate-eks_9.8.7_darwin_arm64.tar.gz"}
+	names := []string{"substrate-eks_9.8.7_linux_amd64.tar.gz", "substrate-eks_9.8.7_linux_arm64.tar.gz", "substrate-eks_9.8.7_darwin_arm64.tar.gz",
+		"substrate-eks_9.8.7-SNAPSHOT-abc1234_linux_amd64.tar.gz"}
 	sums := func(skip, bad string) string {
 		var b strings.Builder
 		for _, n := range names {
@@ -369,6 +370,7 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 	for _, c := range []struct {
 		name, unameS, unameM, checksums string
 		args                            []string
+		tag                             string   // the release it uses; "" is v9.8.7
 		archive                         string   // the one it must download
 		latest                          bool     // it looks up the latest release first
 		passed                          []string // the installer's arguments
@@ -381,6 +383,9 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 			args: []string{"--from-release", "--dry-run"}, archive: names[2], latest: true, passed: []string{"--dry-run"}},
 		{name: "aarch64, no installer flags", unameS: "Linux", unameM: "aarch64", checksums: sums("", ""),
 			args: []string{"--from-release", "v9.8.7"}, archive: names[1], passed: nil},
+		{name: "pre-release tag", unameS: "Linux", unameM: "x86_64", checksums: sums("", ""),
+			args: []string{"--from-release", "v9.8.7-SNAPSHOT-abc1234", "--version"}, tag: "v9.8.7-SNAPSHOT-abc1234",
+			archive: names[3], passed: []string{"--version"}},
 		{name: "wrong checksum", unameS: "Linux", unameM: "x86_64", checksums: sums("", names[0]),
 			args: []string{"--from-release", "v9.8.7", "--dry-run"}, archive: names[0],
 			refusal: "has sha256 " + good + ", but the v9.8.7 checksums.txt says " + wrong + "; refusing it"},
@@ -426,7 +431,12 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 		b, runErr := cmd.CombinedOutput()
 		out := string(b)
 
-		extracted := filepath.Join(home, ".substrate-eks", "releases", "v9.8.7")
+		tag := c.tag
+		if tag == "" {
+			tag = "v9.8.7"
+		}
+		releases := filepath.Join(home, ".substrate-eks", "releases")
+		extracted := filepath.Join(releases, tag)
 		_, statErr := os.Stat(filepath.Join(extracted, "substrate-eks"))
 		passed, argsErr := os.ReadFile(argsOut)
 		logged, _ := os.ReadFile(curlLog)
@@ -444,7 +454,7 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 			wantURLs = append(wantURLs, base+"/latest")
 		}
 		if c.archive != "" {
-			wantURLs = append(wantURLs, base+"/download/v9.8.7/"+c.archive, base+"/download/v9.8.7/checksums.txt")
+			wantURLs = append(wantURLs, base+"/download/"+tag+"/"+c.archive, base+"/download/"+tag+"/checksums.txt")
 		}
 		if !slices.Equal(urls, wantURLs) {
 			t.Errorf("%s: downloaded %q, want %q\n%s", c.name, urls, wantURLs, out)
@@ -454,8 +464,8 @@ func TestLauncherFromReleaseVerifiesTheArchive(t *testing.T) {
 			if runErr == nil || !strings.Contains(out, c.refusal) {
 				t.Errorf("%s: want the refusal %q:\n%s", c.name, c.refusal, out)
 			}
-			if _, err := os.Stat(extracted); err == nil {
-				t.Errorf("%s: extracted %s after a refusal", c.name, extracted)
+			if _, err := os.Stat(releases); err == nil {
+				t.Errorf("%s: made %s after a refusal", c.name, releases)
 			}
 			if argsErr == nil {
 				t.Errorf("%s: ran the installer after a refusal (args %q)", c.name, passed)

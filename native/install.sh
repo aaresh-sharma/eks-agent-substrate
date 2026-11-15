@@ -122,8 +122,9 @@ fetch_release() {
         fi
         version="${latest##*/}"
     fi
-    # The tag names a directory below, so it is checked before any use.
-    local tag_re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+    # The tag names a directory below, so it is checked before any use: one
+    # path component, vX.Y.Z with an optional semver pre-release.
+    local tag_re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
     if [[ ! "${version}" =~ ${tag_re} ]]; then
         echo "error: '${version}' is not a substrate-eks release tag such as v2.0.0; name one: --from-release v2.0.0" >&2
         exit 1
