@@ -9,9 +9,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/demo"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/mode3"
@@ -189,17 +191,38 @@ type fake struct {
 	// applies is the stdin of every `kubectl apply -f -`, in order.
 	applies []string
 	tmpls   map[string]string
+	// deleted are the counter image tags Remove deleted.
+	deleted []string
+}
+
+// testAppliedPool is NodePool ate-isolated as the API server returns it,
+// with arch as its one kubernetes.io/arch value. newFake answers arm64, not
+// testGeneralPurpose's amd64, so a build that read the source NodePool (or
+// assumed amd64) would show.
+func testAppliedPool(arch string) string {
+	return `{"apiVersion":"karpenter.sh/v1","kind":"NodePool","metadata":{"name":"ate-isolated"},
+ "spec":{"template":{"spec":{"requirements":[{"key":"karpenter.sh/capacity-type","operator":"In","values":["on-demand"]},
+  {"key":"kubernetes.io/arch","operator":"In","values":["` + arch + `"]}]}}}}`
 }
 
 func newFake(t *testing.T) *fake {
-	f := &fake{t: t, out: map[string][]string{}, stdin: map[string]string{}, tmpls: map[string]string{"counter-mode3": "ecr/c1/counter@sha256:c0ffee"}}
-	prevExec, prevDemo, prevInterval, prevHere := plugin.Exec, mode3.Demo, mode3.Interval, createdHere
+	f := &fake{t: t, out: map[string][]string{}, stdin: map[string]string{}, tmpls: map[string]string{}}
+	prevExec, prevDemo, prevInterval, prevHere, prevDelete := plugin.Exec, mode3.Demo, mode3.Interval, createdHere, deleteImage
 	t.Cleanup(func() {
-		plugin.Exec, mode3.Demo, mode3.Interval, createdHere = prevExec, prevDemo, prevInterval, prevHere
+		plugin.Exec, mode3.Demo, mode3.Interval, createdHere, deleteImage = prevExec, prevDemo, prevInterval, prevHere, prevDelete
 	})
 	mode3.Interval = 0
 	createdHere = func(context.Context, plugin.Options) (bool, error) { return true, nil }
+	deleteImage = func(_ context.Context, _ io.Writer, o plugin.Options, tag string) error {
+		if o.Cluster != "c1" {
+			return fmt.Errorf("deleted from cluster %q", o.Cluster)
+		}
+		f.log = append(f.log, "delete image "+tag)
+		f.deleted = append(f.deleted, tag)
+		return nil
+	}
 	f.out["get nodeclass ate-isolated"] = []string{testReady}
+	f.out["get nodepool ate-isolated"] = []string{testAppliedPool("arm64")}
 	plugin.Exec = func(_ context.Context, w io.Writer, c plugin.Cmd) error {
 		if len(c.Argv) < 3 || strings.Join(c.Argv[:3], " ") != "kubectl --kubeconfig /kc" {
 			return fmt.Errorf("not the installer's kubectl: %q", c.Argv)
@@ -231,6 +254,14 @@ func newFake(t *testing.T) *fake {
 		KubectlAte: func(context.Context, io.Writer, demo.Options, string) (string, error) {
 			f.log = append(f.log, "build kubectl-ate")
 			return "/bin/kubectl-ate", nil
+		},
+		// No CounterImage: reading a node pool's nodes would panic here.
+		CounterImageFor: func(_ context.Context, _ io.Writer, o demo.Options, tree, arch, tag string) (string, error) {
+			if o.Tag != mode3.Tag || o.ImageRepo != mode3.ImageRepo || filepath.Base(tree) != "substrate-"+mode3.Tag {
+				return "", fmt.Errorf("built from %s with %+v, not the fork's", tree, o)
+			}
+			f.log = append(f.log, "counter image "+arch+" "+tag)
+			return "ecr/c1/counter@sha256:c0ffee", nil
 		},
 		Pin: func(_ context.Context, _ demo.Options, tagged string) (string, error) {
 			return tagged + "@sha256:pinned", nil
@@ -282,13 +313,60 @@ func (f *fake) has(entries ...string) error {
 	return nil
 }
 
+// mode3-iso stands alone: it requires no plugin, needs Auto Mode, and
+// declares mode 3's own Needs (the same Source, not a copy), so resolving it
+// alone yields only mode3-iso, with the fork's release and NetworkWorkers.
 func TestRegistered(t *testing.T) {
 	p, ok := plugin.Get(ID)
-	if !ok || len(p.Requires) != 1 || p.Requires[0] != mode3.ID || p.SetupAWS || p.Needs.Source != nil || p.NeedsAutoMode == "" {
+	if !ok || len(p.Requires) != 0 || p.SetupAWS || p.NeedsAutoMode == "" {
 		t.Errorf("plugin = %+v", p)
+	}
+	if p.Needs.Source != mode3.Needs.Source || !slices.Equal(p.Needs.Preview, mode3.Needs.Preview) {
+		t.Errorf("needs = %+v, want mode3.Needs %+v", p.Needs, mode3.Needs)
 	}
 	if err := plugin.Check(); err != nil {
 		t.Error(err)
+	}
+	ps, err := plugin.Resolve([]string{ID})
+	if err != nil || len(ps) != 1 || ps[0].ID != ID {
+		t.Fatalf("Resolve(%s) = %v, %v", ID, ps, err)
+	}
+	fork := plugin.Release{Tag: mode3.Tag, ImageRepo: mode3.ImageRepo, Repo: mode3.Repo, Ref: mode3.Commit}
+	if r, err := plugin.ReleaseOf(ps, "v1.0.0", "ghcr.io/agent-substrate/substrate"); err != nil || r != fork {
+		t.Errorf("release of %s alone = %+v, %v; want the fork %+v", ID, r, err, fork)
+	}
+	// With mode3 too: one release, both plugins.
+	both, err := plugin.Resolve([]string{mode3.ID, ID})
+	if err != nil || len(both) != 2 {
+		t.Fatalf("Resolve both = %v, %v", both, err)
+	}
+	if r, err := plugin.ReleaseOf(both, "v1.0.0", "ghcr.io/agent-substrate/substrate"); err != nil || r != fork {
+		t.Errorf("release of both = %+v, %v", r, err)
+	}
+}
+
+// The control plane deploy for mode3-iso alone (its Needs merged, its
+// release set, as resolvePlugins does) runs ate-setup with the fork's images
+// and the NetworkWorkers gate. The same deploy without it carries neither.
+func TestControlPlaneForMode3IsoAloneCarriesTheFork(t *testing.T) {
+	for _, ids := range [][]string{{ID}, nil} {
+		ps, err := plugin.Resolve(ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := controlplane.Options{Cluster: "c1", Region: "us-west-2", Tag: "v1.0.0", ImageRepo: "ghcr.io/agent-substrate/substrate",
+			SnapBucket: "b", SandboxClasses: "gvisor,microvm", Database: controlplane.DatabaseBundled}
+		if o.Needs, err = plugin.Merge(ps); err != nil {
+			t.Fatal(err)
+		}
+		rel := o.Needs.Release(o.Tag, o.ImageRepo)
+		o.Tag, o.ImageRepo = rel.Tag, rel.ImageRepo
+		args := strings.Join(controlplane.AteSetupArgs(o, "c1"), " ")
+		fork := strings.Contains(args, "--image-repo ghcr.io/csantanapr/substrate --image-tag "+mode3.Tag+" ") &&
+			strings.Contains(args, " --preview=NetworkWorkers") && rel.Repo == mode3.Repo && rel.Ref == mode3.Commit
+		if fork != (len(ids) == 1) {
+			t.Errorf("plugins %v: fork %v: release %+v, ate-setup %s", ids, fork, rel, args)
+		}
 	}
 }
 
@@ -323,13 +401,23 @@ func TestDeploy(t *testing.T) {
 		!strings.Contains(f.applies[1], `"kind":"NodePool"`) || !strings.Contains(f.applies[1], `"name":"ate-isolated"},"requirements"`) {
 		t.Errorf("first applies:\n%s", strings.Join(f.applies[:min(2, len(f.applies))], "\n"))
 	}
+	// Its own counter image, built for the applied NodePool's arm64 under
+	// its own tag; nothing of mode 3's is read.
 	if err := f.has("kubectl get runtimeclass isolated-sandbox", "kubectl get nodepool general-purpose -o json", "kubectl get nodeclass default -o json",
-		"kubectl apply -f -", "kubectl apply -f -", "kubectl get nodeclass ate-isolated -o json",
+		"kubectl apply -f -", "kubectl apply -f -", "kubectl get nodepool ate-isolated -o json", "kubectl get nodeclass ate-isolated -o json",
 		"kubectl apply -f -", "kubectl -n ate-system get ds atelet -o json", "kubectl apply -f -", "build kubectl-ate",
-		"ate get actor-template counter-mode3 -a ate-demo-counter-mode3", "kubectl apply -f -", "ate create atespace ate-demo-counter-iso",
+		"counter image arm64 mode3-iso-"+mode3.Tag, "kubectl apply -f -", "ate create atespace ate-demo-counter-iso",
 		"ate get actor-template counter-iso", "kubectl -n ate-demo-counter-iso rollout status deploy/counter-iso --timeout=10m",
 		"kubectl -n ate-system rollout status ds/atelet-iso --timeout=5m", "ate create actor-template -f", "golden"); err != nil {
 		t.Error(err)
+	}
+	for _, l := range f.log {
+		if strings.Contains(l, mode3.Kata.Name) || strings.Contains(l, mode3.Kata.Namespace) || strings.Contains(l, "kata") {
+			t.Errorf("read mode 3's objects: %q", l)
+		}
+	}
+	if !strings.Contains(out.String(), "NodePool ate-isolated launches arm64 nodes") {
+		t.Errorf("output:\n%s", out.String())
 	}
 	pool := f.stdin["apply -f -"]
 	if !strings.Contains(pool, "workerImage: "+mode3.ImageRepo+"/ateworker-gvisor:"+mode3.Tag+"@sha256:pinned") ||
@@ -366,14 +454,64 @@ func TestDeploy(t *testing.T) {
 		t.Errorf("invalid NodeClass: err %v, %d applies", err, len(f.applies))
 	}
 
-	// No mode 3 template: mode3-iso says to deploy mode 3 first.
+	// An applied NodePool that allows two architectures stops the deploy
+	// with the reason, after the two applies and before any build,
+	// atelet-iso or pool.
 	f = newFake(t)
-	delete(f.tmpls, "counter-mode3")
 	f.out["get nodepool general-purpose"] = []string{testGeneralPurpose}
 	f.out["get nodeclass default"] = []string{testNodeClass}
+	f.out["get nodepool ate-isolated"] = []string{strings.Replace(testAppliedPool("amd64"), `["amd64"]`, `["amd64","arm64"]`, 1)}
 	f.out["-n ate-system get ds atelet"] = []string{testAtelet}
-	if err := deploy(context.Background(), io.Discard, testOptions(t, true)); err == nil || !strings.Contains(err.Error(), "deploy mode3 first") {
-		t.Errorf("no mode 3: %v", err)
+	err = deploy(context.Background(), io.Discard, testOptions(t, true))
+	if err == nil || !strings.Contains(err.Error(), "NodePool ate-isolated allows amd64 and arm64") || len(f.applies) != 2 || f.has("counter image") == nil {
+		t.Errorf("two architectures: err %v, %d applies, log %q", err, len(f.applies), f.log)
+	}
+
+	// A missing fork tree names mode3-iso, not mode3, as the plugin to
+	// deploy the control plane with.
+	f = newFake(t)
+	o := testOptions(t, true)
+	o.Tree = filepath.Join(t.TempDir(), "substrate-"+mode3.Tag)
+	if err := deploy(context.Background(), io.Discard, o); err == nil || !strings.Contains(err.Error(), "--deploy-control-plane --plugins mode3-iso first") || len(f.log) != 0 {
+		t.Errorf("no tree: err = %v, ran %q", err, f.log)
+	}
+}
+
+// Both ways: the applied NodePool's one kubernetes.io/arch value is the
+// counter image's architecture, through several In requirements too; more
+// than one, none, every one (no requirement or another operator) are
+// refused with the reason.
+func TestPoolArch(t *testing.T) {
+	pool := func(reqs string) []byte {
+		return []byte(`{"kind":"NodePool","spec":{"template":{"spec":{"requirements":[` + reqs + `]}}}}`)
+	}
+	other := `{"key":"karpenter.sh/capacity-type","operator":"In","values":["on-demand"]}`
+	for want, reqs := range map[string]string{
+		"amd64": other + `,{"key":"kubernetes.io/arch","operator":"In","values":["amd64"]}`,
+		"arm64": `{"key":"kubernetes.io/arch","operator":"In","values":["arm64"]}`,
+		// Two requirements: the value both allow.
+		"amd64 ": `{"key":"kubernetes.io/arch","operator":"In","values":["amd64","arm64"]},{"key":"kubernetes.io/arch","operator":"In","values":["amd64"]}`,
+	} {
+		if got, err := PoolArch(pool(reqs)); err != nil || got != strings.TrimSpace(want) {
+			t.Errorf("%s: PoolArch = %q, %v", reqs, got, err)
+		}
+	}
+	for want, reqs := range map[string]string{
+		"allows amd64 and arm64":                    `{"key":"kubernetes.io/arch","operator":"In","values":["arm64","amd64"]}`,
+		"allows no architecture":                    `{"key":"kubernetes.io/arch","operator":"In","values":[]}`,
+		"allows no architecture ":                   `{"key":"kubernetes.io/arch","operator":"In","values":["amd64"]},{"key":"kubernetes.io/arch","operator":"In","values":["arm64"]}`,
+		"has no kubernetes.io/arch requirement":     other,
+		"requires kubernetes.io/arch NotIn [arm64]": `{"key":"kubernetes.io/arch","operator":"NotIn","values":["arm64"]}`,
+		"requires kubernetes.io/arch Exists []":     `{"key":"kubernetes.io/arch","operator":"Exists"}`,
+		"read NodePool ate-isolated":                `not json`,
+	} {
+		_, err := PoolArch(pool(reqs))
+		if want == "read NodePool ate-isolated" {
+			_, err = PoolArch([]byte(reqs))
+		}
+		if err == nil || !strings.Contains(err.Error(), strings.TrimSpace(want)) {
+			t.Errorf("%s: err = %v, want %q", reqs, err, want)
+		}
 	}
 }
 
@@ -387,7 +525,17 @@ func TestRemove(t *testing.T) {
 	if err := remove(context.Background(), &out, testOptions(t, true)); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if err := f.has("kubectl get namespace ate-system", "kubectl delete namespace ate-demo-counter-iso",
+	// Its own counter image only, once its pool's Namespace is gone: never
+	// mode 3's tag or the release tag the demo's counter carries.
+	if !slices.Equal(f.deleted, []string{"mode3-iso-" + mode3.Tag}) || slices.Contains(f.deleted, mode3.CounterTag) {
+		t.Errorf("deleted images %q", f.deleted)
+	}
+	for _, l := range f.log {
+		if strings.Contains(l, mode3.Kata.Name) || strings.Contains(l, mode3.Kata.Namespace) || strings.Contains(l, "kata") {
+			t.Errorf("Remove touched mode 3's objects: %q", l)
+		}
+	}
+	if err := f.has("kubectl get namespace ate-system", "kubectl delete namespace ate-demo-counter-iso", "delete image mode3-iso-"+mode3.Tag,
 		"kubectl -n ate-system delete daemonset atelet-iso --ignore-not-found --wait=true", "kubectl delete -f - --ignore-not-found",
 		"kubectl get crd nodepools.karpenter.sh", "kubectl delete nodepool ate-isolated --ignore-not-found --wait=true",
 		"kubectl get nodes -l karpenter.sh/nodepool=ate-isolated", "kubectl get nodes -l karpenter.sh/nodepool=ate-isolated",

@@ -23,6 +23,9 @@ import (
 // new names, with the network transport and a microVM RuntimeClass. The
 // mode3 and mode3-iso plugins each deploy, check and remove one.
 type Counter struct {
+	// Plugin is the ID of the plugin that deploys the pool, which the
+	// errors name.
+	Plugin string
 	// Namespace is the Kubernetes Namespace and the atespace.
 	Namespace string
 	// Name is the WorkerPool, the ActorTemplate and their workload label.
@@ -42,17 +45,18 @@ type Counter struct {
 // DemoFuncs is the counter demo's code the plugins run (internal/demo's
 // exports); tests replace Demo.
 type DemoFuncs struct {
-	CounterImage func(ctx context.Context, w io.Writer, o demo.Options, tree, pool, tag string) (string, error)
-	Pin          func(ctx context.Context, o demo.Options, tagged string) (string, error)
-	KubectlAte   func(ctx context.Context, w io.Writer, o demo.Options, tree string) (string, error)
-	Ate          func(ctx context.Context, o demo.Options, args ...string) ([]byte, error)
-	WaitGolden   func(ctx context.Context, w io.Writer, o demo.Options, p demo.Pool) error
-	RoundTrip    func(ctx context.Context, w io.Writer, o demo.Options, p demo.Pool) (string, error)
+	CounterImage    func(ctx context.Context, w io.Writer, o demo.Options, tree, pool, tag string) (string, error)
+	CounterImageFor func(ctx context.Context, w io.Writer, o demo.Options, tree, arch, tag string) (string, error)
+	Pin             func(ctx context.Context, o demo.Options, tagged string) (string, error)
+	KubectlAte      func(ctx context.Context, w io.Writer, o demo.Options, tree string) (string, error)
+	Ate             func(ctx context.Context, o demo.Options, args ...string) ([]byte, error)
+	WaitGolden      func(ctx context.Context, w io.Writer, o demo.Options, p demo.Pool) error
+	RoundTrip       func(ctx context.Context, w io.Writer, o demo.Options, p demo.Pool) (string, error)
 }
 
 // Demo is the real demo code.
-var Demo = DemoFuncs{CounterImage: demo.CounterImage, Pin: demo.Pin, KubectlAte: demo.KubectlAte,
-	Ate: demo.Ate, WaitGolden: demo.WaitGolden, RoundTrip: demo.RoundTrip}
+var Demo = DemoFuncs{CounterImage: demo.CounterImage, CounterImageFor: demo.CounterImageFor, Pin: demo.Pin,
+	KubectlAte: demo.KubectlAte, Ate: demo.Ate, WaitGolden: demo.WaitGolden, RoundTrip: demo.RoundTrip}
 
 // Interval paces every poll; tests set it to 0.
 var Interval = 2 * time.Second
@@ -65,11 +69,12 @@ func DemoOptions(o plugin.Options) demo.Options {
 }
 
 // Tree is the fork's tree, which the control plane deploy fetched: the
-// install's release is the fork whenever mode 3 is installed.
-func Tree(o plugin.Options) (string, error) {
+// install's release is the fork whenever mode3 or mode3-iso is installed.
+// The error names plugin id, the one to deploy the control plane with.
+func Tree(o plugin.Options, id string) (string, error) {
 	tree := o.Tree
 	if _, err := os.Stat(filepath.Join(tree, "demos", "counter")); err != nil {
-		return "", fmt.Errorf("no mode 3 tree (substrate %s) at %s: run --deploy-control-plane --plugins %s first", Tag, tree, ID)
+		return "", fmt.Errorf("no mode 3 tree (substrate %s) at %s: run --deploy-control-plane --plugins %s first", Tag, tree, id)
 	}
 	return tree, nil
 }
@@ -155,7 +160,7 @@ func (c Counter) Deploy(ctx context.Context, w io.Writer, o plugin.Options, work
 // and resume (with its snapshot in S3); and deleting an actor tears its
 // sandbox down inside the worker's guest.
 func (c Counter) Verify(ctx context.Context, w io.Writer, o plugin.Options) error {
-	tree, err := Tree(o)
+	tree, err := Tree(o, c.Plugin)
 	if err != nil {
 		return err
 	}
@@ -400,7 +405,7 @@ func notFound(err error) bool {
 const atespaceTries = 60
 
 func (c Counter) removeAte(ctx context.Context, w io.Writer, o plugin.Options) error {
-	tree, err := Tree(o)
+	tree, err := Tree(o, c.Plugin)
 	if err != nil {
 		return err
 	}

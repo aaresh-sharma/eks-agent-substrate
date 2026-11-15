@@ -2,24 +2,27 @@
 // sandboxes. As in mode 3, each worker Pod is a microVM that runs gVisor
 // actors inside; here the microVM is RuntimeClass isolated-sandbox, which
 // EKS Auto Mode provides, on nodes Auto Mode launches for those Pods. No
-// node group and no Kata install is involved.
+// node group and no Kata install is involved, and it stands alone: it
+// needs an Auto Mode cluster, not the mode3 plugin.
 //
-//   - Requires mode3, whose control plane (the fork, with NetworkWorkers) and
-//     counter image it uses, and an Auto Mode cluster.
+//   - Needs: mode 3's (mode3.Needs), the fork's release with the
+//     NetworkWorkers gate, so choosing it alone installs the fork; with
+//     mode3 too, the two are one release.
 //   - Deploy: NodePool ate-isolated (a copy of general-purpose, labeled and
 //     tainted) with NodeClass ate-isolated (a copy of its NodeClass that tags
 //     the instances with the owner tag and TAGS), atelet-iso (a copy of
-//     atelet for those Bottlerocket nodes), and the counter pool counter-iso
-//     on RuntimeClass isolated-sandbox.
+//     atelet for those Bottlerocket nodes), its own counter image (CounterTag)
+//     built for the one architecture the NodePool allows, and the counter
+//     pool counter-iso on RuntimeClass isolated-sandbox.
 //   - Verify: every worker Pod runs under isolated-sandbox on an ate-isolated
 //     node, the counter continues across a suspend and resume, and deleting
 //     an actor tears its sandbox down in the guest.
-//   - Remove: the pool, atelet-iso and its ConfigMap, then the NodePool,
-//     whose nodes Auto Mode drains and terminates; it waits for them, then
-//     deletes the NodeClass.
+//   - Remove: the pool and its counter image, atelet-iso and its ConfigMap,
+//     then the NodePool, whose nodes Auto Mode drains and terminates; it
+//     waits for them, then deletes the NodeClass.
 //
-// It makes no AWS resources of its own (Auto Mode owns the nodes), so it has
-// no setup-aws half.
+// It makes no AWS resources of its own (Auto Mode owns the nodes, and the
+// counter repository is the deployment's), so it has no setup-aws half.
 package mode3iso
 
 import (
@@ -34,13 +37,17 @@ import (
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
-	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/demo"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/mode3"
 )
 
 // ID is the plugin ID.
 const ID = "mode3-iso"
+
+// CounterTag is the tag of this plugin's counter image in the deployment's
+// counter repository: its own, so Remove never deletes the image mode3
+// (mode3.CounterTag) or the demo (the release tag) runs.
+const CounterTag = ID + "-" + mode3.Tag
 
 // The names of the plugin's objects.
 const (
@@ -68,6 +75,7 @@ var (
 
 // Iso is the mode 3 counter pool on isolated sandboxes.
 var Iso = mode3.Counter{
+	Plugin:    ID,
 	Namespace: "ate-demo-counter-iso", Name: "counter-iso",
 	Actor: "demo-iso", DeleteActor: "demo-iso-delete",
 	RuntimeClass: RuntimeClass, NodeLabels: map[string]string{PoolLabel: PoolValue, nodePoolLabel: NodePoolName},
@@ -79,9 +87,10 @@ func init() {
 		ID:    ID,
 		Title: "Mode 3: actor in a microVM Pod (isolated-sandbox)",
 		Summary: "Mode 3 with each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
-			"on nodes Auto Mode launches for them (NodePool ate-isolated). Needs Auto Mode and mode 3, which it turns on; " +
-			"adds a counter pool that it checks.",
-		Order: mode3.Order + 1, Minutes: 12, Requires: []string{mode3.ID}, NeedsAutoMode: needsAutoMode,
+			"on nodes Auto Mode launches for them (NodePool ate-isolated); no Kata. Needs Auto Mode. Installs Substrate from " +
+			"csantanapr/substrate (" + mode3.Tag + ") and a counter pool that it checks.",
+		Order: mode3.Order + 1, Minutes: 12, NeedsAutoMode: needsAutoMode,
+		Needs: mode3.Needs,
 		// One node for the two worker Pods, launched by Auto Mode (an
 		// m8a.large on-demand, with the Auto Mode fee).
 		HourlyUSD: 0.12,
@@ -156,7 +165,7 @@ const (
 // deploy runs only on Auto Mode: plugin.Run refuses it elsewhere
 // (NeedsAutoMode).
 func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
-	tree, err := mode3.Tree(o)
+	tree, err := mode3.Tree(o, ID)
 	if err != nil {
 		return err
 	}
@@ -200,6 +209,17 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 			return err
 		}
 	}
+	// The counter image is built for the architecture of nodes that do not
+	// exist yet: the one the applied NodePool lets Auto Mode launch.
+	var applied bytes.Buffer
+	if err := plugin.Kubectl(ctx, w, o, nil, &applied, "get", "nodepool", NodePoolName, "-o", "json"); err != nil {
+		return err
+	}
+	arch, err := PoolArch(applied.Bytes())
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "NodePool %s launches %s nodes\n", NodePoolName, arch)
 	if err := waitNodeClass(ctx, w, o); err != nil {
 		return err
 	}
@@ -225,7 +245,7 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if _, err := mode3.Demo.KubectlAte(ctx, w, do, tree); err != nil {
 		return err
 	}
-	counter, err := mode3Counter(ctx, do)
+	counter, err := mode3.Demo.CounterImageFor(ctx, w, do, tree, arch, CounterTag)
 	if err != nil {
 		return err
 	}
@@ -245,27 +265,20 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	return Iso.Deploy(ctx, w, o, worker, counter, waitNodes)
 }
 
-// mode3Counter is the counter image mode 3's ActorTemplate runs, which this
-// pool runs too: the isolated nodes do not exist before its Pods ask for them,
-// and mode 3 built the image for the cluster's sandbox nodes.
-func mode3Counter(ctx context.Context, do demo.Options) (string, error) {
-	out, err := mode3.Demo.Ate(ctx, do, "get", "actor-template", mode3.Kata.Name, "-a", mode3.Kata.Namespace, "-o", "json")
-	if err != nil {
-		return "", fmt.Errorf("read mode 3's actor-template %s/%s (deploy %s first): %w", mode3.Kata.Namespace, mode3.Kata.Name, mode3.ID, err)
-	}
-	img, err := demo.TemplateImage(out)
-	if err != nil {
-		return "", fmt.Errorf("read mode 3's actor-template %s/%s: %w", mode3.Kata.Namespace, mode3.Kata.Name, err)
-	}
-	return img, nil
-}
-
 // nodesTries bounds the wait for Auto Mode to remove the NodePool's nodes,
 // at mode3.Interval (2s): 10 minutes.
 const nodesTries = 300
 
+// deleteImage deletes a counter image tag from the deployment's repository;
+// tests replace it.
+var deleteImage = mode3.DeleteCounterImage
+
 func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := Iso.Remove(ctx, w, o); err != nil {
+		return err
+	}
+	// The pool's worker Pods are gone with its Namespace: its own tag only.
+	if err := deleteImage(ctx, w, o, CounterTag); err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "Deleting "+AteletName+" and its credential provider config")

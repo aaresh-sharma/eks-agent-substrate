@@ -33,14 +33,17 @@ var ecrFor = func(ctx context.Context, o plugin.Options) (ecrAPI, error) {
 }
 
 // counterRepo is the deployment's counter repository (setup-aws bootstrap
-// creates it, and teardown deletes it); Deploy pushes <counterRepo>:<CounterTag>.
+// creates it, and teardown deletes it); Deploy pushes <counterRepo>:<CounterTag>,
+// and mode3-iso's its own tag.
 func counterRepo(o plugin.Options) string { return o.Cluster + "/counter" }
 
-// deleteCounterImage deletes the tag Deploy pushed (ECR deletes the image
-// with its last tag), only from a repository carrying this deployment's
-// owner tag: one of that name with another owner, or none, is left alone
-// (review R9). A repository or tag that is already gone is done.
-func deleteCounterImage(ctx context.Context, w io.Writer, o plugin.Options) error {
+// DeleteCounterImage deletes tag, the one a Deploy pushed (ECR deletes the
+// image with its last tag), only from a repository carrying this
+// deployment's owner tag: one of that name with another owner, or none, is
+// left alone (review R9). A repository or tag that is already gone is done.
+// Every other tag stays, so mode3 (CounterTag) and mode3-iso each delete
+// only their own, and never the demo's.
+func DeleteCounterImage(ctx context.Context, w io.Writer, o plugin.Options, tag string) error {
 	c, err := ecrFor(ctx, o)
 	if err != nil {
 		return err
@@ -71,22 +74,22 @@ func deleteCounterImage(ctx context.Context, w io.Writer, o plugin.Options) erro
 	}
 	out, err := c.BatchDeleteImage(ctx, &ecr.BatchDeleteImageInput{
 		RepositoryName: aws.String(repo),
-		ImageIds:       []ecrtypes.ImageIdentifier{{ImageTag: aws.String(CounterTag)}},
+		ImageIds:       []ecrtypes.ImageIdentifier{{ImageTag: aws.String(tag)}},
 	})
 	if errors.As(err, &nf) {
 		fmt.Fprintf(w, "No repository %s: no counter image to delete\n", repo)
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("delete the counter image %s:%s: %w", repo, CounterTag, err)
+		return fmt.Errorf("delete the counter image %s:%s: %w", repo, tag, err)
 	}
 	for _, f := range out.Failures {
 		if f.FailureCode == ecrtypes.ImageFailureCodeImageNotFound {
-			fmt.Fprintf(w, "No counter image %s:%s to delete\n", repo, CounterTag)
+			fmt.Fprintf(w, "No counter image %s:%s to delete\n", repo, tag)
 			return nil
 		}
-		return fmt.Errorf("delete the counter image %s:%s: %s: %s", repo, CounterTag, f.FailureCode, aws.ToString(f.FailureReason))
+		return fmt.Errorf("delete the counter image %s:%s: %s: %s", repo, tag, f.FailureCode, aws.ToString(f.FailureReason))
 	}
-	fmt.Fprintf(w, "Deleted the counter image %s:%s\n", repo, CounterTag)
+	fmt.Fprintf(w, "Deleted the counter image %s:%s\n", repo, tag)
 	return nil
 }
