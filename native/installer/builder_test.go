@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -326,6 +328,60 @@ func TestStepSettingsReachOnlyTheirSteps(t *testing.T) {
 	for name, spec := range allSpecs(b, s) {
 		if slices.ContainsFunc(spec.Env, isSetting) {
 			t.Errorf("%s: carries a step setting with none configured: %v", name, spec.Env)
+		}
+	}
+}
+
+// Both ways: with a setup-aws binary beside the executable, as a release
+// archive has it, every setup-aws step runs that binary with the same
+// arguments and environment, shown as the binary; without one, the steps
+// run `go -C <tools/setup-aws> run .` from the checkout, as they always did.
+func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
+	release := t.TempDir()
+	bin := filepath.Join(release, "setup-aws")
+	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	co := t.TempDir()
+	src := filepath.Join(co, "native", "tools", "setup-aws")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, s := testBuilder()
+	for _, tc := range []struct {
+		name      string
+		b         builder
+		argv0     []string
+		displayed string
+	}{
+		{"release", builder{self: filepath.Join(release, "substrate-eks"), cwd: release, exeDir: release},
+			[]string{bin}, "./setup-aws"},
+		{"checkout", builder{self: filepath.Join(co, "native", "bin", "substrate-eks"), cwd: filepath.Join(co, "native"), exeDir: filepath.Join(co, "native", "bin")},
+			[]string{"go", "-C", src, "run", "."}, "go -C tools/setup-aws run ."},
+	} {
+		specs := map[string]struct {
+			spec execx.Spec
+			args []string
+		}{
+			"create cluster": {tc.b.createCluster(s), []string{"create", "cluster"}},
+			"bootstrap":      {tc.b.bootstrap(s), []string{"bootstrap"}},
+			"rds":            {tc.b.rds(s), []string{"create", "rds"}},
+			"teardown":       {tc.b.teardown(s), []string{"teardown"}},
+			"inventory":      {tc.b.inventory(s), []string{"inventory"}},
+		}
+		for name, c := range specs {
+			if want := append(slices.Clone(tc.argv0), c.args...); !slices.Equal(c.spec.Argv, want) {
+				t.Errorf("%s %s: argv %q, want %q", tc.name, name, c.spec.Argv, want)
+			}
+			if want := tc.displayed + " " + strings.Join(c.args, " "); !strings.HasSuffix(c.spec.Display, want) {
+				t.Errorf("%s %s: display %q, want it to end %q", tc.name, name, c.spec.Display, want)
+			}
+			if !slices.Contains(c.spec.Env, "PLAN=false") || !slices.Contains(c.spec.Env, "CLUSTER_NAME=demo") {
+				t.Errorf("%s %s: env %q", tc.name, name, c.spec.Env)
+			}
 		}
 	}
 }

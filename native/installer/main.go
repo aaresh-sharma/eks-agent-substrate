@@ -31,14 +31,19 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/ui"
 )
 
+// version is the release this binary was built from, stamped by GoReleaser
+// (-X main.version, see .goreleaser.yaml); a build from source says dev.
+var version = "dev"
+
 func main() {
 	cwd, _ := os.Getwd()
 	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
 		exeDir = filepath.Dir(exe)
 	}
-	// The repository's config.env and config.local.env, under the
-	// environment, give the defaults; Settings writes config.local.env.
+	// The checkout's (or the extracted release's) config.env and
+	// config.local.env, under the environment, give the defaults; Settings
+	// writes config.local.env.
 	cfg, err := state.FindConfig(os.LookupEnv, cwd, exeDir)
 	exitOn(err)
 	conf := func(key, def string) string {
@@ -60,7 +65,8 @@ func main() {
 		demoMode   = flag.Bool("demo", false, "end the install with the counter demo on gVisor and microVM, and check it")
 		teardown   = flag.Bool("teardown", false, "open the wizard on the teardown of --cluster: remove Substrate, then its AWS resources")
 		keepClust  = flag.Bool("keep-cluster", false, "with --teardown: remove Substrate and its AWS data but never offer to delete the cluster")
-		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws (default: found above the working directory or the executable)")
+		setupAWS   = flag.String("setup-aws", "", "path to native/tools/setup-aws, or to a setup-aws binary (default: the setup-aws binary beside the executable, as a release has it, else native/tools/setup-aws found above the working directory or the executable)")
+		showVer    = flag.Bool("version", false, "print the installer's version and exit")
 		overlay    = flag.String("eks-overlay", "", "path to native/deploy/eks (default: found above the working directory or the executable)")
 		treeRoot   = flag.String("tree-root", controlplane.DefaultTreeRoot(), "where fetched Substrate trees are cached")
 		logPath    = flag.String("log", "", "log file (default: a timestamped file under the user cache dir)")
@@ -82,6 +88,10 @@ func main() {
 		snapDir = flag.String("snapshot-dir", "", "where s saves the screen as .ansi, .txt and .html (default: under the user cache dir)")
 	)
 	flag.Parse()
+	if *showVer {
+		fmt.Println("substrate-eks " + version)
+		return
+	}
 	// One identity for the whole run (review R15): every child (setup-aws,
 	// kubectl's `aws eks get-token`, ate-setup, the aws CLI) and every
 	// in-process AWS SDK load inherit AWS_PROFILE, so it is set to --profile,

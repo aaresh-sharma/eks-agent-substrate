@@ -212,8 +212,9 @@ type Options struct {
 	// (awsx.KubeconfigPath), already written by the caller; its current
 	// context is the cluster. Use Kubectl, which passes it.
 	Kubeconfig string
-	// SetupAWS is native/tools/setup-aws; Run runs `setup-aws plugin <id>`
-	// from it for a plugin with SetupAWS set.
+	// SetupAWS is native/tools/setup-aws, or a release's setup-aws binary
+	// (SetupAWSArgv); Run runs `setup-aws plugin <id>` from it for a plugin
+	// with SetupAWS set.
 	SetupAWS string
 	// Tags is TAGS: space-separated key=value pairs every AWS resource gets
 	// besides the owner tag (OwnerTags adds it).
