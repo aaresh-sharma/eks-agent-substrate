@@ -239,3 +239,48 @@ func TestCreateClusterStepNamesItsNodeGroups(t *testing.T) {
 		}
 	}
 }
+
+// Review NIT-4: Settings checks only the node groups it shows, so a group a
+// plugin chosen after it adds is checked when the Plugins screen moves on.
+// t-kata adds the microvm group to a gVisor-only run, and the gateway the
+// system group on Auto Mode with the bundled PostgreSQL. A bad setting of
+// that group keeps the run on the Plugins screen, naming the key; back in
+// Settings the group's row is shown with the error, and once it is fixed the
+// run reaches Review.
+func TestAGroupAPluginAddsIsValidated(t *testing.T) {
+	for _, tc := range []struct {
+		name, plugin, key string
+		bundled           bool
+		set               func(*state.ClusterConfig)
+	}{
+		{"mode 3's microvm group", "t-kata", "MICROVM_NODES", false, func(c *state.ClusterConfig) { c.MicroVMNodes = "abc" }},
+		{"the gateway's system group", "t-gateway", "SYSTEM_NODES", true, func(c *state.ClusterConfig) { c.SystemNodes = "0" }},
+	} {
+		s := newSetup("fresh")
+		tc.set(&s.NewClusterConfig)
+		m := toSettings(t, testDeps(&recorder{}), s)
+		m = cursorTo(t, m, state.ClassMicroVM)
+		m = press(m, "enter")
+		if tc.bundled {
+			m = cursorTo(t, m, dbKey)
+			m = press(m, "enter")
+		}
+		m = press(m, "n")
+		if m.m.Current() != state.Plugins {
+			t.Fatalf("%s: Settings refused a group it does not show: %v", tc.name, m.set.errs)
+		}
+		m = press(pluginAt(m, tc.plugin), " ", "enter")
+		if m.m.Current() != state.Plugins || !strings.HasPrefix(m.notice, tc.key+"=") || !strings.Contains(m.notice, "set it in Settings") {
+			t.Fatalf("%s: at %s, notice %q", tc.name, m.m.Current().Title(), m.notice)
+		}
+		m = press(m, "esc")
+		if _, bad := m.set.errs[tc.key]; m.m.Current() != state.Settings || !bad {
+			t.Fatalf("%s: back at %s, errors %v", tc.name, m.m.Current().Title(), m.set.errs)
+		}
+		m = setText(cursorTo(t, m, tc.key), "2")
+		m = press(m, "n", "enter")
+		if m.m.Current() != state.Review {
+			t.Errorf("%s: fixed, at %s, notice %q", tc.name, m.m.Current().Title(), m.notice)
+		}
+	}
+}

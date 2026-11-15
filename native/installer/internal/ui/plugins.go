@@ -109,6 +109,27 @@ func (m Model) addedGroups(p plugin.Plugin) []string {
 	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, append(rest, p.ID)))
 }
 
+// groupSettingsProblem is why a node group the new cluster gets with the
+// chosen plugins has a setting setup-aws would not take, such as
+// MICROVM_NODES=abc, or "". Settings checks only the groups it shows, and a
+// plugin chosen after it can add one: mode 3's microvm group, or the system
+// group for a plugin that runs on it.
+func (m Model) groupSettingsProblem() string {
+	if !m.s.ClusterIsNew {
+		return ""
+	}
+	values := state.ConfigValues(m.s)
+	errs := state.ValidateConfig(values)
+	for _, g := range m.s.NodeGroups() {
+		for _, k := range []string{strings.ToUpper(g) + "_INSTANCE_TYPE", strings.ToUpper(g) + "_NODES"} {
+			if want, bad := errs[k]; bad {
+				return fmt.Sprintf("%s=%s: want %s, for the %s node group the chosen plugins add; set it in Settings (esc)", k, values[k], want, g)
+			}
+		}
+	}
+	return ""
+}
+
 // added are the groups of with that groups lacks.
 func added(groups, with []string) []string {
 	var out []string
@@ -202,6 +223,12 @@ func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		m.s.Plugins = m.chosenIDs()
+		// Settings checked only the node groups it showed; a plugin may
+		// add one (review NIT-4). Settings now shows that group's row.
+		if why := m.groupSettingsProblem(); why != "" {
+			m.notice = why
+			return nil
+		}
 		// A plugin built on the counter demo's templates needs the demo,
 		// which then runs before the plugins (state.InstallOrder).
 		if !m.s.DemoMode {
@@ -216,6 +243,12 @@ func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
 		return m.commit()
 	case "esc", "b":
 		m.m.Prev()
+		// Settings keeps its edits, and shows and checks the node groups
+		// of the plugins applied so far (a refused enter applies them).
+		if m.m.Current() == state.Settings {
+			m.refreshFields()
+			m.checkSettings()
+		}
 	case "q":
 		m.quitting = true
 		return tea.Quit
