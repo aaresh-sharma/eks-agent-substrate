@@ -95,11 +95,14 @@ func init() {
 			"csantanapr/substrate (" + mode3.Tag + ") and a counter pool that it checks.",
 		// Chosen with the class in Settings, not on the Plugins screen.
 		Class: Class,
-		Order: mode3.Order + 1, Minutes: 12, NeedsAutoMode: needsAutoMode,
+		// Minutes as measured on sub-p15 (2026-11-15): 7m29s, the counter
+		// image build and push included.
+		Order: mode3.Order + 1, Minutes: 8, NeedsAutoMode: needsAutoMode,
 		Needs: mode3.Needs,
-		// One node for the two worker Pods, launched by Auto Mode (an
-		// m8a.large on-demand, with the Auto Mode fee).
-		HourlyUSD: 0.12,
+		// One node for the two worker Pods, launched by Auto Mode: a
+		// c6i.xlarge on-demand on sub-p15, $0.17 in us-west-2, plus the
+		// $0.0204 Auto Mode fee.
+		HourlyUSD: 0.19,
 		Deploy:    deploy, Verify: Iso.Verify, Remove: remove,
 	})
 }
