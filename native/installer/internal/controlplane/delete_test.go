@@ -137,6 +137,22 @@ func TestDeleteRunsAteSetupWaitsAndRemovesTheKubeconfig(t *testing.T) {
 	}
 }
 
+// A recorded plugin that needs Auto Mode (mode3-iso, the AWS Nitro sandbox
+// class's) never stops the removal: Delete reads the cluster but not into
+// Options.AutoMode, and the deploy's Auto Mode refusal must not reach it. It
+// went live on sub-p15 as "plugin mode3-iso needs EKS Auto Mode" before the
+// refusal moved out of resolvePlugins.
+func TestDeleteRemovesARecordedAutoModePlugin(t *testing.T) {
+	o, calls, _ := deleteEnv(t, nil, nil)
+	readRecord = func(context.Context, io.Writer, plugin.Options) ([]string, error) { return []string{"cp-test-auto"}, nil }
+	if err := Delete(context.Background(), io.Discard, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 3 || (*calls)[0].argv[0] != "plugins" {
+		t.Errorf("calls %v", *calls)
+	}
+}
+
 // A failed delete keeps the kubeconfig for the retry and claims nothing.
 func TestDeleteFailureStopsBeforeTheWait(t *testing.T) {
 	o, calls, kc := deleteEnv(t, nil, func(argv []string) error {

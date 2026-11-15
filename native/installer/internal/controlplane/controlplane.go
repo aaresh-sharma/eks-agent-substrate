@@ -314,6 +314,15 @@ func Deploy(ctx context.Context, w io.Writer, o Options) error {
 	if err != nil {
 		return err
 	}
+	// Before anything is fetched or applied: a control plane carrying a
+	// plugin that cannot run here (the AWS Nitro sandbox class's, off Auto
+	// Mode) would install its release for nothing. Only a deploy refuses:
+	// Delete shares resolvePlugins, and a removal is always the way out.
+	for _, id := range ids {
+		if p, _ := plugin.Get(id); p.NeedsAutoMode != "" && !o.AutoMode {
+			return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
+		}
+	}
 	// Before anything changes: an installed control plane keeps its release.
 	if err := SameRelease(ctx, kc, o.Cluster, po.Release); err != nil {
 		return err
@@ -371,14 +380,6 @@ func resolvePlugins(ctx context.Context, w io.Writer, o *Options, po *plugin.Opt
 	ps, err := plugin.Resolve(append(rec, o.Plugins...))
 	if err != nil {
 		return nil, err
-	}
-	// Before anything is fetched or applied: a control plane carrying a
-	// plugin that cannot run here (the AWS Nitro sandbox class's, off Auto
-	// Mode) would install its release for nothing.
-	for _, p := range ps {
-		if p.NeedsAutoMode != "" && !o.AutoMode {
-			return nil, fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
-		}
 	}
 	if o.Needs, err = plugin.Merge(ps); err != nil {
 		return nil, err
