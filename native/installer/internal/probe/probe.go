@@ -38,6 +38,10 @@ type Result struct {
 	// record was read: without it the plugins are unknown, not none.
 	Plugins     []string
 	PluginsRead bool
+	// Pools are the ate.dev/pool values of the cluster's nodes (plugin
+	// PoolsArgs): the node groups a connected cluster has, which decide the
+	// sandbox classes and plugins the wizard offers on it.
+	Pools []string
 }
 
 // Partial reports the namespace-without-atelet state.
@@ -69,14 +73,21 @@ func Check(ctx context.Context, kubectl Kubectl) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The node groups, which the wizard checks the sandbox classes against;
+	// like the namespace, a failed read stops the probe.
+	nodes, err := kubectl(ctx, plugin.PoolsArgs...)
+	if err != nil {
+		return "", err
+	}
+	pools := " pools=" + strings.Join(plugin.ParsePools(nodes), ",")
 	if strings.TrimSpace(ns) == "" {
-		return Marker + "false", nil
+		return Marker + "false" + pools, nil
 	}
 	atelet, err := kubectl(ctx, "-n", "ate-system", "get", "daemonset", "atelet", "--ignore-not-found", "-o", "name")
 	if err != nil {
 		return "", err
 	}
-	line := Marker + "true"
+	line := Marker + "true" + pools
 	if strings.TrimSpace(atelet) != "" {
 		line += " atelet"
 		image, err := kubectl(ctx, "-n", "ate-system", "get", "deployment", "ate-api-server", "--ignore-not-found",
@@ -102,13 +113,12 @@ func ParseInstalled(lines []string) (Result, error) {
 		if !ok {
 			continue
 		}
-		rest, ok = strings.CutPrefix(rest, "true")
-		if !ok {
-			return Result{}, nil
-		}
-		r := Result{Installed: true}
+		var r Result
+		rest, r.Installed = strings.CutPrefix(rest, "true")
 		for _, f := range strings.Fields(rest) {
 			switch k, v, _ := strings.Cut(f, "="); k {
+			case "pools":
+				r.Pools = plugin.ParsePools(strings.ReplaceAll(v, ",", " "))
 			case "atelet":
 				r.Atelet = true
 			case "image":
@@ -187,11 +197,12 @@ func KubectlWith(kubeconfig string) Kubectl {
 // name with "partial" reads as an interrupted install, one with "installed"
 // as a running v1.0.0, and every other as clean.
 func SimLine(cluster string) string {
+	const pools = " pools=gvisor,microvm,system"
 	switch {
 	case strings.Contains(cluster, "partial"):
-		return Marker + "true"
+		return Marker + "true" + pools
 	case strings.Contains(cluster, "installed"):
-		return Marker + "true atelet image=ghcr.io/agent-substrate/substrate/ate-api-server:v1.0.0 plugins=efs,llm-gateway"
+		return Marker + "true" + pools + " atelet image=ghcr.io/agent-substrate/substrate/ate-api-server:v1.0.0 plugins=efs,llm-gateway"
 	}
-	return Marker + "false"
+	return Marker + "false" + pools
 }
