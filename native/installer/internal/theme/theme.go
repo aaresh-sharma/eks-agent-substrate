@@ -13,32 +13,37 @@
 // limitations under the License.
 
 // Package theme carries the color tokens and lipgloss styles, ported from
-// the onboarding TUI's theme.py (Electric Sky over Obsidian).
+// the onboarding TUI's theme.py. This EKS copy changes the colors only:
+// Amazon orange accents over neutral grays, where substrate-gke has
+// Electric Sky over Obsidian.
 package theme
 
 import "github.com/charmbracelet/lipgloss"
 
-// Color tokens from the onboarding prototype.
+// Color tokens. Every color the wizard draws is named here.
 var (
-	Sky    = lipgloss.Color("#38BDF8") // primary accent
-	Indigo = lipgloss.Color("#818CF8") // secondary accent
-	Mint   = lipgloss.Color("#34D399") // success
-	Amber  = lipgloss.Color("#FBBF24") // warning
-	Rose   = lipgloss.Color("#F43F5E") // error
-	Slate  = lipgloss.Color("#94A3B8") // muted text
-	Faint  = lipgloss.Color("#475569") // borders, inactive
+	Orange     = lipgloss.Color("#FF9900") // primary accent: Amazon orange
+	OrangeDeep = lipgloss.Color("#EC7211") // secondary accent, a deeper orange
+	Mint       = lipgloss.Color("#34D399") // success
+	Yellow     = lipgloss.Color("#FFD60A") // warning: a clear yellow, apart from the oranges
+	Rose       = lipgloss.Color("#F43F5E") // error
+	Gray       = lipgloss.Color("#A3A3A3") // muted text
+	Faint      = lipgloss.Color("#525252") // borders, inactive
+	Text       = lipgloss.Color("#E8E8E8") // bright text: the selection, the splash
+	Highlight  = lipgloss.Color("#5C3300") // selection background, a dark orange
+	Ink        = lipgloss.Color("#1F1F1F") // the splash's background
 )
 
 var (
-	Title    = lipgloss.NewStyle().Bold(true).Foreground(Sky)
-	Subtle   = lipgloss.NewStyle().Foreground(Slate)
+	Title    = lipgloss.NewStyle().Bold(true).Foreground(Orange)
+	Subtle   = lipgloss.NewStyle().Foreground(Gray)
 	Fainted  = lipgloss.NewStyle().Foreground(Faint)
-	Accent   = lipgloss.NewStyle().Foreground(Indigo)
+	Accent   = lipgloss.NewStyle().Foreground(OrangeDeep)
 	Good     = lipgloss.NewStyle().Foreground(Mint)
-	Warning  = lipgloss.NewStyle().Foreground(Amber)
+	Warning  = lipgloss.NewStyle().Foreground(Yellow)
 	Bad      = lipgloss.NewStyle().Foreground(Rose)
-	Key      = lipgloss.NewStyle().Bold(true).Foreground(Sky)
-	Selected = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E2E8F0")).Background(lipgloss.Color("#1E293B"))
+	Key      = lipgloss.NewStyle().Bold(true).Foreground(Orange)
+	Selected = lipgloss.NewStyle().Bold(true).Foreground(Text).Background(Highlight)
 
 	Panel = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -47,7 +52,7 @@ var (
 
 	AccentPanel = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Sky).
+			BorderForeground(Orange).
 			Padding(0, 1)
 
 	ErrorPanel = lipgloss.NewStyle().
@@ -77,12 +82,12 @@ var logoLines = []string{
 	`█▀█ █▄█ ██▄ █░▀█ ░█░   ▄█ █▄█ █▄█ ▄█ ░█░ █▀▄ █▀█ ░█░ ██▄`,
 }
 
-// gradient interpolated between Sky and Indigo, one stop per logo line.
+// gradient interpolated between Orange and OrangeDeep, one stop per logo line.
 var gradient = []lipgloss.Color{
-	"#38BDF8", "#818CF8",
+	Orange, OrangeDeep,
 }
 
-// Logo renders the wordmark with the prototype's blue→indigo gradient.
+// Logo renders the wordmark with an orange→deeper orange gradient.
 func Logo() string {
 	out := ""
 	for i, line := range logoLines {

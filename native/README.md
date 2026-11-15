@@ -298,7 +298,7 @@ CloudFormation stacks, so teardown leaves it: run `setup-aws teardown
 | `installer/` (Bubble Tea) | `installer/` | the wizard |
 | `internal/state` | `internal/state` | the step machine (code kept identical) and the answers |
 | `internal/execx` | `internal/execx` | runs a command argv and streams its output; `--dry-run` replays (copied verbatim) |
-| `internal/theme` | `internal/theme` | colours and glyphs (copied verbatim) |
+| `internal/theme` | `internal/theme` | colours and glyphs (adapted: Amazon orange in place of the blues; glyphs and styles unchanged) |
 | `internal/steps` | `internal/steps` | live checklists keyed off output lines, with titles from `setup-aws/phases` |
 | `internal/doctor` | `internal/doctor` | preflight checks with fixes |
 | `internal/gcp` | `internal/awsx` | read-only AWS view (identity, clusters) through the SDK, and the installer's own kubeconfig |
