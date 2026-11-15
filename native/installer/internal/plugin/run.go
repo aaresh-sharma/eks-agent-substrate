@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -78,8 +79,9 @@ func Kubectl(ctx context.Context, w io.Writer, o Options, stdin []byte, stdout i
 	return Exec(ctx, w, Cmd{Stdin: stdin, Stdout: stdout, Argv: append([]string{"kubectl", "--kubeconfig", o.Kubeconfig}, args...)})
 }
 
-// SetupAWS runs `go -C <o.SetupAWS> run . <args>` for o's deployment, with
-// the knobs that would change what it does pinned, as the wizard runs it.
+// SetupAWS runs setup-aws at o.SetupAWS (SetupAWSArgv) for o's deployment,
+// with the knobs that would change what it does pinned, as the wizard runs
+// it.
 func SetupAWS(ctx context.Context, w io.Writer, o Options, args ...string) error {
 	if o.SetupAWS == "" {
 		return errors.New("plugin: no setup-aws path")
@@ -89,7 +91,29 @@ func SetupAWS(ctx context.Context, w io.Writer, o Options, args ...string) error
 	if o.Tags != "" {
 		env = append(env, "TAGS="+o.Tags)
 	}
-	return Exec(ctx, w, Cmd{Env: env, Argv: append([]string{"go", "-C", o.SetupAWS, "run", "."}, args...)})
+	return Exec(ctx, w, Cmd{Env: env, Argv: SetupAWSArgv(o.SetupAWS, args...)})
+}
+
+// IsSetupAWSBinary reports whether path is a file: the setup-aws binary a
+// release archive carries beside substrate-eks, rather than the
+// native/tools/setup-aws source directory.
+func IsSetupAWSBinary(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// SetupAWSArgv is the argv that runs setup-aws at path with args: the
+// binary itself, by its absolute path, when path is one (IsSetupAWSBinary),
+// else `go -C <path> run .` on the source directory, as substrate-gke runs
+// setup-gcp.
+func SetupAWSArgv(path string, args ...string) []string {
+	if IsSetupAWSBinary(path) {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		return append([]string{path}, args...)
+	}
+	return append([]string{"go", "-C", path, "run", "."}, args...)
 }
 
 // ReadRecord returns the IDs the cluster records as installed (none when the

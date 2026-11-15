@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -309,5 +311,53 @@ func TestRunDeployNeedsAutoMode(t *testing.T) {
 	}
 	if err := Run(context.Background(), io.Discard, ActionVerify, []string{"iso"}, o); err != nil {
 		t.Fatalf("verify on Auto Mode: %v", err)
+	}
+}
+
+// Both ways: SetupAWS runs a release's setup-aws binary itself, by its
+// absolute path, and `go -C <dir> run .` on the source directory, with the
+// same arguments and environment.
+func TestSetupAWSRunsTheBinaryOrGoRun(t *testing.T) {
+	var got []Cmd
+	prev := Exec
+	t.Cleanup(func() { Exec = prev })
+	Exec = func(_ context.Context, _ io.Writer, c Cmd) error {
+		got = append(got, c)
+		return nil
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir()) // macOS: /var is /private/var, as os.Getwd sees it
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "setup-aws")
+	if err := os.WriteFile(bin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "tools", "setup-aws")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{bin, []string{bin, "plugin", "efs", "--delete"}},
+		{"setup-aws", []string{bin, "plugin", "efs", "--delete"}}, // relative: run by its absolute path, never looked up on PATH
+		{src, []string{"go", "-C", src, "run", ".", "plugin", "efs", "--delete"}},
+	} {
+		got = nil
+		o := Options{Cluster: "demo", Region: "us-west-2", Profile: "p", SetupAWS: tc.path, Tags: "auto-delete=no"}
+		if err := SetupAWS(context.Background(), io.Discard, o, "plugin", "efs", "--delete"); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || !slices.Equal(got[0].Argv, tc.want) {
+			t.Errorf("%s: ran %q, want %q", tc.path, got, tc.want)
+			continue
+		}
+		wantEnv := []string{"CLUSTER_NAME=demo", "AWS_REGION=us-west-2", "AWS_PROFILE=p", "PLAN=false", "KEEP_CLUSTER=false", "TAGS=auto-delete=no"}
+		if !slices.Equal(got[0].Env, wantEnv) {
+			t.Errorf("%s: env %q, want %q", tc.path, got[0].Env, wantEnv)
+		}
 	}
 }
