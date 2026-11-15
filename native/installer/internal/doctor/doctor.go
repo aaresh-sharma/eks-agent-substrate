@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +59,43 @@ func tool(name, fix string, args ...string) Check {
 	}}
 }
 
+// goFix says why an install needs Go even from the release binaries: the
+// control plane step runs `go run ./cmd/ate-setup` in the Agent Substrate
+// tree, whose go.mod (v1.0.0) asks for 1.27, and the counter demo and the
+// plugins that build an image or kubectl-ate build from that tree too. Go
+// runs with GOTOOLCHAIN=local, so an older Go cannot fetch 1.27 itself. A
+// --dry-run runs none of them and checks nothing (main's simChecks).
+const goFix = "install Go 1.27 or later (https://go.dev/doc/install): the control plane step runs Agent Substrate's ate-setup with go run, and the demo and some plugins build with Go"
+
+var goVersionRe = regexp.MustCompile(`go([0-9]+)\.([0-9]+)`)
+
+// goVersion grades the first line of `go version`: Go 1.27 or newer passes,
+// an older one fails with goFix, and one it cannot read is a warning.
+func goVersion(line string) Result {
+	m := goVersionRe.FindStringSubmatch(line)
+	if m == nil {
+		return Result{Warn, line, "could not read the Go version; " + goFix}
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	if major < 1 || major == 1 && minor < 27 {
+		return Result{Fail, line, goFix}
+	}
+	return Result{OK, line, ""}
+}
+
+// goCheck is the go tool check, then its version (goVersion).
+func goCheck() Check {
+	t := tool("go", goFix, "version")
+	return Check{Name: t.Name, Run: func(ctx context.Context) Result {
+		r := t.Run(ctx)
+		if r.Status != OK {
+			return r
+		}
+		return goVersion(r.Detail)
+	}}
+}
+
 // Checks are the preflight checks for profile and region.
 //
 // aws is still needed at run time, but only by kubectl's exec plugin (`aws eks
@@ -77,7 +116,7 @@ func Checks(profile, region string) []Check {
 			}
 			return Result{OK, MaskArn(arn), ""}
 		}},
-		tool("go", "install Go 1.27 or later: https://go.dev/doc/install", "version"),
+		goCheck(),
 		tool("git", "install git", "--version"),
 		tool("kubectl", "install kubectl: https://kubernetes.io/docs/tasks/tools/", "version", "--client=true"),
 		tool("aws", "install AWS CLI v2 (kubectl's token plugin and microVM staging use it): https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html", "--version"),
