@@ -125,15 +125,25 @@ func ChosenRelease(ids []string, tag, imageRepo string) Release {
 	return Needs{}.Release(tag, imageRepo)
 }
 
-// SourceOf is the plugin whose Source installs release tag, or "" when no
-// registered plugin's does (or tag is empty).
+// SourceOf is the first plugin (by Order) whose Source installs release tag,
+// or "" when no registered plugin's does (or tag is empty).
 func SourceOf(tag string) string {
-	for _, p := range All() {
-		if s := p.Needs.Source; s != nil && tag != "" && s.Tag == tag {
-			return p.ID
-		}
+	if ids := SourcesOf(tag); len(ids) > 0 {
+		return ids[0]
 	}
 	return ""
+}
+
+// SourcesOf is every plugin whose Source installs release tag, by Order
+// (mode3 and mode3-iso both install the fork).
+func SourcesOf(tag string) []string {
+	var ids []string
+	for _, p := range All() {
+		if s := p.Needs.Source; s != nil && tag != "" && s.Tag == tag {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
 }
 
 // RunningRelease is the release o's control plane runs, located like o's,
@@ -163,12 +173,13 @@ func ReleaseFix(id string) string {
 }
 
 // ReinstallFix is ReleaseFix for a control plane that runs release have
-// where the install's release is want: with or without the plugin whose
-// Source is one of the two, else at want's tag.
+// where the install's release is want: with or without the plugins whose
+// Source is one of the two (each one named, so an install with mode3-iso
+// alone is not told about mode3 only), else at want's tag.
 func ReinstallFix(have, want string) string {
 	for _, tag := range []string{have, want} {
-		if id := SourceOf(tag); id != "" {
-			return ReleaseFix(id)
+		if ids := SourcesOf(tag); len(ids) > 0 {
+			return ReleaseFix(strings.Join(ids, " or "))
 		}
 	}
 	return "run --remove-control-plane, then install again with --tag " + want

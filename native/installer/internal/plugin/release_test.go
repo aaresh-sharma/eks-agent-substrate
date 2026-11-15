@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -271,5 +272,23 @@ func TestReinstallFix(t *testing.T) {
 	}
 	if got := ReinstallFix("v1.0.0", "v1.0.0-fork"); !strings.HasSuffix(got, "--plugins fork") {
 		t.Errorf("to the fork: %q", got)
+	}
+}
+
+// Both ways: with two plugins installing the fork (as mode3 and mode3-iso
+// do), the reinstall names both, in Order; SourceOf still gives the first,
+// and a release no plugin installs names none.
+func TestReinstallFixNamesEveryPluginOfTheRelease(t *testing.T) {
+	releaseFixture(t, &fakeCluster{})
+	same := *testFork
+	Register(Plugin{ID: "fork-b", Order: 6, Needs: Needs{Preview: []string{"NetworkWorkers"}, Source: &same}})
+	if got := ReinstallFix("v1.0.0-fork", "v1.0.0"); !strings.HasSuffix(got, "with or without --plugins fork or fork-b") {
+		t.Errorf("two plugins: %q", got)
+	}
+	if got := SourcesOf("v1.0.0-fork"); !slices.Equal(got, []string{"fork", "fork-b"}) || SourceOf("v1.0.0-fork") != "fork" {
+		t.Errorf("SourcesOf = %q, SourceOf = %q", got, SourceOf("v1.0.0-fork"))
+	}
+	if got := SourcesOf("v1.0.0"); len(got) != 0 {
+		t.Errorf("SourcesOf(v1.0.0) = %q", got)
 	}
 }
