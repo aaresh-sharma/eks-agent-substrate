@@ -240,7 +240,7 @@ and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
 | `system`, without Auto Mode | always (required) |
 | `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created: the control plane is pinned to it |
 | `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it: the control plane and PostgreSQL run on Auto Mode nodes |
-| A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database |
+| A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database it is offered with |
 | Auto Mode, the bundled PostgreSQL, `gvisor`, no such plugin | `gvisor` alone |
 | Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one that runs on `system`): the minimal profile | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
 | No Auto Mode | `system` and at least one of `gvisor` and `microvm`; `nitro` is refused |

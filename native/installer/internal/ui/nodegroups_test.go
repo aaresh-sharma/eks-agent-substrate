@@ -289,6 +289,9 @@ func TestAGroupAPluginAddsIsValidated(t *testing.T) {
 // with neither gVisor nor microVM gets a node group: only from a plugin,
 // mode 3's microvm group (with RDS the system group too), or the system
 // group for a plugin that runs on it; none without one. The rule agrees.
+// The help names only the system-group plugins the Plugins screen offers
+// there (review of 1ca284d, NIT-1): the gateway, and login rotation with
+// RDS; t-gateway and t-rot are this package's two.
 func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 	for _, c := range []struct {
 		db      string
@@ -305,11 +308,25 @@ func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 			t.Errorf("Auto Mode, %s, nitro, %v: %v, want %v", c.db, c.plugins, got, c.want)
 		}
 	}
+	for db, want := range map[string][]string{state.DatabaseBundled: {"t-gateway"}, state.DatabaseRDS: {"t-gateway", "t-rot"}} {
+		s := newSetup("fresh")
+		s.NewCluster("fresh")
+		s.AutoMode, s.SandboxClasses, s.Database = true, state.ClassNitro, db
+		var offered []string
+		for _, p := range choosable() {
+			if slices.Contains(p.Nodes, "system") && s.PluginProblem(p, nil) == "" {
+				offered = append(offered, p.ID)
+			}
+		}
+		if !slices.Equal(offered, want) {
+			t.Errorf("Auto Mode, %s, nitro: system-group plugins offered %v, want %v", db, offered, want)
+		}
+	}
 	for _, c := range state.Classes {
 		for _, want := range []string{
 			"With neither class, an Auto Mode cluster gets a node group only from a plugin",
 			"mode 3 adds the microvm group (and with RDS the system group)",
-			"a plugin that runs on the system group",
+			"a plugin that runs on the system group (the LLM gateway, or login rotation with RDS) adds that one.",
 			"Without such a plugin it gets none",
 		} {
 			if !strings.Contains(help[c], want) {
