@@ -379,6 +379,8 @@ func runDemo(ctx context.Context, o plugin.Options, do demo.Options, classes str
 			}
 		}
 	}
+	// shortcut: o.BundledDatabase is not read here, as no class's plugin
+	// needs RDS; read it as runPlugins does if one ever sets NeedsRDS.
 	for _, c := range state.ParseClasses(classes) {
 		if ids := state.ClassPlugins(c); verify && len(ids) > 0 {
 			fmt.Println(demo.VerifyLine + c)
@@ -416,6 +418,14 @@ func runPlugins(ctx context.Context, action string, ids []string, o plugin.Optio
 	if err != nil {
 		return err
 	}
+	// The database, for a deploy or a check only: plugin.Run refuses one
+	// that needs RDS on the bundled PostgreSQL, and a removal is never
+	// refused for it, so a failed read does not stop one.
+	if action != plugin.ActionRemove {
+		if po.BundledDatabase, err = plugin.BundledDatabase(ctx, os.Stdout, po); err != nil {
+			return err
+		}
+	}
 	return plugin.Run(ctx, os.Stdout, action, ids, po)
 }
 
@@ -448,11 +458,6 @@ func clusterRelease(ctx context.Context, o plugin.Options, chosen []string, depl
 	// The node groups the cluster's nodes come from: plugin.Run refuses a
 	// plugin pinned to one it lacks.
 	if o.Pools, err = plugin.NodePools(ctx, os.Stdout, o); err != nil {
-		return o, err
-	}
-	// And the database: plugin.Run refuses one that needs RDS on the
-	// bundled PostgreSQL.
-	if o.BundledDatabase, err = plugin.BundledDatabase(ctx, os.Stdout, o); err != nil {
 		return o, err
 	}
 	if o.Release, err = plugin.ReadRelease(ctx, os.Stdout, o, chosen); err != nil {
