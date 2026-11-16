@@ -19,13 +19,20 @@ import (
 
 // kubectlAnswers, when set, makes this test binary, run as kubectl, a
 // cluster: each line is "<part of the argv>=<stdout>", and the first line
-// whose part is in the argv answers it (no line: empty stdout).
+// whose part is in the argv answers it (no line: empty stdout). The answer
+// kubectlFails makes that read fail instead.
 const kubectlAnswers = "SUBSTRATE_EKS_TEST_KUBECTL_ANSWERS"
+
+const kubectlFails = "!fails"
 
 func answerKubectl(answers string) {
 	argv := strings.Join(os.Args[1:], " ")
 	for _, l := range strings.Split(answers, "\n") {
 		if k, v, ok := strings.Cut(l, "="); ok && strings.Contains(argv, k) {
+			if v == kubectlFails {
+				fmt.Fprintln(os.Stderr, "error: the server is currently unable to handle the request")
+				os.Exit(1)
+			}
 			fmt.Print(v)
 			break
 		}
@@ -151,7 +158,10 @@ func TestCLIRefusesClassesTheClusterCannotRun(t *testing.T) {
 // PostgreSQL (StatefulSet ate-system/postgres exists) is refused, deploy and
 // verify alike, before the plugin's first step: no "Deploying plugin", so
 // its AWS half never runs. With RDS (no StatefulSet) verify goes on to the
-// plugin's own check.
+// plugin's own check; with no control plane a deploy is refused before the
+// plugin's first step too. A failed read of the StatefulSet stops a deploy or a
+// verify the same way, never read as RDS; a removal and the demo's check do
+// not read it, so it does not stop them (review of 1ca284d, NIT-4).
 func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
 	overlay, err := filepath.Abs("../deploy/eks")
 	if err != nil {
@@ -168,6 +178,30 @@ func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
 	_, out := runMain(t, cluster("", "v1.0.0"), "--plugin-action", "verify", "--plugins", "db-rotation", "--eks-overlay", overlay)
 	if strings.Contains(out, "uses the bundled PostgreSQL") || !strings.Contains(out, plugin.VerifyLine+"db-rotation") {
 		t.Errorf("verify with RDS did not reach the plugin's check:\n%s", out)
+	}
+	// No control plane: its AWS half is not made either (review of
+	// 1ca284d, NIT-5).
+	err, out = runMain(t, cluster("", ""), "--plugin-action", "deploy", "--plugins", "db-rotation", "--eks-overlay", overlay)
+	if err == nil || !strings.Contains(out, "no control plane is installed on demo") || !strings.Contains(out, "run --deploy-control-plane --database rds first") ||
+		strings.Contains(out, plugin.DeployLine) {
+		t.Errorf("deploy with no control plane: %v\n%s", err, out)
+	}
+
+	unread := cluster("", "v1.0.0") + "\nget statefulset postgres=" + kubectlFails
+	for _, action := range []string{"deploy", "verify"} {
+		err, out := runMain(t, unread, "--plugin-action", action, "--plugins", "db-rotation", "--eks-overlay", overlay)
+		if err == nil || !strings.Contains(out, "read whether demo runs the bundled PostgreSQL") ||
+			strings.Contains(out, plugin.DeployLine) || strings.Contains(out, plugin.VerifyLine) {
+			t.Errorf("%s with the database unread: %v\n%s", action, err, out)
+		}
+	}
+	err, out = runMain(t, unread, "--plugin-action", "remove", "--eks-overlay", overlay)
+	if err != nil || strings.Contains(out, "bundled PostgreSQL") {
+		t.Errorf("remove with the database unread: %v\n%s", err, out)
+	}
+	err, out = runMain(t, unread, "--verify")
+	if err == nil || strings.Contains(out, "bundled PostgreSQL") || !strings.Contains(out, "no substrate v1.0.0 tree with demos/counter") {
+		t.Errorf("--verify with the database unread: %v\n%s", err, out)
 	}
 }
 

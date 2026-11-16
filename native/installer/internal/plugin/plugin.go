@@ -215,10 +215,11 @@ type Options struct {
 	// the tree by.
 	OverlayDigest string
 	// Running is the release tag the installed control plane runs, as
-	// --probe-installed reads it ("" when unknown). Run's remove runs each
-	// Remove on it (RunningRelease) and compares it with Tag: a control
-	// plane still on another release (its plugin removed, or --tag changed
-	// since the install) is left only by a reinstall.
+	// --probe-installed reads it ("" when none is installed or its release
+	// cannot be read). Run's remove runs each Remove on it (RunningRelease)
+	// and compares it with Tag: a control plane still on another release
+	// (its plugin removed, or --tag changed since the install) is left only
+	// by a reinstall. Run refuses a NeedsRDS plugin while it is "".
 	Running string
 	// Kubeconfig is the installer's own kubeconfig for the cluster
 	// (awsx.KubeconfigPath), already written by the caller; its current
@@ -307,7 +308,8 @@ type Plugin struct {
 	// rotation rotates its logins): the wizard offers it only with RDS, and
 	// Run refuses to deploy or check it, before any child, on a cluster
 	// whose control plane uses the bundled PostgreSQL
-	// (Options.BundledDatabase).
+	// (Options.BundledDatabase) or that has no control plane (Options.Running
+	// empty).
 	NeedsRDS string
 	// NeedsDemo reports that Deploy builds on the counter demo (its actor
 	// templates): choosing it in the wizard turns the demo on, and the demo

@@ -147,10 +147,11 @@ chosen plugin that would add a node group, naming it), `n` moves on.
 **Choose plugins** lists the optional parts with their time and hourly cost.
 `space` picks one, and the plugins it needs with it. A plugin is refused,
 with the reason, when it needs Auto Mode on a cluster without it, needs the
-RDS database on a run with the bundled PostgreSQL (login rotation), or runs
-on a sandbox node group whose class is off (OpenClaw on `gvisor`) or that a
-cluster you connect lacks. One that runs on the `system` group makes that
-group on a new cluster, and the screen says so.
+RDS database on a run with the bundled PostgreSQL (login rotation), runs on
+a sandbox node group whose class is off (OpenClaw on `gvisor`), runs on a
+node group a cluster you connect lacks, or builds on the counter demo with
+neither gVisor nor microVM (EFS, S3 Files). One that runs on the `system`
+group makes that group on a new cluster, and the screen says so.
 
 ![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata](native/installer/docs/plugins.png)
 
@@ -240,7 +241,7 @@ and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
 | `system`, without Auto Mode | always (required) |
 | `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created: the control plane is pinned to it |
 | `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it: the control plane and PostgreSQL run on Auto Mode nodes |
-| A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database |
+| A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database it is offered with |
 | Auto Mode, the bundled PostgreSQL, `gvisor`, no such plugin | `gvisor` alone |
 | Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one that runs on `system`): the minimal profile | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
 | No Auto Mode | `system` and at least one of `gvisor` and `microvm`; `nitro` is refused |

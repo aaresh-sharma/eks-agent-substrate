@@ -289,6 +289,9 @@ func TestAGroupAPluginAddsIsValidated(t *testing.T) {
 // with neither gVisor nor microVM gets a node group: only from a plugin,
 // mode 3's microvm group (with RDS the system group too), or the system
 // group for a plugin that runs on it; none without one. The rule agrees.
+// The help names only the system-group plugins the Plugins screen offers
+// there (review of 1ca284d, NIT-1): the gateway, and login rotation with
+// RDS; t-gateway and t-rot are this package's two.
 func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 	for _, c := range []struct {
 		db      string
@@ -305,11 +308,25 @@ func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 			t.Errorf("Auto Mode, %s, nitro, %v: %v, want %v", c.db, c.plugins, got, c.want)
 		}
 	}
+	for db, want := range map[string][]string{state.DatabaseBundled: {"t-gateway"}, state.DatabaseRDS: {"t-gateway", "t-rot"}} {
+		s := newSetup("fresh")
+		s.NewCluster("fresh")
+		s.AutoMode, s.SandboxClasses, s.Database = true, state.ClassNitro, db
+		var offered []string
+		for _, p := range choosable() {
+			if slices.Contains(p.Nodes, "system") && s.PluginProblem(p, nil) == "" {
+				offered = append(offered, p.ID)
+			}
+		}
+		if !slices.Equal(offered, want) {
+			t.Errorf("Auto Mode, %s, nitro: system-group plugins offered %v, want %v", db, offered, want)
+		}
+	}
 	for _, c := range state.Classes {
 		for _, want := range []string{
 			"With neither class, an Auto Mode cluster gets a node group only from a plugin",
 			"mode 3 adds the microvm group (and with RDS the system group)",
-			"a plugin that runs on the system group",
+			"a plugin that runs on the system group (the LLM gateway, or login rotation with RDS) adds that one.",
 			"Without such a plugin it gets none",
 		} {
 			if !strings.Contains(help[c], want) {
@@ -357,7 +374,9 @@ func TestPluginsScreenRefusesLoginRotationOnTheBundledDatabase(t *testing.T) {
 // under the minimal profile, the default gateway (system) and t-kata
 // (microvm), are cleared and named; t-efs, which adds none, stays. The run
 // then makes no node group, as m says. Choosing one again on the Plugins
-// screen makes its group, as before.
+// screen makes its group, as before. m before the Plugins screen, on what
+// --plugins named, clears the same plugins from the Setup itself, and the
+// run reaches Review with none of them and no node group.
 func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
 	s := newSetup("fresh")
 	s.Plugins = nil // the defaults: the gateway, which the default run's system group fits
@@ -385,5 +404,56 @@ func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
 	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 ||
 		!strings.Contains(m.View(), "No node groups: everything runs on EKS Auto Mode nodes") {
 		t.Errorf("at %s, plugins %v, groups %v\n%s", m.m.Current().Title(), s.Plugins, s.NodeGroups(), m.View())
+	}
+
+	// Before the Plugins screen: the selection is what --plugins named.
+	s = newSetup("fresh")
+	s.Plugins = []string{"t-gateway", "t-efs", "t-kata"}
+	m = toSettings(t, testDeps(&recorder{}), s)
+	if m.pl.shown {
+		t.Fatal("the Plugins screen was shown before Settings")
+	}
+	m = press(m, "m")
+	if m.notice != "Cleared t-gateway and t-kata for the minimal profile (no node group); choose again on the Plugins screen to keep the group" ||
+		!slices.Equal(s.Plugins, []string{"t-efs"}) || len(groupRows(m)) != 0 {
+		t.Errorf("before the Plugins screen: notice %q, plugins %v, rows %v", m.notice, s.Plugins, groupRows(m))
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.pl.chosen["t-kata"] || !m.pl.chosen["t-efs"] {
+		t.Errorf("before the Plugins screen: at %s, chosen %v", m.m.Current().Title(), m.pl.chosen)
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 {
+		t.Errorf("before the Plugins screen: at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
+	}
+}
+
+// The panel names the node group a row's plugin adds, given the rest of the
+// selection without it and the chosen plugins that require it, which
+// clearing it clears too (review of 1ca284d, NIT-3). On Auto Mode with the
+// bundled PostgreSQL and gVisor alone (the gvisor group only), z-top adds
+// the system group through z-base before it is chosen. Once it is, z-base's
+// row says so, as EFS's does with S3 Files chosen: clearing z-base clears
+// z-top, and the group goes with them. Review makes the group.
+func TestPluginsPanelNamesTheGroupARequiredPluginAdds(t *testing.T) {
+	const adds = "Adds the system node group to the new cluster"
+	s := newSetup("fresh")
+	m := toSettings(t, testDeps(&recorder{}), s)
+	m = press(cursorTo(t, m, state.ClassMicroVM), "enter")
+	m = press(cursorTo(t, m, dbKey), "enter")
+	m = press(m, "n")
+	if m = pluginAt(m, "z-top"); m.m.Current() != state.Plugins || !strings.Contains(m.View(), adds) {
+		t.Fatalf("z-top not chosen, at %s:\n%s", m.m.Current().Title(), m.View())
+	}
+	m = press(m, " ")
+	if !m.pl.chosen["z-top"] || !m.pl.chosen["z-base"] {
+		t.Fatalf("chosen %v, notice %q", m.pl.chosen, m.notice)
+	}
+	if m = pluginAt(m, "z-base"); !strings.Contains(m.View(), adds) {
+		t.Errorf("z-base, chosen for z-top, does not name the system group:\n%s", m.View())
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.NodeGroups(), []string{"system", "gvisor"}) {
+		t.Errorf("at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
 	}
 }

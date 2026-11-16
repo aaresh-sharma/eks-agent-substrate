@@ -316,8 +316,9 @@ func TestRunDeployNeedsAutoMode(t *testing.T) {
 
 // Both ways: a plugin that needs RDS (db-rotation) is refused, deploy and
 // verify alike, before any child (its `setup-aws plugin` AWS half among
-// them), on a control plane on the bundled PostgreSQL, and deployed and
-// checked on one with RDS. Removing it is never refused.
+// them), on a control plane on the bundled PostgreSQL or on a cluster with
+// no control plane, and deployed and checked on one with RDS. Removing it
+// is never refused.
 func TestRunRefusesAPluginThatNeedsRDSOnTheBundledDatabase(t *testing.T) {
 	f := &fakeCluster{}
 	o := runFixture(t, f, nil)
@@ -336,8 +337,21 @@ func TestRunRefusesAPluginThatNeedsRDSOnTheBundledDatabase(t *testing.T) {
 	if err := Run(context.Background(), io.Discard, ActionRemove, []string{"rot"}, o); err != nil || !slices.Contains(f.log, "remove rot") {
 		t.Errorf("remove on the bundled PostgreSQL: %v, %q", err, f.log)
 	}
+	// No control plane (Running ""), so no database at all: refused the
+	// same way, before any child (review of 1ca284d, NIT-5).
 	f.log = nil
 	o.BundledDatabase = false
+	for _, action := range []string{ActionDeploy, ActionVerify} {
+		err := Run(context.Background(), io.Discard, action, []string{"rot"}, o)
+		if err == nil || !strings.Contains(err.Error(), "plugin rot rotates the RDS logins; no control plane is installed on demo") ||
+			!strings.Contains(err.Error(), "run --deploy-control-plane --database rds first") {
+			t.Errorf("%s with no control plane: want the refusal, got %v", action, err)
+		}
+	}
+	if len(f.log) != 0 {
+		t.Errorf("ran with no control plane: %q", f.log)
+	}
+	o.Running = "v1.0.0"
 	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"rot"}, o); err != nil {
 		t.Fatal(err)
 	}

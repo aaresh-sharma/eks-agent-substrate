@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/eksoverlay"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/dbrotation"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/llmgateway"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin/mode3"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
@@ -138,6 +140,10 @@ func TestCreatePrivateLogFile(t *testing.T) {
 // Mode with the nitro class alone gets a node group: only for a plugin that
 // adds one, mode3's microvm or system for a plugin that runs on it (the LLM
 // gateway); none without one. The rule, with the real plugins, agrees.
+// There the wizard offers only two of the plugins on system: the LLM
+// gateway, and login rotation with RDS (the class help names those). So the
+// READMEs' row for a plugin on system says it makes the group with whatever
+// classes and database it is offered with (review of 1ca284d, NIT-1).
 func TestSandboxClassesCommentSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 	for _, c := range []struct {
 		plugins []string
@@ -145,6 +151,39 @@ func TestSandboxClassesCommentSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 	}{{nil, nil}, {[]string{mode3.ID}, []string{"microvm"}}, {[]string{llmgateway.ID}, []string{"system"}}} {
 		if got := state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
 			t.Errorf("Auto Mode, bundled, nitro, %v: %v, want %v", c.plugins, got, c.want)
+		}
+	}
+	for db, want := range map[string][]string{state.DatabaseBundled: {llmgateway.ID}, state.DatabaseRDS: {llmgateway.ID, dbrotation.ID}} {
+		s := &state.Setup{ClusterName: "fresh", ClusterIsNew: true, AutoMode: true, SandboxClasses: state.ClassNitro, Database: db}
+		var offered []string
+		for _, p := range plugin.All() {
+			if p.Class == "" && slices.Contains(p.Nodes, "system") && s.PluginProblem(p, nil) == "" {
+				offered = append(offered, p.ID)
+			}
+		}
+		if !slices.Equal(offered, want) {
+			t.Errorf("Auto Mode, %s, nitro: plugins on system offered %v, want %v", db, offered, want)
+		}
+	}
+	for file, row := range map[string]string{
+		filepath.Join("..", "..", "README.md"): "| A plugin that runs on `system` (",
+		filepath.Join("..", "README.md"):       "| A plugin on `system` (",
+	} {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, l := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(l, row) {
+				found = true
+				if !strings.HasSuffix(l, "| `system`, whatever the classes and database it is offered with |") {
+					t.Errorf("%s: the row for a plugin on system reads\n%s", file, l)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s has no row starting %q", file, row)
 		}
 	}
 	cfg, err := state.LoadConfig(filepath.Join("..", ".."), nil)

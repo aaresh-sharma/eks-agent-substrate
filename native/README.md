@@ -235,7 +235,7 @@ outside it):
 | `system`, without Auto Mode | always (required) |
 | `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created, which the control plane is cordoned onto |
 | `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it (`NODE_GROUPS=gvisor` for the `gvisor` class alone) |
-| A plugin on `system` (`llm-gateway`, `efs`, `db-rotation`, `credprovider-aws`) | `system`, whatever the classes and database |
+| A plugin on `system` (`llm-gateway`, `efs`, `db-rotation`, `credprovider-aws`) | `system`, whatever the classes and database it is offered with |
 | Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one on `system`) | none (`NODE_GROUPS=none`): no launch template, no node IAM role; the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
 | No Auto Mode with nothing to run sandboxes on (`nitro` alone) | refused |
 
@@ -308,7 +308,8 @@ sandbox group whose class is off, or on a group a connected cluster lacks.
 lack the `ate.dev/pool` label. `db-rotation` needs RDS (`Plugin.NeedsRDS`):
 with the bundled PostgreSQL the wizard refuses it on the Plugins screen, and
 `--plugin-action deploy|verify` refuses it before its first step on a control
-plane whose StatefulSet `ate-system/postgres` exists.
+plane whose StatefulSet `ate-system/postgres` exists, or on a cluster with no
+control plane.
 
 On an installed cluster:
 
