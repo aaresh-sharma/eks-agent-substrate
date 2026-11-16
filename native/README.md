@@ -308,7 +308,8 @@ sandbox group whose class is off, or on a group a connected cluster lacks.
 lack the `ate.dev/pool` label. `db-rotation` needs RDS (`Plugin.NeedsRDS`):
 with the bundled PostgreSQL the wizard refuses it on the Plugins screen, and
 `--plugin-action deploy|verify` refuses it before its first step on a control
-plane whose StatefulSet `ate-system/postgres` exists.
+plane whose StatefulSet `ate-system/postgres` exists, or on a cluster with no
+control plane.
 
 On an installed cluster:
 

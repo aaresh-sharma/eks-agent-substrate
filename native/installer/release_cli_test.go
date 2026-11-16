@@ -158,7 +158,8 @@ func TestCLIRefusesClassesTheClusterCannotRun(t *testing.T) {
 // PostgreSQL (StatefulSet ate-system/postgres exists) is refused, deploy and
 // verify alike, before the plugin's first step: no "Deploying plugin", so
 // its AWS half never runs. With RDS (no StatefulSet) verify goes on to the
-// plugin's own check. A failed read of the StatefulSet stops a deploy or a
+// plugin's own check; with no control plane a deploy is refused before the
+// plugin's first step too. A failed read of the StatefulSet stops a deploy or a
 // verify the same way, never read as RDS; a removal and the demo's check do
 // not read it, so it does not stop them (review of 1ca284d, NIT-4).
 func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
@@ -177,6 +178,13 @@ func TestCLIRefusesDBRotationOnTheBundledDatabase(t *testing.T) {
 	_, out := runMain(t, cluster("", "v1.0.0"), "--plugin-action", "verify", "--plugins", "db-rotation", "--eks-overlay", overlay)
 	if strings.Contains(out, "uses the bundled PostgreSQL") || !strings.Contains(out, plugin.VerifyLine+"db-rotation") {
 		t.Errorf("verify with RDS did not reach the plugin's check:\n%s", out)
+	}
+	// No control plane: its AWS half is not made either (review of
+	// 1ca284d, NIT-5).
+	err, out = runMain(t, cluster("", ""), "--plugin-action", "deploy", "--plugins", "db-rotation", "--eks-overlay", overlay)
+	if err == nil || !strings.Contains(out, "no control plane is installed on demo") || !strings.Contains(out, "run --deploy-control-plane --database rds first") ||
+		strings.Contains(out, plugin.DeployLine) {
+		t.Errorf("deploy with no control plane: %v\n%s", err, out)
 	}
 
 	unread := cluster("", "v1.0.0") + "\nget statefulset postgres=" + kubectlFails

@@ -274,9 +274,13 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 				return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
 			}
 			// Before its AWS half, which would otherwise be made for an
-			// install it cannot work on.
+			// install it cannot work on, or for none.
 			if p.NeedsRDS != "" && o.BundledDatabase {
 				return fmt.Errorf("plugin %s %s; %s's control plane uses the bundled PostgreSQL: install it with --database rds to use the plugin",
+					p.ID, p.NeedsRDS, o.Cluster)
+			}
+			if p.NeedsRDS != "" && o.Running == "" {
+				return fmt.Errorf("plugin %s %s; no control plane is installed on %s (or the release it runs cannot be read): run --deploy-control-plane --database rds first",
 					p.ID, p.NeedsRDS, o.Cluster)
 			}
 		}
