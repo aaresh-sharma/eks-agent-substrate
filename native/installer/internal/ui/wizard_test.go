@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -595,6 +596,80 @@ func TestRedact(t *testing.T) {
 		if out := (Model{}).redact(in); out != in {
 			t.Errorf("without --redact %q -> %q", in, out)
 		}
+	}
+}
+
+var foldedRows = regexp.MustCompile(`(✓ \d+ done|○ \d+ more)`)
+
+// Seven plugins make the Install the plugins step 14 rows, as on the owner's
+// Mac run. Whatever the terminal's height, a running step shows its active
+// row (under the stop confirmation, which stays first), and a failed or
+// stopped one its failed row and outcome: rows that do not fit fold into one
+// line each side of that row. A terminal tall enough for everything shows
+// every row, unfolded.
+func TestTheActiveRowStaysOnAShortScreen(t *testing.T) {
+	ids := []string{"t-gateway", "t-efs", "t-s3files", "t-ondemo", "t-kata", "t-claw", "t-rot"}
+	for _, tc := range []struct {
+		h, active int
+		err       error
+		ask       bool
+		want      []string
+	}{
+		{30, 13, nil, true, []string{"Stop plugins?", "⠋ Check Login rotation"}},
+		{24, 13, nil, false, []string{"⠋ Check Login rotation", "output line 19"}},
+		{24, 3, errStopped, false, []string{"✗ Check EFS volumes", "Stopped with ctrl+c"}},
+		{24, 3, errors.New("helm upgrade failed"), false, []string{"✗ Check EFS volumes", "Failed: helm upgrade failed"}},
+		{30, 3, errors.New("helm upgrade failed"), false, []string{"✗ Check EFS volumes", "Failed: helm upgrade failed"}},
+	} {
+		s := newSetup("new")
+		s.Plugins = ids
+		m := New(testDeps(&recorder{}), s)
+		next, _ := m.Update(tea.WindowSizeMsg{Width: 126, Height: tc.h})
+		m = next.(Model)
+		m.jump(state.InstallOrder(s), state.InstallPlugins)
+		tk := newTask(execx.Spec{Label: "plugins", Display: "substrate-eks --plugin-action deploy --cluster new --region us-west-2 --plugins " + strings.Join(ids, ",")},
+			steps.Plugins(resolved(ids)))
+		tk.active, tk.done, tk.err = tc.active, tc.err != nil, tc.err
+		for i := range 20 {
+			tk.lines = append(tk.lines, fmt.Sprintf("output line %d", i))
+		}
+		m.tasks[state.InstallPlugins] = tk
+		m.stopAsk = tc.ask
+		v := stripANSI(m.View())
+		name := fmt.Sprintf("%d rows, row %d, %v", tc.h, tc.active, tc.err)
+		if len(tk.items) != 14 {
+			t.Fatalf("%s: %d rows, want 14", name, len(tk.items))
+		}
+		last := -1
+		for _, want := range tc.want {
+			i := strings.Index(v, want)
+			if i < 0 || i < last {
+				t.Errorf("%s: %q missing or out of order:\n%s", name, want, v)
+			}
+			last = i
+		}
+		if h := lipgloss.Height(v); h > tc.h {
+			t.Errorf("%s: %d rows tall", name, h)
+		}
+	}
+	// Tall enough for everything: every row, none folded.
+	s := newSetup("new")
+	s.Plugins = ids
+	m := New(testDeps(&recorder{}), s)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 126, Height: 60})
+	m = next.(Model)
+	m.jump(state.InstallOrder(s), state.InstallPlugins)
+	tk := newTask(execx.Spec{Label: "plugins", Display: "substrate-eks --plugin-action deploy"}, steps.Plugins(resolved(ids)))
+	tk.active = 13
+	m.tasks[state.InstallPlugins] = tk
+	v := stripANSI(m.View())
+	for _, it := range tk.items {
+		if !strings.Contains(v, it.Label) {
+			t.Errorf("60 rows: %q missing:\n%s", it.Label, v)
+		}
+	}
+	if f := foldedRows.FindString(v); f != "" {
+		t.Errorf("60 rows: folded %q:\n%s", f, v)
 	}
 }
 

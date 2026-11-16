@@ -467,9 +467,9 @@ func TestGuardRemovalNamesTheRecordedPlugins(t *testing.T) {
 		if m.cl.mode != "installed" {
 			t.Fatalf("%s: mode %q", tc.name, m.cl.mode)
 		}
-		offer := strings.Join(strings.Fields(stripANSI(m.clusterPanel())), " ")
+		offer := strings.Join(strings.Fields(stripANSI(m.clusterPanel(0))), " ")
 		m = press(m, "t")
-		confirm := strings.Join(strings.Fields(stripANSI(m.clusterPanel())), " ")
+		confirm := strings.Join(strings.Fields(stripANSI(m.clusterPanel(0))), " ")
 		if m.cl.mode != "remove-confirm" {
 			t.Fatalf("%s: mode %q after t", tc.name, m.cl.mode)
 		}
