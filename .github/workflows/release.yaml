@@ -1,0 +1,46 @@
+# The native installer's release, on every pushed v* tag: GoReleaser
+# (.goreleaser.yaml) builds substrate-eks and setup-aws for darwin and linux
+# on amd64 and arm64, uploads one archive per OS/arch and checksums.txt to
+# the tag's GitHub Release, then each archive gets a signed build provenance
+# attestation, which a user checks with
+#   gh attestation verify <archive> --repo csantanapr/eks-agent-substrate
+# A person publishes by pushing the tag; nothing else triggers this.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write     # create the release and upload its assets
+  id-token: write     # the OIDC token the attestation is signed with
+  attestations: write # store the attestation
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  GOTOOLCHAIN: local
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0 # GoReleaser reads the tags and the commits since the previous one
+        persist-credentials: false
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        # The install needs 1.27 (Agent Substrate's ate-setup); build with it.
+        go-version: '1.27'
+        # No module cache: a tag run would restore one saved by the
+        # default branch's runs into the binaries it attests.
+        cache: false
+    - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+      with:
+        distribution: goreleaser
+        version: v2.18.3 # the version .goreleaser.yaml was checked with
+        args: release --clean
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      with:
+        subject-path: dist/*.tar.gz

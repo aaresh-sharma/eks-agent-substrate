@@ -1,0 +1,69 @@
+# GoReleaser v2: the release archives of the native installer, built by
+# .github/workflows/release.yaml when a v* tag is pushed.
+#
+# One archive per OS and architecture holds both binaries and the files the
+# installer reads from a checkout at run time (config.env, deploy/eks), so it
+# runs from wherever it is extracted, with no Go, git checkout or source:
+#
+#   substrate-eks   the installer (native/installer)
+#   setup-aws       its AWS half (native/tools/setup-aws), which substrate-eks
+#                   runs from beside itself instead of `go run`
+#   config.env      the defaults; Settings writes config.local.env beside it
+#   deploy/eks/     the EKS kustomize content and code patch (native/deploy/eks)
+#   LICENSE, README.md
+#
+# An install still needs Go 1.27 for the steps that build from the Agent
+# Substrate tree (see README.md, "Two ways to run it").
+#
+# Check it locally, publishing nothing:
+#   goreleaser check
+#   goreleaser release --snapshot --clean     # into dist/ (gitignored)
+version: 2
+
+project_name: substrate-eks
+
+builds:
+  - id: substrate-eks
+    binary: substrate-eks
+    dir: native/installer
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+  - id: setup-aws
+    binary: setup-aws
+    dir: native/tools/setup-aws
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/cmd.version={{ .Version }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: substrate-eks
+    ids: [substrate-eks, setup-aws]
+    formats: [tar.gz]
+    # native/install.sh --from-release builds the same name from uname.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - config.env
+      - LICENSE
+      - README.md
+      - src: native/deploy/eks/**/*
+        dst: deploy/eks
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: git

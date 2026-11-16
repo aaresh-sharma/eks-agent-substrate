@@ -1,0 +1,349 @@
+package ui
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/theme"
+)
+
+// pluginsScreen chooses the optional parts of the install (plugin.All):
+// selecting one selects what it requires, and clearing one clears what
+// requires it. The choice is state.Setup.Plugins; the control plane step
+// carries their needs and the Install the plugins step deploys them.
+type pluginsScreen struct {
+	cursor int
+	chosen map[string]bool
+	// shown: the defaults (or --plugins) have been applied once.
+	shown bool
+}
+
+// resolved is ids with what they require, in install order; nil for an
+// unknown ID (main refuses those before the wizard starts).
+func resolved(ids []string) []plugin.Plugin {
+	ps, err := plugin.Resolve(ids)
+	if err != nil {
+		return nil
+	}
+	return ps
+}
+
+func pluginTitles(ps []plugin.Plugin) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.Title
+	}
+	return out
+}
+
+// choosable are the plugins the screen lists: every registered one but
+// those a sandbox class installs (plugin.Class), which Settings chooses.
+func choosable() []plugin.Plugin {
+	var out []plugin.Plugin
+	for _, p := range plugin.All() {
+		if p.Class == "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// unavailable is why p cannot be chosen for this run's cluster, its sandbox
+// classes and the other chosen plugins, or "" (state.PluginProblem).
+func (m Model) unavailable(p plugin.Plugin) string {
+	return m.s.PluginProblem(p, m.chosenIDs())
+}
+
+// enterPlugins preselects, the first time, --plugins or else the Default
+// plugins, with what they require. A preselected plugin this cluster cannot
+// take is dropped, and the screen says why. On a cluster the run creates, a
+// Default plugin that would add a node group is not preselected: the LLM
+// gateway on Auto Mode with the bundled PostgreSQL (or the AWS Nitro
+// sandbox alone) runs on a system group the selection does not otherwise
+// make. Choosing it makes the group.
+func (m *Model) enterPlugins() {
+	pl := m.pl
+	if !pl.shown {
+		pl.shown = true
+		ids := m.s.Plugins
+		if ids == nil {
+			groups := m.s.NodeGroups()
+			for _, p := range choosable() {
+				if !p.Default {
+					continue
+				}
+				if with := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, []string{p.ID}); m.s.ClusterIsNew && !slices.Equal(with, groups) {
+					m.notice = fmt.Sprintf("not preselected: %s (adds the %s node group)", p.ID, strings.Join(added(groups, with), " and "))
+					continue
+				}
+				ids = append(ids, p.ID)
+			}
+		}
+		pl.chosen = map[string]bool{}
+		for _, p := range resolved(ids) {
+			if p.Class == "" {
+				pl.chosen[p.ID] = true
+			}
+		}
+	}
+	m.dropUnavailable()
+	pl.cursor = min(pl.cursor, max(len(choosable())-1, 0))
+}
+
+// addedGroups are the node groups choosing p adds to a cluster the run
+// creates, given the rest of the selection: the system group for a plugin
+// that runs on it where nothing else makes it, the microvm group for
+// mode 3 without the microvm class. The rest is the selection without p and
+// the chosen plugins that require it, which clearing p clears (setPlugin):
+// EFS's row names the system group when S3 Files is chosen with it.
+func (m Model) addedGroups(p plugin.Plugin) []string {
+	if !m.s.ClusterIsNew {
+		return nil
+	}
+	drop := append(m.requiredBy(p.ID), p.ID)
+	rest := slices.DeleteFunc(m.chosenIDs(), func(id string) bool { return slices.Contains(drop, id) })
+	without := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, rest)
+	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, append(rest, p.ID)))
+}
+
+// groupSettingsProblem is why a node group the new cluster gets with the
+// chosen plugins has a setting setup-aws would not take, such as
+// MICROVM_NODES=abc, or "". Settings checks only the groups it shows, and a
+// plugin chosen after it can add one: mode 3's microvm group, or the system
+// group for a plugin that runs on it.
+func (m Model) groupSettingsProblem() string {
+	if !m.s.ClusterIsNew {
+		return ""
+	}
+	values := state.ConfigValues(m.s)
+	errs := state.ValidateConfig(values)
+	for _, g := range m.s.NodeGroups() {
+		for _, k := range []string{strings.ToUpper(g) + "_INSTANCE_TYPE", strings.ToUpper(g) + "_NODES"} {
+			if want, bad := errs[k]; bad {
+				return fmt.Sprintf("%s=%s: want %s, for the %s node group the chosen plugins add; set it in Settings (esc)", k, values[k], want, g)
+			}
+		}
+	}
+	return ""
+}
+
+// added are the groups of with that groups lacks.
+func added(groups, with []string) []string {
+	var out []string
+	for _, g := range with {
+		if !slices.Contains(groups, g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// dropUnavailable clears every chosen plugin this run cannot take (and what
+// requires it), and says which and why. It reports whether it dropped any.
+func (m *Model) dropUnavailable() bool {
+	var dropped []string
+	for _, p := range choosable() {
+		if m.pl.chosen[p.ID] && m.unavailable(p) != "" {
+			dropped = append(dropped, p.ID)
+			m.setPlugin(p.ID, false)
+		}
+	}
+	if len(dropped) > 0 {
+		// The list says why for the row under the cursor.
+		m.notice = "not selected: " + strings.Join(dropped, ", ") + " (unavailable)"
+	}
+	return len(dropped) > 0
+}
+
+// setPlugin selects id with everything it requires, or clears it with
+// everything that requires it.
+func (m *Model) setPlugin(id string, on bool) {
+	pl := m.pl
+	if on {
+		for _, p := range resolved([]string{id}) {
+			pl.chosen[p.ID] = true
+		}
+		return
+	}
+	pl.chosen[id] = false
+	for _, p := range plugin.All() {
+		if !pl.chosen[p.ID] || p.ID == id {
+			continue
+		}
+		for _, r := range resolved([]string{p.ID}) {
+			if r.ID == id {
+				m.setPlugin(p.ID, false)
+			}
+		}
+	}
+}
+
+// chosenIDs is the selection in install order, never nil: an empty choice is
+// a choice, unlike a Setup that was never shown this screen.
+func (m Model) chosenIDs() []string {
+	ids := []string{}
+	for _, p := range plugin.All() {
+		if m.pl.chosen[p.ID] {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
+func (m *Model) pluginsKey(msg tea.KeyMsg) tea.Cmd {
+	all := choosable()
+	pl := m.pl
+	switch msg.String() {
+	case "up", "k":
+		if pl.cursor > 0 {
+			pl.cursor--
+		}
+	case "down", "j":
+		if pl.cursor < len(all)-1 {
+			pl.cursor++
+		}
+	case " ", "x":
+		if len(all) == 0 {
+			return nil
+		}
+		p := all[pl.cursor]
+		if why := m.unavailable(p); why != "" && !pl.chosen[p.ID] {
+			m.notice = p.Title + " " + why
+			return nil
+		}
+		m.setPlugin(p.ID, !pl.chosen[p.ID])
+		// Clearing one may take away what another runs on (mode 3's
+		// microvm group).
+		m.dropUnavailable()
+	case "enter":
+		// Defensive: cannot fire today, as entry and every space already drop what does not fit, and no other key changes it.
+		if m.dropUnavailable() {
+			return nil
+		}
+		m.s.Plugins = m.chosenIDs()
+		// Settings checked only the node groups it showed; a plugin may
+		// add one (review NIT-4). Settings now shows that group's row.
+		if why := m.groupSettingsProblem(); why != "" {
+			m.notice = why
+			return nil
+		}
+		// A plugin built on the counter demo's templates needs the demo,
+		// which then runs before the plugins (state.InstallOrder).
+		if !m.s.DemoMode {
+			for _, p := range resolved(m.s.Plugins) {
+				if p.NeedsDemo {
+					m.s.DemoMode = true
+					m.notice = p.Title + " builds on the counter demo, so the demo is turned on"
+					break
+				}
+			}
+		}
+		return m.commit()
+	case "esc", "b":
+		m.m.Prev()
+		// Settings keeps its edits, and shows and checks the node groups
+		// of the plugins applied so far (a refused enter applies them).
+		if m.m.Current() == state.Settings {
+			m.refreshFields()
+			m.checkSettings()
+		}
+	case "q":
+		m.quitting = true
+		return tea.Quit
+	}
+	return nil
+}
+
+// requiredBy names the chosen plugins that require id.
+func (m Model) requiredBy(id string) []string {
+	var out []string
+	for _, p := range plugin.All() {
+		if m.pl.chosen[p.ID] && p.ID != id && slices.ContainsFunc(resolved([]string{p.ID}), func(r plugin.Plugin) bool { return r.ID == id }) {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
+func (m Model) pluginsView() string {
+	all := choosable()
+	var b strings.Builder
+	b.WriteString(theme.Title.Render("Choose plugins") + "\n")
+	b.WriteString(theme.Subtle.Render("Optional parts of the install. The control plane is installed once with what they need, then each is deployed and checked.") + "\n\n")
+	if len(all) == 0 {
+		b.WriteString("No plugin is built into this installer. Press enter to continue.\n")
+		return b.String()
+	}
+	w := m.bodyWidth() - 2
+	for i, p := range all {
+		box := "[ ]"
+		why := m.unavailable(p)
+		switch {
+		case why != "":
+			box = "[–]"
+		case m.pl.chosen[p.ID]:
+			box = "[" + theme.GlyphDone + "]"
+		}
+		cost := "–"
+		if p.HourlyUSD > 0 {
+			cost = fmt.Sprintf("$%.2f/h", p.HourlyUSD)
+		}
+		note := ""
+		switch {
+		case why != "" && p.NeedsAutoMode != "" && !m.s.AutoMode:
+			note = "needs Auto Mode"
+		case why != "" && p.NeedsRDS != "" && m.s.Database == state.DatabaseBundled:
+			note = "needs RDS"
+		case why != "":
+			note = "unavailable"
+		case len(m.requiredBy(p.ID)) > 0:
+			note = "for " + strings.Join(m.requiredBy(p.ID), ", ")
+		case p.Default:
+			note = "default"
+		}
+		row := box + " " + pad(truncate(p.Title, w-40), w-40) + " " + pad(truncate(note, 15), 15) + " " +
+			pad(fmt.Sprintf("~%d min", p.Minutes), 7) + " " + cost
+		switch {
+		case i == m.pl.cursor:
+			b.WriteString(theme.Selected.Render("› "+row) + "\n")
+		case why != "":
+			b.WriteString(theme.Fainted.Render("  "+row) + "\n")
+		default:
+			b.WriteString("  " + row + "\n")
+		}
+	}
+	p := all[m.pl.cursor]
+	para := lipgloss.NewStyle().Width(w - 4)
+	b.WriteString("\n" + theme.Title.Render(p.Title) + "\n")
+	b.WriteString(theme.Subtle.Render(indent(para.Render(p.Summary), "  ")) + "\n")
+	if len(p.Requires) > 0 {
+		b.WriteString(theme.Subtle.Render("  Requires "+strings.Join(p.Requires, ", ")+", which is selected with it.") + "\n")
+	}
+	if why := m.unavailable(p); why != "" {
+		b.WriteString(theme.Warning.Render(indent(para.Render("Not available: "+why+"."), "  ")) + "\n")
+	} else if g := m.addedGroups(p); len(g) > 0 {
+		b.WriteString(theme.Subtle.Render(indent(para.Render("Adds the "+strings.Join(g, " and ")+" node group to the new cluster (Review shows its cost)."), "  ")) + "\n")
+	}
+	ps := resolved(m.chosenIDs())
+	minutes, usd := 0, 0.0
+	for _, q := range ps {
+		minutes += q.Minutes
+		usd += q.HourlyUSD
+	}
+	b.WriteString("\n" + theme.Subtle.Render(fmt.Sprintf("Selected: %d plugin(s) · about %d min · %s", len(ps), minutes, perHour(usd))) + "\n")
+	return b.String()
+}
+
+// perHour is a plugin's or a step's added cost, for the lists.
+func perHour(usd float64) string {
+	if usd == 0 {
+		return "no hourly cost"
+	}
+	return fmt.Sprintf("+$%.2f an hour", usd)
+}

@@ -5,6 +5,8 @@ config.local.env
 # Local only, not part of the repository
 tmp/
 bin/
+# goreleaser release --snapshot output (.goreleaser.yaml)
+dist/
 video/
 substrate-rc2/
 
