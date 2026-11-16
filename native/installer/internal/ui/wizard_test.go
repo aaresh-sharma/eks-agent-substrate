@@ -366,8 +366,15 @@ func TestNitroIsASandboxClassThatNeedsAutoMode(t *testing.T) {
 		if tk := m.tasks[state.NitroSandbox]; tk == nil || len(tk.items) != 2 || tk.items[0].Label != "Deploy AWS Nitro sandbox" {
 			t.Errorf("nitro step checklist %+v", tk)
 		}
-		if tk := m.tasks[state.Demo]; len(tk.items) != 5 || tk.items[4].Label != "Check suspend and resume on nitro" {
+		const nitroRow = "Check suspend and resume on nitro (deployed by Set up Nitro sandboxes)"
+		if tk := m.tasks[state.Demo]; len(tk.items) != 5 || tk.items[4].Label != nitroRow {
 			t.Errorf("demo checklist %+v", tk.items)
+		}
+		// The row is one line of the panel at the screenshot size.
+		m = sized(m)
+		m.jump(state.InstallOrder(s), state.Demo)
+		if v := m.View(); !strings.Contains(v, nitroRow) {
+			t.Errorf("the nitro row is wrapped or missing at 126 columns:\n%s", v)
 		}
 	}
 }
