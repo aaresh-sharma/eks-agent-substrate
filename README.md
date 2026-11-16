@@ -147,10 +147,11 @@ chosen plugin that would add a node group, naming it), `n` moves on.
 **Choose plugins** lists the optional parts with their time and hourly cost.
 `space` picks one, and the plugins it needs with it. A plugin is refused,
 with the reason, when it needs Auto Mode on a cluster without it, needs the
-RDS database on a run with the bundled PostgreSQL (login rotation), or runs
-on a sandbox node group whose class is off (OpenClaw on `gvisor`) or that a
-cluster you connect lacks. One that runs on the `system` group makes that
-group on a new cluster, and the screen says so.
+RDS database on a run with the bundled PostgreSQL (login rotation), runs on
+a sandbox node group whose class is off (OpenClaw on `gvisor`), runs on a
+node group a cluster you connect lacks, or builds on the counter demo with
+neither gVisor nor microVM (EFS, S3 Files). One that runs on the `system`
+group makes that group on a new cluster, and the screen says so.
 
 ![Choose plugins: the LLM gateway, EFS and S3 Files volumes, the Secrets Manager credential provider and login rotation, OpenClaw, and mode 3 on Kata](native/installer/docs/plugins.png)
 
