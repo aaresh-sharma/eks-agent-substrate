@@ -99,12 +99,15 @@ func (m *Model) enterPlugins() {
 // addedGroups are the node groups choosing p adds to a cluster the run
 // creates, given the rest of the selection: the system group for a plugin
 // that runs on it where nothing else makes it, the microvm group for
-// mode 3 without the microvm class.
+// mode 3 without the microvm class. The rest is the selection without p and
+// the chosen plugins that require it, which clearing p clears (setPlugin):
+// EFS's row names the system group when S3 Files is chosen with it.
 func (m Model) addedGroups(p plugin.Plugin) []string {
 	if !m.s.ClusterIsNew {
 		return nil
 	}
-	rest := slices.DeleteFunc(m.chosenIDs(), func(id string) bool { return id == p.ID })
+	drop := append(m.requiredBy(p.ID), p.ID)
+	rest := slices.DeleteFunc(m.chosenIDs(), func(id string) bool { return slices.Contains(drop, id) })
 	without := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, rest)
 	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, append(rest, p.ID)))
 }

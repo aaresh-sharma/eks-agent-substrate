@@ -43,6 +43,10 @@ func init() {
 		{ID: "t-ondemo", Title: "Counter volumes", Summary: "Counter templates with a volume.", Order: 50, Minutes: 2, NeedsDemo: true},
 		{ID: "t-rot", Title: "Login rotation", Summary: "Rotates the RDS logins.", Order: 80, Minutes: 8, Nodes: []string{"system"},
 			NeedsRDS: "rotates the RDS logins, so it needs the RDS database"},
+		// z-base runs on the system group and builds on the counter demo,
+		// and z-top requires it: EFS and S3 Files.
+		{ID: "z-base", Title: "Z base", Summary: "On the system nodes.", Order: 90, Minutes: 1, Nodes: []string{"system"}, NeedsDemo: true},
+		{ID: "z-top", Title: "Z top", Summary: "Built on Z base.", Order: 91, Minutes: 1, Requires: []string{"z-base"}},
 	} {
 		plugin.Register(p)
 	}

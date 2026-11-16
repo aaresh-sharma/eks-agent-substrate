@@ -427,3 +427,33 @@ func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
 		t.Errorf("before the Plugins screen: at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
 	}
 }
+
+// The panel names the node group a row's plugin adds, given the rest of the
+// selection without it and the chosen plugins that require it, which
+// clearing it clears too (review of 1ca284d, NIT-3). On Auto Mode with the
+// bundled PostgreSQL and gVisor alone (the gvisor group only), z-top adds
+// the system group through z-base before it is chosen. Once it is, z-base's
+// row says so, as EFS's does with S3 Files chosen: clearing z-base clears
+// z-top, and the group goes with them. Review makes the group.
+func TestPluginsPanelNamesTheGroupARequiredPluginAdds(t *testing.T) {
+	const adds = "Adds the system node group to the new cluster"
+	s := newSetup("fresh")
+	m := toSettings(t, testDeps(&recorder{}), s)
+	m = press(cursorTo(t, m, state.ClassMicroVM), "enter")
+	m = press(cursorTo(t, m, dbKey), "enter")
+	m = press(m, "n")
+	if m = pluginAt(m, "z-top"); m.m.Current() != state.Plugins || !strings.Contains(m.View(), adds) {
+		t.Fatalf("z-top not chosen, at %s:\n%s", m.m.Current().Title(), m.View())
+	}
+	m = press(m, " ")
+	if !m.pl.chosen["z-top"] || !m.pl.chosen["z-base"] {
+		t.Fatalf("chosen %v, notice %q", m.pl.chosen, m.notice)
+	}
+	if m = pluginAt(m, "z-base"); !strings.Contains(m.View(), adds) {
+		t.Errorf("z-base, chosen for z-top, does not name the system group:\n%s", m.View())
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.NodeGroups(), []string{"system", "gvisor"}) {
+		t.Errorf("at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
+	}
+}
