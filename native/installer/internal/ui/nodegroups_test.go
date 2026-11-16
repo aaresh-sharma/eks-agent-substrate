@@ -357,7 +357,9 @@ func TestPluginsScreenRefusesLoginRotationOnTheBundledDatabase(t *testing.T) {
 // under the minimal profile, the default gateway (system) and t-kata
 // (microvm), are cleared and named; t-efs, which adds none, stays. The run
 // then makes no node group, as m says. Choosing one again on the Plugins
-// screen makes its group, as before.
+// screen makes its group, as before. m before the Plugins screen, on what
+// --plugins named, clears the same plugins from the Setup itself, and the
+// run reaches Review with none of them and no node group.
 func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
 	s := newSetup("fresh")
 	s.Plugins = nil // the defaults: the gateway, which the default run's system group fits
@@ -385,5 +387,26 @@ func TestMinimalProfileClearsAPluginThatAddsANodeGroup(t *testing.T) {
 	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 ||
 		!strings.Contains(m.View(), "No node groups: everything runs on EKS Auto Mode nodes") {
 		t.Errorf("at %s, plugins %v, groups %v\n%s", m.m.Current().Title(), s.Plugins, s.NodeGroups(), m.View())
+	}
+
+	// Before the Plugins screen: the selection is what --plugins named.
+	s = newSetup("fresh")
+	s.Plugins = []string{"t-gateway", "t-efs", "t-kata"}
+	m = toSettings(t, testDeps(&recorder{}), s)
+	if m.pl.shown {
+		t.Fatal("the Plugins screen was shown before Settings")
+	}
+	m = press(m, "m")
+	if m.notice != "Cleared t-gateway and t-kata for the minimal profile (no node group); choose again on the Plugins screen to keep the group" ||
+		!slices.Equal(s.Plugins, []string{"t-efs"}) || len(groupRows(m)) != 0 {
+		t.Errorf("before the Plugins screen: notice %q, plugins %v, rows %v", m.notice, s.Plugins, groupRows(m))
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || m.pl.chosen["t-gateway"] || m.pl.chosen["t-kata"] || !m.pl.chosen["t-efs"] {
+		t.Errorf("before the Plugins screen: at %s, chosen %v", m.m.Current().Title(), m.pl.chosen)
+	}
+	m = press(m, "enter")
+	if m.m.Current() != state.Review || !slices.Equal(s.Plugins, []string{"t-efs"}) || len(s.NodeGroups()) != 0 {
+		t.Errorf("before the Plugins screen: at %s, plugins %v, groups %v", m.m.Current().Title(), s.Plugins, s.NodeGroups())
 	}
 }
