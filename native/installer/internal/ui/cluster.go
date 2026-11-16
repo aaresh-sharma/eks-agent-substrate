@@ -412,7 +412,9 @@ func (m Model) badge(c awsx.Cluster) string {
 	return theme.Good.Render(theme.GlyphDone + " " + c.Badge())
 }
 
-func (m Model) clusterView() string {
+// clusterView is the Cluster screen; cut folds the guard's removal
+// checklist, as taskView does.
+func (m Model) clusterView(cut int) string {
 	cl := m.cl
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
@@ -441,12 +443,12 @@ func (m Model) clusterView() string {
 			b.WriteString("  " + r + "\n")
 		}
 	}
-	b.WriteString(m.clusterPanel())
+	b.WriteString(m.clusterPanel(cut))
 	return b.String()
 }
 
 // clusterPanel is what the mode puts under the list.
-func (m Model) clusterPanel() string {
+func (m Model) clusterPanel(cut int) string {
 	cl := m.cl
 	sel, _ := cl.selected()
 	w := m.bodyWidth() - 6
@@ -507,7 +509,7 @@ func (m Model) clusterPanel() string {
 			para.Render(confirmText(cl.probed[sel.Name])),
 		}
 	case "removing":
-		lines = []string{"Removing Substrate from " + sel.Name + "…", "", m.taskView(cl.removal)}
+		lines = []string{"Removing Substrate from " + sel.Name + "…", "", m.taskView(cl.removal, cut)}
 	default:
 		if cl.notice != "" {
 			lines = append(lines, theme.Bad.Render(cl.notice))

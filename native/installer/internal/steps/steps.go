@@ -15,6 +15,7 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/demo"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/eksoverlay"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 )
 
 // ChecklistItem is one row of a step's progress checklist.
@@ -110,15 +111,21 @@ func RemovalOrder(ids []string) ([]plugin.Plugin, bool) {
 
 // Demo tracks --deploy-demo --verify: the counter demo deployed on each of
 // deployed (the gvisor and microvm classes), then suspend and resume checked
-// on each of checked, every sandbox class (demo.Deploy, demo.Verify; the AWS
-// Nitro sandbox's check is its plugin's).
+// on each of checked, every sandbox class (demo.Deploy, demo.Verify). A
+// checked class this step does not deploy is the AWS Nitro sandbox: its
+// counter (counter-iso) came with its plugin, on the Set up Nitro sandboxes
+// step, and its check is that plugin's, so its row names that step.
 func Demo(deployed, checked []string) []ChecklistItem {
 	var items []ChecklistItem
 	for _, c := range deployed {
 		items = append(items, ChecklistItem{"Deploy the counter demo on " + c, contains(demo.DeployLine + c)})
 	}
 	for _, c := range checked {
-		items = append(items, ChecklistItem{"Check suspend and resume on " + c, contains(demo.VerifyLine + c)})
+		label := "Check suspend and resume on " + c
+		if !slices.Contains(deployed, c) {
+			label += " (deployed by " + state.NitroSandbox.Title() + ")"
+		}
+		items = append(items, ChecklistItem{label, contains(demo.VerifyLine + c)})
 	}
 	return items
 }

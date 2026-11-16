@@ -554,7 +554,7 @@ func (m Model) View() string {
 	}
 	head := m.header()
 	foot := m.hints()
-	out := head + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, m.rail(), "  ", m.body(m.bodyHeight(head, foot))) + "\n" + foot
+	out := head + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, m.rail(), "  ", m.body(m.bodyHeight(head, foot), 0)) + "\n" + foot
 	return m.redact(maskIDs(out))
 }
 
@@ -603,9 +603,11 @@ func (m Model) bodyWidth() int {
 }
 
 // body is the current screen in its panel, h rows tall at most (0: as tall
-// as it is). A screen taller than that keeps its top, as substrate-gke's
+// as it is). A screen taller than that is drawn again with a long step's
+// checklist folded by the rows it is over (cut, taskView), so the active
+// row and the outcome stay in view, then keeps its top, as substrate-gke's
 // clampHeight does; the stop confirmation is drawn first so it is never cut.
-func (m Model) body(h int) string {
+func (m Model) body(h, cut int) string {
 	var b strings.Builder
 	cur := m.m.Current()
 	if m.stopAsk {
@@ -626,11 +628,11 @@ func (m Model) body(h int) string {
 	case state.InstallPlugins:
 		b.WriteString(theme.Title.Render("Install the plugins") + "\n")
 		b.WriteString(theme.Subtle.Render("Deploy and check "+strings.Join(pluginTitles(resolved(m.s.Plugins)), ", ")) + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.NitroSandbox:
 		b.WriteString(theme.Title.Render("Set up Nitro sandboxes") + "\n")
 		b.WriteString(theme.Subtle.Render("The AWS Nitro sandbox class: NodePool ate-isolated on EKS Auto Mode, atelet-iso, and a counter pool on RuntimeClass isolated-sandbox, checked across a suspend and resume") + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.Welcome:
 		b.WriteString(theme.Logo() + "\n\n")
 		if m.s.Teardown {
@@ -683,7 +685,7 @@ func (m Model) body(h int) string {
 			fmt.Fprintf(&b, "Account  %s\nCaller   %s\n", maskAccount(m.s.Account), theme.Subtle.Render(maskArn(m.s.Arn)))
 		}
 	case state.Cluster:
-		b.WriteString(m.clusterView())
+		b.WriteString(m.clusterView(cut))
 	case state.Database:
 		b.WriteString(m.databaseView())
 	case state.TeardownScope:
@@ -700,28 +702,28 @@ func (m Model) body(h int) string {
 		}
 		b.WriteString(theme.Subtle.Render(what) + "\n")
 		b.WriteString(theme.Subtle.Render(m.s.NewClusterConfig.Summary(groups)) + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.Provision:
 		b.WriteString(theme.Title.Render("Provision AWS resources") + "\n")
 		b.WriteString(theme.Subtle.Render("S3 buckets, EKS Pod Identity roles, ECR repositories for "+m.s.ClusterName) + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.RDS:
 		b.WriteString(theme.Title.Render("Create the database") + "\n")
 		b.WriteString(theme.Subtle.Render("A private RDS for PostgreSQL instance in the cluster's VPC; its logins in Secrets Manager") + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.ControlPlane:
 		b.WriteString(theme.Title.Render("Turn on Substrate") + "\n")
 		rel := plugin.ChosenRelease(m.s.InstallPlugins(), m.s.SubstrateTag, m.s.ImageRepo)
 		b.WriteString(theme.Subtle.Render("ate-setup deploy ate-system "+rel.Tag+" · sandbox classes "+state.AteSetupClasses(m.s.SandboxClasses)+" · database "+m.s.Database) + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.Demo:
 		b.WriteString(theme.Title.Render("Deploy the demo") + "\n")
 		b.WriteString(theme.Subtle.Render("The counter demo on "+m.s.SandboxClasses+", then a suspend and resume check on each") + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.RemoveControlPlane:
 		b.WriteString(theme.Title.Render("Remove Substrate") + "\n")
 		b.WriteString(theme.Subtle.Render("The recorded plugins, then ate-setup delete ate-system on "+m.s.ClusterName+": every actor, template and the control plane") + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.TeardownAWS:
 		b.WriteString(theme.Title.Render("Delete AWS resources") + "\n")
 		what := "Everything tagged agent-substrate-on-eks/deployment=" + m.s.ClusterName + "." + m.s.Region
@@ -729,7 +731,7 @@ func (m Model) body(h int) string {
 			what += ", except the cluster and its network"
 		}
 		b.WriteString(theme.Subtle.Render(what) + "\n\n")
-		b.WriteString(m.taskView(m.tasks[cur]))
+		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.Complete:
 		b.WriteString(m.completeView())
 	}
@@ -738,6 +740,9 @@ func (m Model) body(h int) string {
 		// Wrapped first, so a long line counts as the rows it takes.
 		inner := lipgloss.NewStyle().Width(m.bodyWidth() - 2).Render(content)
 		if lines := strings.Split(inner, "\n"); len(lines) > h-2 {
+			if cut == 0 {
+				return m.body(h, len(lines)-(h-2))
+			}
 			content = strings.Join(lines[:h-2], "\n")
 		}
 	}
@@ -818,7 +823,12 @@ func (m Model) ExitNotes() []string {
 	return out
 }
 
-func (m Model) taskView(t *task) string {
+// taskView is a long step's command, checklist, outcome and output tail.
+// cut is the rows the screen is over (body): the finished rows before the
+// active or failed one fold into one line, then the pending rows after it,
+// until cut rows are saved or none is left to fold, so that row and the
+// outcome stay in view. Folding k rows saves k-1.
+func (m Model) taskView(t *task, cut int) string {
 	if t == nil {
 		return ""
 	}
@@ -828,7 +838,20 @@ func (m Model) taskView(t *task) string {
 		shown = "$ " + shown
 	}
 	b.WriteString(theme.CommandLine.Render(shown) + "\n\n")
-	for i, it := range t.items {
+	at := min(max(t.active, 0), len(t.items)-1)
+	if t.done && t.err == nil {
+		at = len(t.items) - 1
+	}
+	from, to := 0, len(t.items) // the rows shown unfolded
+	if k := min(cut+1, at); k > 1 {
+		from, cut = k, cut-(k-1)
+		b.WriteString(theme.Good.Render(theme.GlyphDone) + fmt.Sprintf(" %d done", k) + "\n")
+	}
+	if k := min(cut+1, len(t.items)-at-1); k > 1 {
+		to = len(t.items) - k
+	}
+	for i := from; i < to; i++ {
+		it := t.items[i]
 		switch {
 		case i < t.active || (t.done && t.err == nil):
 			b.WriteString(theme.Good.Render(theme.GlyphDone) + " " + it.Label + "\n")
@@ -839,6 +862,9 @@ func (m Model) taskView(t *task) string {
 		default:
 			b.WriteString(theme.Fainted.Render(theme.GlyphPending+" "+it.Label) + "\n")
 		}
+	}
+	if to < len(t.items) {
+		b.WriteString(theme.Fainted.Render(fmt.Sprintf("%s %d more", theme.GlyphPending, len(t.items)-to)) + "\n")
 	}
 	// The outcome comes before the output's tail, so a screen too short for
 	// both still shows it (the body keeps its top).

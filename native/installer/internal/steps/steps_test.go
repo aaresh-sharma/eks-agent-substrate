@@ -144,6 +144,24 @@ func TestDemoChecklistFollowsDeployThenVerify(t *testing.T) {
 	}
 }
 
+// Both ways: a class this step deploys is checked under its own name; the
+// AWS Nitro sandbox, checked but deployed by the Set up Nitro sandboxes
+// step, says so, and its row lights on the same verify line.
+func TestDemoNamesTheStepThatDeployedAClass(t *testing.T) {
+	items := Demo([]string{"gvisor"}, []string{"gvisor", "nitro"})
+	want := []string{
+		"Deploy the counter demo on gvisor",
+		"Check suspend and resume on gvisor",
+		"Check suspend and resume on nitro (deployed by Set up Nitro sandboxes)",
+	}
+	if got := labels(items); !slices.Equal(got, want) {
+		t.Fatalf("rows %q, want %q", got, want)
+	}
+	if got := Progress(items, 1, demo.VerifyLine+"nitro"); got != 2 {
+		t.Errorf("%q lit row %d, want 2", demo.VerifyLine+"nitro", got)
+	}
+}
+
 // Plugins for the removal tests: st-s3 requires st-efs, as S3 Files does EFS
 // in a real install, so the removal order is the reverse of the install's.
 func init() {
