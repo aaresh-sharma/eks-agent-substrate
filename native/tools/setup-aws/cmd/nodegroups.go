@@ -145,7 +145,7 @@ func (r *clusterRun) checkGroupImage(ctx context.Context, ng *ekstypes.Nodegroup
 		}
 	}
 	if have != want {
-		slog.Warn("the node group runs another AMI than NODE_AMI_ID and keeps its nodes; to change it, delete the node group and run again",
+		slog.Warn("the node group runs another AMI than NODE_AMI_ID and keeps its nodes; to change it, tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again",
 			"nodegroup", aws.ToString(ng.NodegroupName), "runs", orDefault(have), "NODE_AMI_ID", orDefault(want))
 	}
 	return nil

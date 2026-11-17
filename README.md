@@ -321,8 +321,10 @@ the group's root volume. It must be an HVM AMI with ENA support, which the
 m8i instance types need, and the cluster must be IPv4 (a new cluster is).
 The AMI is yours: the installer neither tags nor deletes it. A node group
 keeps the AMI it was made with, and `create cluster` warns when it runs
-another one; to change it, delete the node group and run `create cluster`
-again.
+another one. To move to another AMI, tear the deployment down
+([Tear down](#tear-down)) and create it again, or create a cluster with
+another `CLUSTER_NAME`: deleting AWS resources by hand bypasses the
+installer's ownership checks.
 
 ## Try it
 
