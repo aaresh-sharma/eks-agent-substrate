@@ -142,12 +142,14 @@ type clusterRun struct {
 	addons     map[string]*ekstypes.Addon
 	azs        []string
 	amiTypes   map[string]ekstypes.AMITypes // by instance type
-	image      *nodeImage                   // NODE_AMI_ID, when set
-	vpcID      string
-	eipID      string
-	public     []string // subnet IDs
-	private    []string
-	templates  map[string]ltRef // by node group
+	// enaRequired are the instance types that run only AMIs with ENA.
+	enaRequired map[string]bool
+	image       *nodeImage // NODE_AMI_ID, when set
+	vpcID       string
+	eipID       string
+	public      []string // subnet IDs
+	private     []string
+	templates   map[string]ltRef // by node group
 }
 
 func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
@@ -158,7 +160,7 @@ func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
 	r := &clusterRun{e: e, c: c, cfg: cfg, auto: cfg.AutoMode == "on", tags: tags,
 		autoCIDRs:  strings.TrimSpace(cfg.PublicAccessCIDRs) == publicAccessAuto,
 		nodegroups: map[string]*ekstypes.Nodegroup{}, addons: map[string]*ekstypes.Addon{},
-		amiTypes: map[string]ekstypes.AMITypes{}, templates: map[string]ltRef{}}
+		amiTypes: map[string]ekstypes.AMITypes{}, enaRequired: map[string]bool{}, templates: map[string]ltRef{}}
 	// Empty is unset, as getEnv reads NODE_GROUPS: the default three.
 	ng := cfg.NodeGroups
 	if strings.TrimSpace(ng) == "" {
@@ -486,6 +488,7 @@ func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 		if g.NestedVirt && !slices.Contains(it.ProcessorInfo.SupportedFeatures, ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization) {
 			return fmt.Errorf("%s does not support nested virtualization, which the microvm node group needs; list the types that do with:\n  aws ec2 describe-instance-types --filters Name=processor-info.supported-features,Values=nested-virtualization --query 'InstanceTypes[].InstanceType'", g.InstanceType)
 		}
+		r.enaRequired[g.InstanceType] = it.NetworkInfo != nil && it.NetworkInfo.EnaSupport == ec2types.EnaSupportRequired
 		switch {
 		case slices.Contains(it.ProcessorInfo.SupportedArchitectures, ec2types.ArchitectureTypeX8664):
 			r.amiTypes[g.InstanceType] = ekstypes.AMITypesAl2023X8664Standard

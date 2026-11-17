@@ -29,6 +29,9 @@ type nodeImage struct {
 	// RootGB is the size of the root volume's snapshot, the smallest root
 	// volume the AMI launches with.
 	RootGB int32
+	// ENA reports that the AMI has ENA support, which current instance
+	// types (the m8i default) require.
+	ENA bool
 }
 
 // amiIDRE is an EC2 image ID.
@@ -65,7 +68,11 @@ func describeImage(ctx context.Context, c clusterEC2API, id, setting string) (*n
 	if im.Platform == ec2types.PlatformValuesWindows {
 		return nil, fmt.Errorf("%s=%s is a Windows AMI; a node AMI here joins with nodeadm (Amazon Linux 2023)", setting, id)
 	}
-	n := &nodeImage{ID: id, Name: aws.ToString(im.Name), Arch: im.Architecture, RootDevice: aws.ToString(im.RootDeviceName)}
+	if im.VirtualizationType != ec2types.VirtualizationTypeHvm {
+		return nil, fmt.Errorf("%s=%s is a %s AMI; node instance types run HVM AMIs only", setting, id, im.VirtualizationType)
+	}
+	n := &nodeImage{ID: id, Name: aws.ToString(im.Name), Arch: im.Architecture, RootDevice: aws.ToString(im.RootDeviceName),
+		ENA: aws.ToBool(im.EnaSupport)}
 	if n.RootDevice == "" {
 		return nil, fmt.Errorf("%s=%s has no root device", setting, id)
 	}
@@ -88,11 +95,18 @@ func (r *clusterRun) checkImage(ctx context.Context) error {
 	if r.cfg.NodeAMIID == "" || len(r.groups()) == 0 {
 		return nil
 	}
+	// The NodeConfig carries an IPv4 service CIDR; a new cluster is IPv4.
+	if r.cluster != nil && r.cluster.KubernetesNetworkConfig != nil && r.cluster.KubernetesNetworkConfig.IpFamily == ekstypes.IpFamilyIpv6 {
+		return fmt.Errorf("cluster %s is an IPv6 cluster; NODE_AMI_ID supports IPv4 clusters only", r.e.names.Cluster)
+	}
 	im, err := describeImage(ctx, r.c.EC2, r.cfg.NodeAMIID, "NODE_AMI_ID")
 	if err != nil {
 		return err
 	}
 	for _, g := range r.groups() {
+		if r.enaRequired[g.InstanceType] && !im.ENA {
+			return fmt.Errorf("NODE_AMI_ID=%s has no ENA support, which the %s node group's %s requires", im.ID, g.Name, g.InstanceType)
+		}
 		if want := archOf(r.amiTypes[g.InstanceType]); im.Arch != want {
 			return fmt.Errorf("NODE_AMI_ID=%s is %s, but the %s node group's %s runs %s; pick an AMI or an instance type of the same architecture",
 				im.ID, im.Arch, g.Name, g.InstanceType, want)

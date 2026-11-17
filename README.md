@@ -294,11 +294,15 @@ go -C installer run . --plugin-action deploy --plugins mode3-iso --cluster $C --
 
 By default, every node group runs the Amazon EKS optimized Amazon Linux 2023
 AMI that EKS picks for the cluster's version. To run your own AMI, set
-`NODE_AMI_ID` (Settings: Node AMI) before the node groups are made:
+`NODE_AMI_ID` before the node groups are made: on Settings (Node AMI), or in
+`config.local.env`:
 
 ```bash
 NODE_AMI_ID=ami-0123456789abcdef0
 ```
+
+For a step you run yourself, export it or put it before the command:
+`NODE_AMI_ID=ami-0123456789abcdef0 CLUSTER_NAME=$C ... go -C tools/setup-aws run . create cluster`.
 
 The AMI must join the cluster with nodeadm, as the EKS optimized AL2023 AMI
 and AMIs built from it or with
@@ -313,9 +317,12 @@ root device, and nested virtualization on `microvm`.
 `setup-aws create cluster` checks the AMI before it creates anything: it
 must be available in the Region to this account, EBS-backed, of the
 architecture of every group's instance type, and its root snapshot must fit
-the group's root volume. The AMI is yours: it has no owner tag, and teardown
-never deletes it. A node group keeps the AMI it was made with; to change it,
-delete the group and run `create cluster` again.
+the group's root volume. It must be an HVM AMI with ENA support, which the
+m8i instance types need, and the cluster must be IPv4 (a new cluster is).
+The AMI is yours: the installer neither tags nor deletes it. A node group
+keeps the AMI it was made with, and `create cluster` warns when it runs
+another one; to change it, delete the node group and run `create cluster`
+again.
 
 ## Try it
 

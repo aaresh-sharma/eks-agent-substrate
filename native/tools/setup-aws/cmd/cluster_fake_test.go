@@ -33,6 +33,7 @@ type clusterFake struct {
 	// failAfter applies it, then fails (the run died before the reply).
 	failBefore, failAfter string
 	deny                  map[string]string // read operation -> error code
+	reads                 []string          // read operations, in order
 
 	vpcs      map[string]*ec2types.Vpc
 	dnsHosts  map[string]bool
@@ -81,7 +82,8 @@ func nestedVirtType(name string, nested bool) ec2types.InstanceTypeInfo {
 	if nested {
 		p.SupportedFeatures = []ec2types.SupportedAdditionalProcessorFeature{ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization}
 	}
-	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name), ProcessorInfo: p}
+	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name), ProcessorInfo: p,
+		NetworkInfo: &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}
 }
 
 func newClusterFake() *clusterFake {
@@ -138,6 +140,7 @@ func (f *clusterFake) end(w string) error {
 }
 
 func (f *clusterFake) read(op string) error {
+	f.reads = append(f.reads, op)
 	if code, ok := f.deny[op]; ok {
 		return apiErr(code)
 	}
@@ -683,6 +686,9 @@ func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunc
 }
 
 func (e *fcEC2) DescribeLaunchTemplateVersions(_ context.Context, in *ec2.DescribeLaunchTemplateVersionsInput, _ ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error) {
+	if err := e.f().read("DescribeLaunchTemplateVersions"); err != nil {
+		return nil, err
+	}
 	lt := e.lts[aws.ToString(in.LaunchTemplateId)]
 	if lt == nil {
 		return nil, apiErr("InvalidLaunchTemplateId.NotFound")
@@ -940,7 +946,11 @@ func (e *fcEKS) CreateNodegroup(_ context.Context, in *eks.CreateNodegroupInput,
 		return nil, err
 	}
 	f.ngIn[name] = in
-	f.ngs[name] = &ekstypes.Nodegroup{NodegroupName: in.NodegroupName, Status: ekstypes.NodegroupStatusCreating, Tags: in.Tags}
+	f.ngs[name] = &ekstypes.Nodegroup{NodegroupName: in.NodegroupName, Status: ekstypes.NodegroupStatusCreating, Tags: in.Tags,
+		AmiType: in.AmiType, LaunchTemplate: &ekstypes.LaunchTemplateSpecification{Id: in.LaunchTemplate.Id, Version: in.LaunchTemplate.Version}}
+	if in.AmiType == "" {
+		f.ngs[name].AmiType = ekstypes.AMITypesCustom
+	}
 	return &eks.CreateNodegroupOutput{}, f.end(w)
 }
 

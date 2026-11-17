@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ const testAMI = "ami-0123456789abcdef0"
 func testImage(arch ec2types.ArchitectureValues, root string, gb int32) ec2types.Image {
 	return ec2types.Image{ImageId: aws.String(testAMI), Name: aws.String("my-al2023-node"), State: ec2types.ImageStateAvailable,
 		Architecture: arch, RootDeviceName: aws.String(root), RootDeviceType: ec2types.DeviceTypeEbs,
+		VirtualizationType: ec2types.VirtualizationTypeHvm, EnaSupport: aws.Bool(true),
 		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{DeviceName: aws.String(root), Ebs: &ec2types.EbsBlockDevice{VolumeSize: aws.Int32(gb)}}}}
 }
 
@@ -82,6 +84,51 @@ func TestCreateClusterCustomAMI(t *testing.T) {
 	if len(f.writes) != 0 {
 		t.Errorf("rerun writes %v", f.writes)
 	}
+	// A group still to make finds its template as it should be: the drift
+	// check compares image, user data and root device, and writes nothing
+	// but the node group.
+	delete(f.ngs, "gvisor")
+	f.writes = nil
+	if err := clusterTestRun(t, f, false, withAMI(testAMI)).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"CreateNodegroup gvisor"}; !slices.Equal(f.writes, want) {
+		t.Errorf("writes %v, want %v", f.writes, want)
+	}
+}
+
+// Another AMI for a group still to make: its owned template gets a new
+// version naming that AMI. An existing group keeps its template and
+// version: only a warning says it runs the old AMI.
+func TestCreateClusterCustomAMIChangeAddsAVersion(t *testing.T) {
+	f := newClusterFake()
+	f.images[testAMI] = testImage(ec2types.ArchitectureValuesX8664, "/dev/xvda", 20)
+	if err := clusterTestRun(t, f, false, withAMI(testAMI)).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	other := "ami-0fedcba9876543210"
+	im := testImage(ec2types.ArchitectureValuesX8664, "/dev/xvda", 20)
+	im.ImageId = aws.String(other)
+	f.images[other] = im
+	delete(f.ngs, "gvisor")
+	f.writes, f.reads = nil, nil
+	if err := clusterTestRun(t, f, false, withAMI(other)).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"CreateLaunchTemplateVersion demo-gvisor-nodes", "CreateNodegroup gvisor"}; !slices.Equal(f.writes, want) {
+		t.Errorf("writes %v, want %v", f.writes, want)
+	}
+	if got := aws.ToString(latestData(t, f, "demo-gvisor-nodes").ImageId); got != other {
+		t.Errorf("gvisor template image %s", got)
+	}
+	if got := aws.ToString(f.ngIn["gvisor"].LaunchTemplate.Version); got != "2" {
+		t.Errorf("gvisor node group on version %s", got)
+	}
+	// The system and microvm groups exist: their templates were read to
+	// compare the AMI they run, and left alone.
+	if n := countOf(f.reads, "DescribeLaunchTemplateVersions"); n < 2 {
+		t.Errorf("read %d template versions, want the existing groups' too", n)
+	}
 }
 
 // The default (no NODE_AMI_ID) sends what it always did: EKS's AMI type,
@@ -132,6 +179,9 @@ func TestCreateClusterCustomAMIPlan(t *testing.T) {
 	if len(f.writes) != 0 {
 		t.Errorf("plan writes %v", f.writes)
 	}
+	if countOf(f.reads, "DescribeImages") != 1 {
+		t.Errorf("plan did not read the AMI: %v", f.reads)
+	}
 }
 
 // Every AMI the run cannot use stops it in preflight, before any write; a
@@ -157,6 +207,16 @@ func TestCreateClusterCustomAMIRefused(t *testing.T) {
 			i.RootDeviceType = ec2types.DeviceTypeInstanceStore
 			return &i
 		}(), want: "EBS root"},
+		"paravirtual": {id: testAMI, image: func() *ec2types.Image {
+			i := testImage(ec2types.ArchitectureValuesX8664, "/dev/xvda", 20)
+			i.VirtualizationType = ec2types.VirtualizationTypeParavirtual
+			return &i
+		}(), want: "HVM"},
+		"no ENA": {id: testAMI, image: func() *ec2types.Image {
+			i := testImage(ec2types.ArchitectureValuesX8664, "/dev/xvda", 20)
+			i.EnaSupport = aws.Bool(false)
+			return &i
+		}(), want: "ENA"},
 		"windows": {id: testAMI, image: func() *ec2types.Image {
 			i := testImage(ec2types.ArchitectureValuesX8664, "/dev/xvda", 20)
 			i.Platform = ec2types.PlatformValuesWindows
@@ -181,4 +241,15 @@ func TestCreateClusterCustomAMIRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countOf is how many times x is in xs.
+func countOf(xs []string, x string) int {
+	n := 0
+	for _, v := range xs {
+		if v == x {
+			n++
+		}
+	}
+	return n
 }

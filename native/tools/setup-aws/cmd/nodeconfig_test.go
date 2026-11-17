@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/mail"
@@ -39,8 +40,11 @@ func parseUserData(t *testing.T, ud string) (contentTypes []string, nc map[strin
 	r := multipart.NewReader(msg.Body, params["boundary"])
 	for {
 		p, err := r.NextPart()
-		if err != nil {
+		if err == io.EOF {
 			break
+		}
+		if err != nil {
+			t.Fatalf("user data is not a complete MIME multi-part document: %v", err)
 		}
 		ct := p.Header.Get("Content-Type")
 		contentTypes = append(contentTypes, ct)
