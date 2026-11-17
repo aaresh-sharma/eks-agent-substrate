@@ -7,12 +7,14 @@ package state
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 )
 
 // Step identifies one screen of the wizard.
@@ -236,6 +238,15 @@ type ClusterConfig struct {
 	// NodeGroupType is config.env's NODE_GROUP_TYPE: nodegroups.Managed
 	// (EKS managed node groups) or nodegroups.SelfManaged.
 	NodeGroupType string
+	// NitroCompute is config.env's NITRO_COMPUTE, where the AWS Nitro sandbox
+	// class runs: plugin.NitroAutoMode (Auto Mode's nodes, the default) or
+	// plugin.NitroNodeGroup (the nitro node group, made with the class on a
+	// new cluster). Unlike the other knobs it also applies to a connected
+	// cluster, whose nitro node group its nodes' labels show.
+	NitroCompute string
+	// The nitro node group's: NITRO_AMI_ID, a Nitro Sandbox AMI (required
+	// for the group); NITRO_INSTANCE_TYPE, with Nitro Enclaves; NITRO_NODES.
+	NitroAMIID, NitroInstanceType, NitroNodes string
 }
 
 // clusterKnobs are the environment variables of ClusterConfig with
@@ -255,6 +266,10 @@ var clusterKnobs = []struct {
 	{"EKS_PUBLIC_ACCESS_CIDRS", "auto", func(c *ClusterConfig) *string { return &c.PublicAccessCIDRs }}, // auto: setup-aws allows this machine's address, a /32
 	{"NODE_AMI_ID", "", func(c *ClusterConfig) *string { return &c.NodeAMIID }},
 	{"NODE_GROUP_TYPE", nodegroups.Managed, func(c *ClusterConfig) *string { return &c.NodeGroupType }},
+	{"NITRO_COMPUTE", plugin.NitroAutoMode, func(c *ClusterConfig) *string { return &c.NitroCompute }},
+	{"NITRO_AMI_ID", "", func(c *ClusterConfig) *string { return &c.NitroAMIID }},
+	{"NITRO_INSTANCE_TYPE", "m8i.xlarge", func(c *ClusterConfig) *string { return &c.NitroInstanceType }},
+	{"NITRO_NODES", "1", func(c *ClusterConfig) *string { return &c.NitroNodes }},
 }
 
 // ClusterConfigFromEnv reads the knobs with lookup (os.LookupEnv), falling
@@ -292,8 +307,11 @@ func (c ClusterConfig) Summary(groups []string) string {
 	if c.NodeGroupType == nodegroups.SelfManaged && len(groups) > 0 {
 		line += " · self-managed node groups"
 	}
-	if c.NodeAMIID != "" && len(groups) > 0 {
+	if c.NodeAMIID != "" && slices.ContainsFunc(groups, func(g string) bool { return g != nodegroups.Nitro }) {
 		line += " · node AMI " + c.NodeAMIID
+	}
+	if slices.Contains(groups, nodegroups.Nitro) {
+		line += " · Nitro AMI " + c.NitroAMIID
 	}
 	return line
 }
@@ -325,6 +343,8 @@ func (c ClusterConfig) Group(g string) (nodes, instanceType string) {
 		return c.GVisorNodes, c.GVisorInstanceType
 	case "microvm":
 		return c.MicroVMNodes, c.MicroVMInstanceType
+	case nodegroups.Nitro:
+		return c.NitroNodes, c.NitroInstanceType
 	}
 	return "", ""
 }

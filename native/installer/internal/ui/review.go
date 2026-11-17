@@ -46,7 +46,7 @@ const (
 )
 
 // nodeDiskGB is each node group's root volume (setup-aws nodegroups.go).
-var nodeDiskGB = map[string]float64{"SYSTEM": 100, "GVISOR": 200, "MICROVM": 200}
+var nodeDiskGB = map[string]float64{"SYSTEM": 100, "GVISOR": 200, "MICROVM": 200, "NITRO": 100}
 
 // clusterHourly is what a new cluster costs an hour: the control plane, the
 // NAT gateway, and the nodes of groups (the node groups it gets) with their
@@ -101,9 +101,15 @@ func (m Model) plan() []planStep {
 			if st == state.NitroSandbox {
 				ids = state.ClassPlugins(m.s.SandboxClasses)
 			}
+			// On the nitro node group, the Nitro sandbox's nodes are that
+			// group's, priced with the cluster (or already running on a
+			// connected one), not ones Auto Mode launches for it.
+			nodeGroup := st == state.NitroSandbox && m.s.NewClusterConfig.NitroCompute == plugin.NitroNodeGroup
 			for _, pl := range resolved(ids) {
 				p.minutes += pl.Minutes
-				p.hourly += pl.HourlyUSD
+				if !nodeGroup {
+					p.hourly += pl.HourlyUSD
+				}
 			}
 		}
 		out = append(out, p)

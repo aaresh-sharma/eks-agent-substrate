@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 )
 
 func TestInstallOrderAddsTheOptionalSteps(t *testing.T) {
@@ -117,5 +118,38 @@ func TestSelectAndNewClusterOverwriteEachOther(t *testing.T) {
 	s.NewCluster("made")
 	if !s.ClusterIsNew || !s.ClusterOwned || !s.AutoMode || s.ClusterName != "made" || s.ClusterPools != nil {
 		t.Errorf("after NewCluster: %+v", s)
+	}
+}
+
+// The nitro knobs: config.env's defaults, in Env after the others; the
+// nitro group's nodes and type; and the Summary names the Nitro AMI only
+// when the nitro group is made (and NODE_AMI_ID only for the other groups).
+func TestNitroKnobs(t *testing.T) {
+	c := ClusterConfigFromEnv(func(string) (string, bool) { return "", false })
+	if c.NitroCompute != plugin.NitroAutoMode || c.NitroAMIID != "" || c.NitroInstanceType != "m8i.xlarge" || c.NitroNodes != "1" {
+		t.Errorf("defaults %+v", c)
+	}
+	env := c.Env()
+	if want := []string{"NODE_GROUP_TYPE=managed", "NITRO_COMPUTE=auto-mode", "NITRO_AMI_ID=", "NITRO_INSTANCE_TYPE=m8i.xlarge", "NITRO_NODES=1"}; !slices.Equal(env[len(env)-5:], want) {
+		t.Errorf("env %q", env)
+	}
+	c = ClusterConfigFromEnv(func(k string) (string, bool) {
+		return map[string]string{"NITRO_COMPUTE": "node-group", "NITRO_AMI_ID": "ami-0a17000000000000e", "NITRO_INSTANCE_TYPE": "m8i.2xlarge", "NITRO_NODES": "3",
+			"NODE_AMI_ID": "ami-0123456789abcdef0"}[k], k == "NITRO_COMPUTE" || k == "NITRO_AMI_ID" || k == "NITRO_INSTANCE_TYPE" || k == "NITRO_NODES" || k == "NODE_AMI_ID"
+	})
+	if n, typ := c.Group("nitro"); n != "3" || typ != "m8i.2xlarge" {
+		t.Errorf("Group(nitro) = %s, %s", n, typ)
+	}
+	if got := c.GroupsLine([]string{"system", "nitro"}); got != "system 2×m8i.xlarge · nitro 3×m8i.2xlarge" {
+		t.Errorf("GroupsLine %q", got)
+	}
+	if got := c.Summary([]string{"system", "nitro"}); !strings.Contains(got, " · node AMI ami-0123456789abcdef0 · Nitro AMI ami-0a17000000000000e") {
+		t.Errorf("Summary %q", got)
+	}
+	if got := c.Summary([]string{"nitro"}); strings.Contains(got, "node AMI") || !strings.HasSuffix(got, " · Nitro AMI ami-0a17000000000000e") {
+		t.Errorf("Summary of the nitro group alone %q", got)
+	}
+	if got := c.Summary([]string{"system", "gvisor"}); strings.Contains(got, "Nitro") {
+		t.Errorf("Summary without the nitro group %q", got)
 	}
 }

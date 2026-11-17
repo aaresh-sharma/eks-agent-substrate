@@ -11,15 +11,19 @@ package state
 //     isolated sandbox (RuntimeClass isolated-sandbox) on nodes Auto Mode
 //     launches, with no node group. It needs Auto Mode, and it is installed
 //     by the plugin whose Class it is (mode3-iso), which also sets the
-//     install's release to the fork that plugin installs.
+//     install's release to the fork that plugin installs. With
+//     NITRO_COMPUTE=node-group it runs on the nitro node group instead, of
+//     a Nitro Sandbox AMI (NITRO_AMI_ID), and needs no Auto Mode.
 //
 // A cluster the run creates gets the node groups its classes, database and
 // plugins need, by the rule setup-aws applies (nodegroups.For): the gvisor
-// and microvm groups of those classes, plus the microvm group for a plugin
-// that adds it (mode 3), plus the system group without Auto Mode, with RDS
-// and a sandbox group (the control plane is cordoned onto it), or with a
-// plugin that runs on it. So Auto Mode with the bundled PostgreSQL makes
-// only the sandbox groups, and with the nitro class alone no node group.
+// and microvm groups of those classes, the nitro group of the nitro class
+// with NITRO_COMPUTE=node-group, plus the microvm group for a plugin that
+// adds it (mode 3), plus the system group without Auto Mode, with RDS and a
+// sandbox group (the control plane is cordoned onto it), or with a plugin
+// that runs on it. So Auto Mode with the bundled PostgreSQL makes only the
+// sandbox groups, and with the nitro class alone on Auto Mode's nodes no
+// node group.
 // A connected cluster's node groups are the ones its nodes are labeled with
 // (Setup.ClusterPools), and a class or plugin whose nodes are missing is
 // refused.
@@ -152,12 +156,17 @@ func WithClassPlugins(ids []string, classes string) []string {
 
 // NewNodeGroups are the node groups `setup-aws create cluster` makes for a
 // cluster with autoMode, this database (DatabaseRDS, also when empty, or
-// DatabaseBundled), these classes and these chosen plugins (and what they
-// require): the gvisor and microvm groups of the classes and of the plugins
-// that add theirs (plugin.AddsNodes), and the system group as
-// nodegroups.For decides, pinned when one of the plugins runs on it.
-func NewNodeGroups(autoMode bool, database, classes string, plugins []string) []string {
+// DatabaseBundled), these classes, this NITRO_COMPUTE and these chosen
+// plugins (and what they require): the gvisor and microvm groups of the
+// classes and of the plugins that add theirs (plugin.AddsNodes), the nitro
+// group of the nitro class with nitroCompute plugin.NitroNodeGroup, and the
+// system group as nodegroups.For decides, pinned when one of the plugins
+// runs on it.
+func NewNodeGroups(autoMode bool, database, classes, nitroCompute string, plugins []string) []string {
 	sandbox := DemoClasses(classes)
+	if HasClass(classes, ClassNitro) && nitroCompute == plugin.NitroNodeGroup {
+		sandbox = append(sandbox, nodegroups.Nitro)
+	}
 	pinned := false
 	ps, _ := plugin.Resolve(WithClassPlugins(plugins, classes))
 	for _, p := range ps {
@@ -184,7 +193,7 @@ func (s *Setup) InstallPlugins() []string { return WithClassPlugins(s.Plugins, s
 // nodes come from.
 func (s *Setup) NodeGroups() []string {
 	if s.ClusterIsNew {
-		return NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, s.Plugins)
+		return NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, s.NewClusterConfig.NitroCompute, s.Plugins)
 	}
 	var out []string
 	for _, g := range nodegroups.All {
@@ -195,15 +204,20 @@ func (s *Setup) NodeGroups() []string {
 	return out
 }
 
-// ClassProblem is why class c cannot be chosen for a cluster with autoMode,
-// or "": the AWS Nitro sandbox needs Auto Mode, and on a connected cluster
-// (pools are its nodes' node groups; newCluster false) gvisor and microvm
-// need their node group's nodes.
-func ClassProblem(c string, autoMode, newCluster bool, cluster string, pools []string) string {
+// ClassProblem is why class c cannot be chosen for a cluster with autoMode
+// and this NITRO_COMPUTE, or "": the AWS Nitro sandbox needs Auto Mode
+// (nitroCompute plugin.NitroAutoMode), and on a connected cluster (pools are
+// its nodes' node groups; newCluster false) gvisor and microvm need their
+// node group's nodes, and so does nitro with plugin.NitroNodeGroup. A new
+// cluster makes the nitro group with plugin.NitroNodeGroup (NewNodeGroups).
+func ClassProblem(c string, autoMode, newCluster bool, cluster string, pools []string, nitroCompute string) string {
+	group := c != ClassNitro || nitroCompute == plugin.NitroNodeGroup
 	switch {
-	case c == ClassNitro && !autoMode:
-		return "needs EKS Auto Mode: its isolated sandboxes run on nodes Auto Mode launches"
-	case c != ClassNitro && !newCluster && !slices.Contains(pools, c):
+	case !group && !autoMode && !newCluster && slices.Contains(pools, nodegroups.Nitro):
+		return fmt.Sprintf("needs EKS Auto Mode: its isolated sandboxes run on nodes Auto Mode launches; %s has a nitro node group, which NITRO_COMPUTE=node-group uses", cluster)
+	case !group && !autoMode:
+		return "needs EKS Auto Mode: its isolated sandboxes run on nodes Auto Mode launches (NITRO_COMPUTE=node-group runs them on a nitro node group instead)"
+	case group && !newCluster && !slices.Contains(pools, c):
 		return fmt.Sprintf("%s has no %s node group (no node labeled %s=%s)", cluster, c, plugin.PoolLabel, c)
 	}
 	return ""
@@ -217,12 +231,12 @@ func ClassProblem(c string, autoMode, newCluster bool, cluster string, pools []s
 // the demo on. What p requires counts too. A new cluster is never short of
 // the system group: a plugin that runs on it makes it (nodegroups.For).
 func (s *Setup) PluginProblem(p plugin.Plugin, chosen []string) string {
-	if p.NeedsAutoMode != "" && !s.AutoMode {
-		return p.NeedsAutoMode + "; " + s.ClusterName + " has Auto Mode off"
+	if why := p.AutoModeProblem(plugin.Options{AutoMode: s.AutoMode, NitroCompute: s.NewClusterConfig.NitroCompute}); why != "" {
+		return why + "; " + s.ClusterName + " has Auto Mode off"
 	}
 	groups := s.NodeGroups()
 	if s.ClusterIsNew {
-		groups = NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, append(slices.Clone(chosen), p.ID))
+		groups = NewNodeGroups(s.AutoMode, s.Database, s.SandboxClasses, s.NewClusterConfig.NitroCompute, append(slices.Clone(chosen), p.ID))
 	}
 	ps, err := plugin.Resolve([]string{p.ID})
 	if err != nil {

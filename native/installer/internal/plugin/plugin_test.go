@@ -125,3 +125,35 @@ func TestRegisterRefusesDuplicatesAndBadIDs(t *testing.T) {
 		withRegistry(t, Plugin{ID: "x"}, Plugin{ID: "x"})
 	}()
 }
+
+// AutoModeProblem: a plugin that needs Auto Mode is refused only off Auto
+// Mode, and not where its AutoModeOptional lets it run (mode3-iso's
+// NITRO_COMPUTE=node-group); a plugin that needs none never is.
+func TestAutoModeProblem(t *testing.T) {
+	needs := Plugin{ID: "x", NeedsAutoMode: "needs EKS Auto Mode"}
+	optional := needs
+	optional.AutoModeOptional = func(o Options) bool { return o.NitroCompute == NitroNodeGroup }
+	for _, c := range []struct {
+		p    Plugin
+		o    Options
+		want string
+	}{
+		{needs, Options{AutoMode: true}, ""},
+		{needs, Options{}, "needs EKS Auto Mode"},
+		{needs, Options{NitroCompute: NitroNodeGroup}, "needs EKS Auto Mode"},
+		{optional, Options{}, "needs EKS Auto Mode"},
+		{optional, Options{NitroCompute: NitroAutoMode}, "needs EKS Auto Mode"},
+		{optional, Options{NitroCompute: NitroNodeGroup}, ""},
+		{optional, Options{AutoMode: true, NitroCompute: NitroAutoMode}, ""},
+		{Plugin{ID: "y"}, Options{}, ""},
+	} {
+		if got := c.p.AutoModeProblem(c.o); got != c.want {
+			t.Errorf("%s with %+v: %q, want %q", c.p.ID, c.o, got, c.want)
+		}
+	}
+	for v, ok := range map[string]bool{NitroAutoMode: true, NitroNodeGroup: true, "": false, "nodegroup": false, "Auto-Mode": false} {
+		if err := CheckNitroCompute(v); (err == nil) != ok {
+			t.Errorf("CheckNitroCompute(%q) = %v", v, err)
+		}
+	}
+}

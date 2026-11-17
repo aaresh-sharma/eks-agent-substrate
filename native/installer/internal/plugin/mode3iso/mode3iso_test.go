@@ -195,6 +195,8 @@ type fake struct {
 	actors map[string]bool
 	// deleted are the counter image tags Remove deleted.
 	deleted []string
+	// fail fails each kubectl call whose arguments start with a key.
+	fail map[string]error
 }
 
 // testAppliedPool is NodePool ate-isolated as the API server returns it,
@@ -231,6 +233,11 @@ func newFake(t *testing.T) *fake {
 		}
 		args := strings.Join(c.Argv[3:], " ")
 		f.log = append(f.log, "kubectl "+args)
+		for k, err := range f.fail {
+			if strings.HasPrefix(args, k) {
+				return err
+			}
+		}
 		if c.Stdin != nil {
 			f.stdin[args] = string(c.Stdin)
 			if args == "apply -f -" {

@@ -1,0 +1,58 @@
+{
+ "deployApplies": [
+  "{\"apiVersion\":\"eks.amazonaws.com/v1\",\"kind\":\"NodeClass\",\"metadata\":{\"name\":\"ate-isolated\"},\"spec\":{\"role\":\"c1-eks-auto-node\",\"securityGroupSelectorTerms\":[{\"id\":\"sg-1\"}],\"subnetSelectorTerms\":[{\"id\":\"subnet-1\"}],\"tags\":{\"agent-substrate-on-eks/deployment\":\"c1.us-east-1\",\"auto-delete\":\"no\",\"team\":\"a\"}}}",
+  "{\"apiVersion\":\"karpenter.sh/v1\",\"kind\":\"NodePool\",\"metadata\":{\"name\":\"ate-isolated\"},\"spec\":{\"disruption\":{\"budgets\":[{\"nodes\":\"10%\"}],\"consolidateAfter\":\"300s\",\"consolidationPolicy\":\"WhenEmpty\"},\"template\":{\"metadata\":{\"labels\":{\"ate.dev/pool\":\"isolated\"}},\"spec\":{\"expireAfter\":\"336h\",\"nodeClassRef\":{\"group\":\"eks.amazonaws.com\",\"kind\":\"NodeClass\",\"name\":\"ate-isolated\"},\"requirements\":[{\"key\":\"karpenter.sh/capacity-type\",\"operator\":\"In\",\"values\":[\"on-demand\"]},{\"key\":\"kubernetes.io/arch\",\"operator\":\"In\",\"values\":[\"amd64\"]}],\"taints\":[{\"effect\":\"NoSchedule\",\"key\":\"ate.dev/sandboxClass\",\"value\":\"isolated\"}]}}}}",
+  "# The kubelet image credential provider config atelet-iso uses on the\n# isolated nodes. Auto Mode nodes run Bottlerocket, whose own config sets\n# AWS_PROFILE=default, which fails inside a Pod with no ~/.aws. Without it the\n# provider uses atelet's Pod Identity credentials, as on the other nodes.\n#\n# Learn more:\n#   https://kubernetes.io/docs/tasks/administer-cluster/kubelet-credential-provider/\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: atelet-iso-credential-provider\n  namespace: ate-system\ndata:\n  config.yaml: |\n    apiVersion: kubelet.config.k8s.io/v1\n    kind: CredentialProviderConfig\n    providers:\n      - name: ecr-credential-provider\n        matchImages: [\"*.dkr.ecr.*.amazonaws.com\", \"*.dkr.ecr.*.amazonaws.com.cn\", \"public.ecr.aws\"]\n        defaultCacheDuration: \"12h\"\n        apiVersion: credentialprovider.kubelet.k8s.io/v1\n",
+  "{\"apiVersion\":\"apps/v1\",\"kind\":\"DaemonSet\",\"metadata\":{\"labels\":{\"app\":\"atelet\"},\"name\":\"atelet-iso\",\"namespace\":\"ate-system\"},\"spec\":{\"selector\":{\"matchLabels\":{\"app\":\"atelet\",\"ate.dev/atelet-variant\":\"iso\"}},\"template\":{\"metadata\":{\"labels\":{\"app\":\"atelet\",\"ate.dev/atelet-variant\":\"iso\"}},\"spec\":{\"affinity\":{\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"ate.dev/pool\",\"operator\":\"In\",\"values\":[\"isolated\"]}]}]}}},\"containers\":[{\"image\":\"ghcr.io/x/atelet@sha256:1\",\"name\":\"atelet\",\"volumeMounts\":[{\"mountPath\":\"/etc/eks/image-credential-provider/config.json\",\"name\":\"image-credential-provider-config\",\"subPath\":\"config.yaml\"},{\"mountPath\":\"/etc/eks/image-credential-provider\",\"name\":\"image-credential-provider-bin\"}]}],\"volumes\":[{\"hostPath\":{\"path\":\"/usr/libexec/kubernetes/kubelet/plugins\",\"type\":\"Directory\"},\"name\":\"image-credential-provider-bin\"},{\"configMap\":{\"name\":\"atelet-iso-credential-provider\"},\"name\":\"image-credential-provider-config\"},{\"emptyDir\":{},\"name\":\"state\"}]}}}}",
+  "# The counter demo's gVisor Namespace and WorkerPool under new names, with\n# the network transport and RuntimeClass isolated-sandbox, on the\n# ate-isolated NodePool: each worker Pod is an EKS Auto Mode isolated sandbox\n# with its own guest kernel, and runs gVisor actors inside, as in mode 3.\n#\n# ghcr.io/csantanapr/substrate/ateworker-gvisor:v1.0.0-mode3.9f36a0d@sha256:pinned is the fork's ateworker-gvisor, pinned by digest.\n#\n# Learn more:\n#   https://docs.aws.amazon.com/eks/latest/userguide/automode.html\n#   https://kubernetes.io/docs/concepts/containers/runtime-class/\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: ate-demo-counter-iso\n---\napiVersion: ate.dev/v1\nkind: WorkerPool\nmetadata:\n  name: counter-iso\n  namespace: ate-demo-counter-iso\n  labels:\n    workload: counter-iso\nspec:\n  replicas: 2\n  workerImage: ghcr.io/csantanapr/substrate/ateworker-gvisor:v1.0.0-mode3.9f36a0d@sha256:pinned\n  sandboxClasses:\n  - name: gvisor\n  networkTransport:\n    runtimeClassName: isolated-sandbox\n  template:\n    # The guest is sized from the memory request; the worker keeps runtime\n    # assets, image layers and actor state on a tmpfs in it.\n    resources:\n      limits:\n        cpu: \"1\"\n        memory: 2Gi\n      requests:\n        cpu: 250m\n        memory: 2Gi\n    nodeSelector:\n      ate.dev/pool: isolated\n    tolerations:\n    - key: ate.dev/sandboxClass\n      operator: Equal\n      value: isolated\n      effect: NoSchedule\n    # Every activation pushes the actor's image layers, runtime and state\n    # into the worker's guest, so the guest's default network and disk\n    # throttles are off: with them on, a resume can take longer than the\n    # request that wakes the actor.\n    annotations:\n      sandbox.amazonaws.com/ingress-bandwidth: disabled\n      sandbox.amazonaws.com/egress-bandwidth: disabled\n      sandbox.amazonaws.com/ingress-packets-per-second: disabled\n      sandbox.amazonaws.com/egress-packets-per-second: disabled\n      sandbox.amazonaws.com/overlay-disk-bandwidth: disabled\n      sandbox.amazonaws.com/overlay-disk-iops: disabled\n"
+ ],
+ "deployLog": [
+  "kubectl get runtimeclass isolated-sandbox -o jsonpath={.handler}",
+  "kubectl get nodepool general-purpose -o json",
+  "kubectl get nodeclass default -o json",
+  "kubectl apply -f -",
+  "kubectl apply -f -",
+  "kubectl get nodepool ate-isolated -o json",
+  "kubectl get nodeclass ate-isolated -o json",
+  "kubectl apply -f -",
+  "kubectl -n ate-system get ds atelet -o json",
+  "kubectl apply -f -",
+  "build kubectl-ate",
+  "counter image arm64 mode3-iso-v1.0.0-mode3.9f36a0d",
+  "kubectl apply -f -",
+  "ate create atespace ate-demo-counter-iso",
+  "ate get actor-template counter-iso -a ate-demo-counter-iso -o json",
+  "kubectl -n ate-demo-counter-iso rollout status deploy/counter-iso --timeout=10m",
+  "kubectl -n ate-system rollout status ds/atelet-iso --timeout=5m",
+  "ate create actor-template -f <template file>",
+  "golden",
+  "kubectl -n ate-demo-counter-iso get pods -o custom-columns=POD:.metadata.name,RUNTIME:.spec.runtimeClassName,NODE:.spec.nodeName"
+ ],
+ "deployOut": "RuntimeClass isolated-sandbox -> handler sandbox\nNodePool ate-isolated (a copy of general-purpose, labeled and tainted) and its NodeClass (tagged)\nNodePool ate-isolated launches arm64 nodes\nNodeClass ate-isolated is Ready\natelet-iso on the isolated nodes\nCounter on mode 3, isolated sandboxes\nWorker image ghcr.io/csantanapr/substrate/ateworker-gvisor:v1.0.0-mode3.9f36a0d@sha256:pinned, counter image ecr/c1/counter@sha256:c0ffee\nCreated ActorTemplate ate-demo-counter-iso/counter-iso\n",
+ "removeLog": [
+  "kubectl get namespace ate-system --ignore-not-found -o name",
+  "kubectl delete namespace ate-demo-counter-iso --ignore-not-found --wait=true --timeout=10m",
+  "delete image mode3-iso-v1.0.0-mode3.9f36a0d",
+  "kubectl -n ate-system delete daemonset atelet-iso --ignore-not-found --wait=true",
+  "kubectl delete -f - --ignore-not-found",
+  "kubectl get crd nodepools.karpenter.sh --ignore-not-found -o name",
+  "kubectl delete nodepool ate-isolated --ignore-not-found --wait=true --timeout=10m",
+  "kubectl get nodes -l karpenter.sh/nodepool=ate-isolated -o name",
+  "kubectl get nodes -l karpenter.sh/nodepool=ate-isolated -o name",
+  "kubectl delete nodeclass ate-isolated --ignore-not-found --wait=true --timeout=5m"
+ ],
+ "removeOut": "Deleting Namespace ate-demo-counter-iso\nDeleting atelet-iso and its credential provider config\nDeleting NodePool ate-isolated; Auto Mode drains and removes its nodes\nWaiting for Auto Mode to remove node/i1\nNo node of NodePool ate-isolated is left\nDeleting NodeClass ate-isolated\n",
+ "template": "# The counter demo's ActorTemplate for the isolated pool: mode 3's template\n# (counter-mode3-template.yaml) selecting the counter-iso workers. Created\n# with `kubectl ate create actor-template -f`; it is not a Kubernetes object.\n#\n# ecr/c1/counter@sha256:c0ffee is the counter image mode 3's template runs.\nmetadata:\n  atespace: ate-demo-counter-iso\n  name: counter-iso\nworkerSelector:\n  matchLabels:\n    workload: counter-iso\ncontainers:\n- name: counter\n  image: ecr/c1/counter@sha256:c0ffee\n  command:\n  - /ko-app/counter\n  - --extra-port=9090\n  - --tcp-port=9091\n  wakeupProbe:\n    httpGet:\n      path: /readyz\n      port: 80\n  volumeMounts:\n  - name: data\n    mountPath: /home/counter\n# An actor occupies its whole worker; it is sized below the worker's limits.\nresources:\n  limits:\n    cpuMillicores: 1000\n    memoryBytes: 536870912 # 512Mi\nsnapshotConfig:\n  # MEMORY: a suspend captures process memory as well as the durable volume,\n  # so the in-memory counter continues across suspend and resume.\n  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY\nvolumes:\n- name: data\n  durableDir: {}\n",
+ "verifyLog": [
+  "build kubectl-ate",
+  "kubectl -n ate-demo-counter-iso get pods -l ate.dev/worker-transport=network -o json",
+  "kubectl get nodes -o json",
+  "roundtrip ate-demo-counter-iso/counter-iso/demo-iso",
+  "ate get actor demo-iso-delete -a ate-demo-counter-iso -o json",
+  "ate create actor demo-iso-delete -a ate-demo-counter-iso --template counter-iso",
+  "ate get actor demo-iso-delete -a ate-demo-counter-iso -o json",
+  "ate delete actor demo-iso-delete -a ate-demo-counter-iso",
+  "kubectl -n ate-demo-counter-iso logs pod-1 --all-containers"
+ ],
+ "verifyOut": "  worker Pod pod-1  RuntimeClass isolated-sandbox  node n1 (ate.dev/pool=isolated, karpenter.sh/nodepool=ate-isolated)\nPASS: demo-iso (ate-demo-counter-iso): resumed\ndemo-iso-delete (ate-demo-counter-iso): delete tears down the sandbox in the guest\nPASS: the worker in Pod pod-1 tore down demo-iso-delete's sandbox\n"
+}

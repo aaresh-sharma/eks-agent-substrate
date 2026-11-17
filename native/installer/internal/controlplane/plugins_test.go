@@ -71,6 +71,32 @@ func init() {
 		Source: &plugin.Source{Repo: "https://example.invalid/fork.git", Commit: forkCommit, Tag: "v1.0.0-fork", ImageRepo: "ghcr.io/example/fork"},
 	}})
 	plugin.Register(plugin.Plugin{ID: "cp-test-auto", Order: 3, NeedsAutoMode: "needs EKS Auto Mode"})
+	plugin.Register(plugin.Plugin{ID: "cp-test-nitro", Order: 4, NeedsAutoMode: "needs EKS Auto Mode",
+		AutoModeOptional: func(o plugin.Options) bool { return o.NitroCompute == plugin.NitroNodeGroup }})
+}
+
+// A plugin that may run without Auto Mode (mode3-iso with
+// NITRO_COMPUTE=node-group) is refused on a standard cluster only without
+// that setting: the control plane deploy reads it from the plugin options.
+func TestDeployRefusesAutoModeOnlyWithoutTheNodeGroupSetting(t *testing.T) {
+	for _, compute := range []string{"", plugin.NitroAutoMode, plugin.NitroNodeGroup} {
+		f := &deployFakes{}
+		o := deployEnv(t, f)
+		describeCluster = func(context.Context, string, string, string) (awsx.Cluster, error) {
+			return awsx.Cluster{Name: "demo", Status: "ACTIVE", Endpoint: "https://example.invalid",
+				CA: base64.StdEncoding.EncodeToString([]byte("ca"))}, nil
+		}
+		o.Plugins, o.Plugin.NitroCompute = []string{"cp-test-nitro"}, compute
+		err := Deploy(context.Background(), io.Discard, o)
+		fetched := slices.ContainsFunc(f.calls, func(c string) bool { return strings.HasPrefix(c, "fetch") })
+		runs := compute == plugin.NitroNodeGroup
+		if runs != (err == nil) || runs != fetched {
+			t.Errorf("NITRO_COMPUTE=%q: %v, fetched %v", compute, err, fetched)
+		}
+		if !runs && (err == nil || !strings.Contains(err.Error(), "cp-test-nitro needs EKS Auto Mode; demo has EKS Auto Mode off")) {
+			t.Errorf("NITRO_COMPUTE=%q: %v", compute, err)
+		}
+	}
 }
 
 // A plugin that needs Auto Mode (the AWS Nitro sandbox class's) stops a

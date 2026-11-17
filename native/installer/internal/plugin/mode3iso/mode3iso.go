@@ -3,7 +3,10 @@
 // actors inside; here the microVM is RuntimeClass isolated-sandbox, which
 // EKS Auto Mode provides, on nodes Auto Mode launches for those Pods. No
 // node group and no Kata install is involved, and it stands alone: it
-// needs an Auto Mode cluster, not the mode3 plugin.
+// needs an Auto Mode cluster, not the mode3 plugin. With
+// NITRO_COMPUTE=node-group it runs on the nitro node group instead, and
+// needs no Auto Mode (nodegroup.go); what follows is the default,
+// NITRO_COMPUTE=auto-mode.
 //
 //   - Needs: mode 3's (mode3.Needs), the fork's release with the
 //     NetworkWorkers gate, so choosing it alone installs the fork; with
@@ -19,7 +22,9 @@
 //     an actor tears its sandbox down in the guest.
 //   - Remove: the pool and its counter image, atelet-iso and its ConfigMap,
 //     then the NodePool, whose nodes Auto Mode drains and terminates; it
-//     waits for them, then deletes the NodeClass.
+//     waits for them, then deletes the NodeClass. It is one Remove for
+//     both NITRO_COMPUTE values (remove), since a deploy may have run under
+//     either.
 //
 // It makes no AWS resources of its own (Auto Mode owns the nodes, and the
 // counter repository is the deployment's), so it has no setup-aws half.
@@ -91,26 +96,29 @@ func init() {
 		ID:    ID,
 		Title: "AWS Nitro sandbox (isolated-sandbox)",
 		Summary: "The AWS Nitro sandbox class: each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox), " +
-			"on nodes Auto Mode launches for them (NodePool ate-isolated); no Kata, no node group. Needs Auto Mode. Installs Substrate from " +
+			"on nodes Auto Mode launches for them (NodePool ate-isolated); no Kata, no node group. Needs Auto Mode, or with " +
+			"NITRO_COMPUTE=node-group the nitro node group of a Nitro Sandbox AMI instead. Installs Substrate from " +
 			"csantanapr/substrate (" + mode3.Tag + ") and a counter pool that it checks.",
 		// Chosen with the class in Settings, not on the Plugins screen.
 		Class: Class,
 		// Minutes as measured on sub-p15 (2026-11-15): 7m29s, the counter
 		// image build and push included.
-		Order: mode3.Order + 1, Minutes: 8, NeedsAutoMode: needsAutoMode,
+		Order: mode3.Order + 1, Minutes: 8, NeedsAutoMode: needsAutoMode, AutoModeOptional: nodeGroupMode,
 		Needs: mode3.Needs,
 		// One node for the two worker Pods, launched by Auto Mode: a
 		// c6i.xlarge on-demand on sub-p15, $0.17 in us-west-2, plus the
-		// $0.0204 Auto Mode fee.
+		// $0.0204 Auto Mode fee. (With NITRO_COMPUTE=node-group the nodes
+		// are the nitro node group's, priced with the cluster.)
 		HourlyUSD: 0.19,
-		Deploy:    deploy, Verify: Iso.Verify, Remove: remove,
+		Deploy:    deploy, Verify: verify, Remove: remove,
 	})
 }
 
 // needsAutoMode is why the plugin needs EKS Auto Mode (Plugin.NeedsAutoMode):
 // the wizard offers it only there, and Run refuses its deploy and verify
-// anywhere else, so Deploy and Verify do not check it again.
-const needsAutoMode = "needs EKS Auto Mode: its isolated-sandbox RuntimeClass and NodePool come from Auto Mode"
+// anywhere else, so Deploy and Verify do not check it again. With
+// NITRO_COMPUTE=node-group (AutoModeOptional) it runs anywhere.
+const needsAutoMode = "needs EKS Auto Mode: its isolated-sandbox RuntimeClass and NodePool come from Auto Mode (with NITRO_COMPUTE=node-group it runs on the nitro node group instead)"
 
 // createdHere reports a cluster `setup-aws create cluster` made: its role
 // carries the auto-mode-node-tags policy, which lets Auto Mode launch nodes
@@ -171,12 +179,16 @@ const (
 	ateletRollout = "--timeout=5m"
 )
 
-// deploy runs only on Auto Mode: plugin.Run refuses it elsewhere
-// (NeedsAutoMode).
+// deploy runs only on Auto Mode, or with NITRO_COMPUTE=node-group, on the
+// nitro node group (deployNodeGroup): plugin.Run refuses it elsewhere
+// (NeedsAutoMode, AutoModeOptional).
 func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	tree, err := mode3.Tree(o, ID)
 	if err != nil {
 		return err
+	}
+	if nodeGroupMode(o) {
+		return deployNodeGroup(ctx, w, o, tree)
 	}
 	var handler bytes.Buffer
 	if err := plugin.Kubectl(ctx, w, o, nil, &handler, "get", "runtimeclass", RuntimeClass, "-o", "jsonpath={.handler}"); err != nil {
@@ -241,14 +253,19 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := plugin.Kubectl(ctx, w, o, nil, &atelet, "-n", "ate-system", "get", "ds", "atelet", "-o", "json"); err != nil {
 		return err
 	}
-	iso, err := AteletIso(atelet.Bytes())
+	ds, err := AteletIso(atelet.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := plugin.Kubectl(ctx, w, o, iso, nil, "apply", "-f", "-"); err != nil {
+	if err := plugin.Kubectl(ctx, w, o, ds, nil, "apply", "-f", "-"); err != nil {
 		return err
 	}
+	return deployPool(ctx, w, o, tree, Iso, arch)
+}
 
+// deployPool builds kubectl-ate and the counter image for arch, and
+// deploys pool (Iso, or IsoNodeGroup) on the fork's pinned worker image.
+func deployPool(ctx context.Context, w io.Writer, o plugin.Options, tree string, pool mode3.Counter, arch string) error {
 	fmt.Fprintln(w, "Counter on mode 3, isolated sandboxes")
 	do := mode3.DemoOptions(o)
 	if _, err := mode3.Demo.KubectlAte(ctx, w, do, tree); err != nil {
@@ -263,15 +280,24 @@ func deploy(ctx context.Context, w io.Writer, o plugin.Options) error {
 		return err
 	}
 	fmt.Fprintln(w, "Worker image "+worker+", counter image "+counter)
-	// The worker Pods wait for Auto Mode to launch their nodes; the golden
-	// snapshot needs a worker and atelet-iso there first.
+	// The worker Pods wait for their nodes (Auto Mode launches them); the
+	// golden snapshot needs a worker and atelet-iso there first.
 	waitNodes := func() error {
-		if err := plugin.Kubectl(ctx, w, o, nil, nil, "-n", Iso.Namespace, "rollout", "status", "deploy/"+Iso.Name, poolRollout); err != nil {
+		if err := plugin.Kubectl(ctx, w, o, nil, nil, "-n", pool.Namespace, "rollout", "status", "deploy/"+pool.Name, poolRollout); err != nil {
 			return err
 		}
 		return plugin.Kubectl(ctx, w, o, nil, nil, "-n", "ate-system", "rollout", "status", "ds/"+AteletName, ateletRollout)
 	}
-	return Iso.Deploy(ctx, w, o, worker, counter, waitNodes)
+	return pool.Deploy(ctx, w, o, worker, counter, waitNodes)
+}
+
+// verify checks the counter pool of o's NITRO_COMPUTE (Counter.Verify).
+func verify(ctx context.Context, w io.Writer, o plugin.Options) error {
+	pool, err := iso(o)
+	if err != nil {
+		return err
+	}
+	return pool.Verify(ctx, w, o)
 }
 
 // nodesTries bounds the wait for Auto Mode to remove the NodePool's nodes,
@@ -282,6 +308,15 @@ const nodesTries = 300
 // tests replace it.
 var deleteImage = mode3.DeleteCounterImage
 
+// remove takes away what deploy makes under either NITRO_COMPUTE, whichever
+// the run names: NITRO_COMPUTE is not recorded with the plugin, and a deploy
+// under one after the other leaves the first one's objects. So it deletes
+// the counter pool and its image tag, atelet-iso, the credential provider
+// ConfigMap and NodePool ate-isolated with its NodeClass (auto-mode's), and
+// RuntimeClass isolated-sandbox when the installer made it and no Pod uses
+// it (node-group's, removeRuntimeClass). Under auto-mode on an Auto Mode
+// cluster it reads no RuntimeClass, as before NITRO_COMPUTE: there it is
+// Auto Mode's own.
 func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := Iso.Remove(ctx, w, o); err != nil {
 		return err
@@ -297,24 +332,55 @@ func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := plugin.Kubectl(ctx, w, o, providerManifest, nil, "delete", "-f", "-", "--ignore-not-found"); err != nil {
 		return err
 	}
-	// Without Auto Mode there is no NodePool kind, and nothing to delete.
-	var crd bytes.Buffer
-	if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "--ignore-not-found", "-o", "name"); err != nil {
+	pool, err := nodePoolMade(ctx, w, o)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(crd.String()) == "" {
+	if pool {
+		fmt.Fprintln(w, "Deleting NodePool "+NodePoolName+"; Auto Mode drains and removes its nodes")
+		if err := plugin.Kubectl(ctx, w, o, nil, nil, "delete", "nodepool", NodePoolName, "--ignore-not-found", "--wait=true", "--timeout=10m"); err != nil {
+			return err
+		}
+		if err := waitNoNodes(ctx, w, o); err != nil {
+			return err
+		}
+		// Its nodes are gone, so the NodeClass's finalizer lets it go.
+		fmt.Fprintln(w, "Deleting NodeClass "+NodePoolName)
+		if err := plugin.Kubectl(ctx, w, o, nil, nil, "delete", "nodeclass", NodePoolName, "--ignore-not-found", "--wait=true", "--timeout=5m"); err != nil {
+			return err
+		}
+	}
+	if o.AutoMode && !nodeGroupMode(o) {
 		return nil
 	}
-	fmt.Fprintln(w, "Deleting NodePool "+NodePoolName+"; Auto Mode drains and removes its nodes")
-	if err := plugin.Kubectl(ctx, w, o, nil, nil, "delete", "nodepool", NodePoolName, "--ignore-not-found", "--wait=true", "--timeout=10m"); err != nil {
-		return err
+	return removeRuntimeClass(ctx, w, o)
+}
+
+// nodePoolMade reports whether remove deletes NodePool ate-isolated and its
+// NodeClass. Under auto-mode, as before NITRO_COMPUTE: when the cluster has
+// the NodePool kind (without Auto Mode there is none, and nothing to
+// delete). Under node-group, only an auto-mode deploy made them: when the
+// cluster has both of Auto Mode's kinds (one that runs its own Karpenter has
+// NodePools and no NodeClass kind) and one of the two objects.
+func nodePoolMade(ctx context.Context, w io.Writer, o plugin.Options) (bool, error) {
+	var crd bytes.Buffer
+	if !nodeGroupMode(o) {
+		if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "--ignore-not-found", "-o", "name"); err != nil {
+			return false, err
+		}
+		return strings.TrimSpace(crd.String()) != "", nil
 	}
-	if err := waitNoNodes(ctx, w, o); err != nil {
-		return err
+	if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "nodeclasses.eks.amazonaws.com", "--ignore-not-found", "-o", "name"); err != nil {
+		return false, err
 	}
-	// Its nodes are gone, so the NodeClass's finalizer lets it go.
-	fmt.Fprintln(w, "Deleting NodeClass "+NodePoolName)
-	return plugin.Kubectl(ctx, w, o, nil, nil, "delete", "nodeclass", NodePoolName, "--ignore-not-found", "--wait=true", "--timeout=5m")
+	if len(strings.Fields(crd.String())) < 2 {
+		return false, nil
+	}
+	var objs bytes.Buffer
+	if err := plugin.Kubectl(ctx, w, o, nil, &objs, "get", "nodepool,nodeclass", NodePoolName, "--ignore-not-found", "-o", "name"); err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(objs.String()) != "", nil
 }
 
 // waitNoNodes waits until no node carries the NodePool's label.

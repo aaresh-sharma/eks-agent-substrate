@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/execx"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/state"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/steps"
 )
@@ -304,7 +305,7 @@ func TestClassHelpSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 		{state.DatabaseRDS, []string{"t-kata"}, []string{"system", "microvm"}},
 		{state.DatabaseBundled, []string{"t-gateway"}, []string{"system"}},
 	} {
-		if got := state.NewNodeGroups(true, c.db, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
+		if got := state.NewNodeGroups(true, c.db, state.ClassNitro, plugin.NitroAutoMode, c.plugins); !slices.Equal(got, c.want) {
 			t.Errorf("Auto Mode, %s, nitro, %v: %v, want %v", c.db, c.plugins, got, c.want)
 		}
 	}

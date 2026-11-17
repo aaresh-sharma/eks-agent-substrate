@@ -11,6 +11,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 )
 
 // A custom AMI (NODE_AMI_ID) replaces the Amazon EKS optimized Amazon Linux
@@ -91,31 +93,59 @@ func describeImage(ctx context.Context, c clusterEC2API, id, setting string) (*n
 
 // checkImage reads the AMI of the groups to make, when their templates
 // name one: NODE_AMI_ID when it is set, else for self-managed groups the
-// recommended EKS optimized AL2023 AMI (resolveImages). Each AMI's
+// recommended EKS optimized AL2023 AMI (resolveImages); and for the nitro
+// group always NITRO_AMI_ID, which no other group uses. Each AMI's
 // architecture must be the one its group's instance type runs, and its root
 // snapshot must fit the group's root volume. checkInstanceTypes runs first.
 func (r *clusterRun) checkImage(ctx context.Context) error {
-	if (r.cfg.NodeAMIID == "" && !r.selfManaged()) || len(r.groups()) == 0 {
+	var others []nodeGroupSpec
+	var nitro *nodeGroupSpec
+	for _, g := range r.groups() {
+		if g.Name == nodegroups.Nitro {
+			nitro = &g
+			continue
+		}
+		others = append(others, g)
+	}
+	named := len(others) > 0 && (r.cfg.NodeAMIID != "" || r.selfManaged())
+	if !named && nitro == nil {
 		return nil
 	}
 	// The NodeConfig carries an IPv4 service CIDR; a new cluster is IPv4.
 	if r.cluster != nil && r.cluster.KubernetesNetworkConfig != nil && r.cluster.KubernetesNetworkConfig.IpFamily == ekstypes.IpFamilyIpv6 {
-		return fmt.Errorf("cluster %s is an IPv6 cluster; nodes that join from a NodeConfig (NODE_AMI_ID, NODE_GROUP_TYPE=self-managed) support IPv4 clusters only", r.e.names.Cluster)
+		return fmt.Errorf("cluster %s is an IPv6 cluster; nodes that join from a NodeConfig (NODE_AMI_ID, NODE_GROUP_TYPE=self-managed, the nitro node group) support IPv4 clusters only", r.e.names.Cluster)
 	}
-	if r.cfg.NodeAMIID == "" {
-		return r.resolveImages(ctx)
+	switch {
+	case !named:
+	case r.cfg.NodeAMIID == "":
+		if err := r.resolveImages(ctx); err != nil {
+			return err
+		}
+	default:
+		im, err := describeImage(ctx, r.c.EC2, r.cfg.NodeAMIID, "NODE_AMI_ID")
+		if err != nil {
+			return err
+		}
+		for _, g := range others {
+			if err := r.imageFits(im, "NODE_AMI_ID", g); err != nil {
+				return err
+			}
+		}
+		r.image = im
+		slog.Info("custom node AMI", "ami", im.ID, "name", im.Name, "arch", string(im.Arch), "rootDevice", im.RootDevice)
 	}
-	im, err := describeImage(ctx, r.c.EC2, r.cfg.NodeAMIID, "NODE_AMI_ID")
+	if nitro == nil {
+		return nil
+	}
+	im, err := describeImage(ctx, r.c.EC2, r.cfg.NitroAMIID, "NITRO_AMI_ID")
 	if err != nil {
 		return err
 	}
-	for _, g := range r.groups() {
-		if err := r.imageFits(im, "NODE_AMI_ID", g); err != nil {
-			return err
-		}
+	if err := r.imageFits(im, "NITRO_AMI_ID", *nitro); err != nil {
+		return err
 	}
-	r.image = im
-	slog.Info("custom node AMI", "ami", im.ID, "name", im.Name, "arch", string(im.Arch), "rootDevice", im.RootDevice)
+	r.nitroImage = im
+	slog.Info("Nitro Sandbox AMI", "ami", im.ID, "name", im.Name, "arch", string(im.Arch), "rootDevice", im.RootDevice)
 	return nil
 }
 
@@ -154,7 +184,8 @@ func (r *clusterRun) resolveImages(ctx context.Context) error {
 		version = aws.ToString(r.cluster.Version)
 	}
 	for _, g := range r.groups() {
-		if r.groupExists(g.Name) {
+		// The nitro group runs NITRO_AMI_ID, never the EKS optimized AMI.
+		if r.groupExists(g.Name) || g.Name == nodegroups.Nitro {
 			continue
 		}
 		arch := archOf(r.amiTypes[g.InstanceType])

@@ -188,43 +188,10 @@ const (
 // ConfigMap atelet-iso-credential-provider. It is a copy, so a Substrate
 // upgrade that changes atelet needs the plugin deployed again.
 func AteletIso(atelet []byte) ([]byte, error) {
-	var d obj
-	if err := json.Unmarshal(atelet, &d); err != nil {
-		return nil, fmt.Errorf("read DaemonSet atelet: %w", err)
-	}
-	if d["kind"] != "DaemonSet" {
-		return nil, fmt.Errorf("atelet is a %v, not a DaemonSet", d["kind"])
-	}
-	m, ok := d["metadata"].(obj)
-	if !ok {
-		return nil, errors.New("DaemonSet atelet has no metadata")
-	}
-	meta := obj{"name": AteletName, "namespace": m["namespace"]}
-	if l, ok := m["labels"]; ok {
-		meta["labels"] = l
-	}
-	d["metadata"] = meta
-	delete(d, "status")
-	spec, ok := d["spec"].(obj)
-	if !ok {
-		return nil, errors.New("DaemonSet atelet has no spec")
-	}
-	sel, err := path(spec, "selector", "matchLabels")
+	d, p, err := ateletCopy(atelet, PoolValue)
 	if err != nil {
-		return nil, fmt.Errorf("DaemonSet atelet: %w", err)
+		return nil, err
 	}
-	sel[VariantLabel] = "iso"
-	tl, err := path(spec, "template", "metadata", "labels")
-	if err != nil {
-		return nil, fmt.Errorf("DaemonSet atelet: %w", err)
-	}
-	tl[VariantLabel] = "iso"
-	p, err := path(spec, "template", "spec")
-	if err != nil {
-		return nil, fmt.Errorf("DaemonSet atelet: %w", err)
-	}
-	p["affinity"] = obj{"nodeAffinity": obj{"requiredDuringSchedulingIgnoredDuringExecution": obj{"nodeSelectorTerms": []any{
-		obj{"matchExpressions": []any{obj{"key": PoolLabel, "operator": "In", "values": []any{PoolValue}}}}}}}}
 	vols, _ := p["volumes"].([]any)
 	found := map[string]bool{}
 	for _, v := range vols {
@@ -256,4 +223,72 @@ func AteletIso(atelet []byte) ([]byte, error) {
 		}
 	}
 	return json.Marshal(d)
+}
+
+// AteletIsoNodeGroup is atelet-iso for the nitro node group
+// (NITRO_COMPUTE=node-group), made from the atelet DaemonSet as AteletIso
+// makes it, on the nodes labeled ate.dev/pool=nitro. Those run a Nitro
+// Sandbox AMI built on the EKS AL2023 AMI, whose kubelet has the ECR
+// credential provider where atelet's does, so atelet's volumes and mounts
+// are kept as they are (deploy/eks's AL2023 hostPaths), and no ConfigMap is
+// needed. A DaemonSet without those two hostPath volumes is refused: its
+// Pods could not pull from ECR there.
+func AteletIsoNodeGroup(atelet []byte) ([]byte, error) {
+	d, p, err := ateletCopy(atelet, NitroPool)
+	if err != nil {
+		return nil, err
+	}
+	vols, _ := p["volumes"].([]any)
+	found := map[string]bool{}
+	for _, v := range vols {
+		if vol, ok := v.(obj); ok && (vol["name"] == providerBin || vol["name"] == providerConfig) && vol["hostPath"] != nil {
+			found[vol["name"].(string)] = true
+		}
+	}
+	if !found[providerBin] || !found[providerConfig] {
+		return nil, fmt.Errorf("DaemonSet atelet has no %s and %s hostPath volumes (found %v)", providerBin, providerConfig, found)
+	}
+	return json.Marshal(d)
+}
+
+// ateletCopy is the atelet DaemonSet renamed atelet-iso, without its
+// status, its selector and Pods labeled ate.dev/atelet-variant=iso, and its
+// Pods on the nodes labeled ate.dev/pool=<pool> only; p is its Pod spec.
+func ateletCopy(atelet []byte, pool string) (d, p obj, err error) {
+	if err := json.Unmarshal(atelet, &d); err != nil {
+		return nil, nil, fmt.Errorf("read DaemonSet atelet: %w", err)
+	}
+	if d["kind"] != "DaemonSet" {
+		return nil, nil, fmt.Errorf("atelet is a %v, not a DaemonSet", d["kind"])
+	}
+	m, ok := d["metadata"].(obj)
+	if !ok {
+		return nil, nil, errors.New("DaemonSet atelet has no metadata")
+	}
+	meta := obj{"name": AteletName, "namespace": m["namespace"]}
+	if l, ok := m["labels"]; ok {
+		meta["labels"] = l
+	}
+	d["metadata"] = meta
+	delete(d, "status")
+	spec, ok := d["spec"].(obj)
+	if !ok {
+		return nil, nil, errors.New("DaemonSet atelet has no spec")
+	}
+	sel, err := path(spec, "selector", "matchLabels")
+	if err != nil {
+		return nil, nil, fmt.Errorf("DaemonSet atelet: %w", err)
+	}
+	sel[VariantLabel] = "iso"
+	tl, err := path(spec, "template", "metadata", "labels")
+	if err != nil {
+		return nil, nil, fmt.Errorf("DaemonSet atelet: %w", err)
+	}
+	tl[VariantLabel] = "iso"
+	if p, err = path(spec, "template", "spec"); err != nil {
+		return nil, nil, fmt.Errorf("DaemonSet atelet: %w", err)
+	}
+	p["affinity"] = obj{"nodeAffinity": obj{"requiredDuringSchedulingIgnoredDuringExecution": obj{"nodeSelectorTerms": []any{
+		obj{"matchExpressions": []any{obj{"key": PoolLabel, "operator": "In", "values": []any{pool}}}}}}}}
+	return d, p, nil
 }

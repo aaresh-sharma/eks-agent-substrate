@@ -242,10 +242,33 @@ type Options struct {
 	// (BundledDatabase), read by the caller: Run refuses a plugin with
 	// NeedsRDS there.
 	BundledDatabase bool
+	// NitroCompute is NITRO_COMPUTE (--nitro-compute): where the AWS Nitro
+	// sandbox class runs, NitroAutoMode (EKS Auto Mode's nodes, the default;
+	// empty reads as it) or NitroNodeGroup (the nitro node group).
+	NitroCompute string
 }
 
-// PoolLabel is the label of the node groups' nodes: system, gvisor or
-// microvm (and isolated, on the AWS Nitro sandbox class's Auto Mode nodes).
+// NITRO_COMPUTE's values: the AWS Nitro sandbox class (mode3-iso) on nodes
+// EKS Auto Mode launches, or on the nitro node group setup-aws makes from a
+// Nitro Sandbox AMI, which needs no Auto Mode.
+const (
+	NitroAutoMode  = "auto-mode"
+	NitroNodeGroup = "node-group"
+)
+
+// NitroComputes are NITRO_COMPUTE's values; NitroAutoMode is the default.
+var NitroComputes = []string{NitroAutoMode, NitroNodeGroup}
+
+// CheckNitroCompute refuses a NITRO_COMPUTE that is not one of NitroComputes.
+func CheckNitroCompute(v string) error {
+	if !slices.Contains(NitroComputes, v) {
+		return fmt.Errorf("NITRO_COMPUTE=%q is not %s", v, strings.Join(NitroComputes, " or "))
+	}
+	return nil
+}
+
+// PoolLabel is the label of the node groups' nodes: system, gvisor, microvm
+// or nitro (and isolated, on the AWS Nitro sandbox class's Auto Mode nodes).
 const PoolLabel = "ate.dev/pool"
 
 // PoolsArgs are the kubectl arguments that list the PoolLabel values of the
@@ -302,8 +325,12 @@ type Plugin struct {
 	SetupAWS bool
 	// NeedsAutoMode, when set, is why the plugin needs EKS Auto Mode: the
 	// wizard offers it only on an Auto Mode cluster, and Run refuses to
-	// deploy it on any other.
+	// deploy it on any other (AutoModeProblem).
 	NeedsAutoMode string
+	// AutoModeOptional, when set, reports the options under which a plugin
+	// with NeedsAutoMode runs without Auto Mode all the same (mode3-iso with
+	// NITRO_COMPUTE=node-group, on the nitro node group).
+	AutoModeOptional func(Options) bool
 	// NeedsRDS, when set, is why the plugin needs the RDS database (login
 	// rotation rotates its logins): the wizard offers it only with RDS, and
 	// Run refuses to deploy or check it, before any child, on a cluster
@@ -350,6 +377,17 @@ type Plugin struct {
 	// --delete`). All must be idempotent, start every child from an argv
 	// (Exec), and print no secret.
 	Deploy, Verify, Remove func(ctx context.Context, w io.Writer, o Options) error
+}
+
+// AutoModeProblem is why p cannot run on a cluster with o's Auto Mode
+// (o.AutoMode) and settings (AutoModeOptional reads them), or "": its
+// NeedsAutoMode, on a cluster without Auto Mode, unless AutoModeOptional
+// lets it run there.
+func (p Plugin) AutoModeProblem(o Options) string {
+	if p.NeedsAutoMode == "" || o.AutoMode || (p.AutoModeOptional != nil && p.AutoModeOptional(o)) {
+		return ""
+	}
+	return p.NeedsAutoMode
 }
 
 // CheckSettings runs Check for each of ps (Resolve's, so what they require

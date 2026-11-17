@@ -4,20 +4,23 @@
 // NODE_GROUP_TYPE. Like phases it has no dependencies, so the installer
 // imports it through its replace directive without cobra or the AWS SDK.
 //
-// The gvisor and microvm groups run sandboxes: worker Pods of the gVisor
-// and microVM (Kata) classes. The system group runs what is pinned to it
-// (the control plane with RDS on Auto Mode, the plugins' controllers). A
-// cluster without EKS Auto Mode has no other nodes, so it always needs the
-// system group and a sandbox group. With Auto Mode, Auto Mode's nodes run
-// everything else, so the system group is made only for what is pinned to
-// it, and a cluster may have no node group at all (its sandboxes are Auto
-// Mode's, such as the AWS Nitro sandbox class's).
+// The gvisor, microvm and nitro groups run sandboxes: worker Pods of the
+// gVisor, microVM (Kata) and AWS Nitro sandbox classes (nitro only with
+// NITRO_COMPUTE=node-group; by default the Nitro sandbox runs on Auto
+// Mode's nodes). The system group runs what is pinned to it (the control
+// plane with RDS on Auto Mode, the plugins' controllers). A cluster without
+// EKS Auto Mode has no other nodes, so it always needs the system group and
+// a sandbox group. With Auto Mode, Auto Mode's nodes run everything else,
+// so the system group is made only for what is pinned to it, and a cluster
+// may have no node group at all (its sandboxes are Auto Mode's, such as the
+// AWS Nitro sandbox class's).
 package nodegroups
 
 import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -26,16 +29,22 @@ const (
 	System  = "system"
 	GVisor  = "gvisor"
 	MicroVM = "microvm"
+	// Nitro runs the AWS Nitro sandbox class on nodes of a Nitro Sandbox
+	// AMI (NITRO_AMI_ID), with Nitro Enclaves on.
+	Nitro = "nitro"
 )
 
-// All are the node groups in the order they are listed and created.
-var All = []string{System, GVisor, MicroVM}
+// All are the node groups in the order they are listed and created, and
+// the derived names (Auto Scaling groups, launch templates) teardown and
+// inventory look for.
+var All = []string{System, GVisor, MicroVM, Nitro}
 
 // None is NODE_GROUPS for no node group (an empty value means the default).
 const None = "none"
 
-// Default is NODE_GROUPS when it is unset: all three, as before the rule.
-var Default = Format(All)
+// Default is NODE_GROUPS when it is unset: system, gvisor and microvm, as
+// before the rule. It is spelled out: the nitro group is never a default.
+const Default = "system,gvisor,microvm"
 
 // The node group types, NODE_GROUP_TYPE: EKS managed node groups, or
 // self-managed ones, an Auto Scaling group per node group whose nodes join
@@ -57,8 +66,8 @@ func CheckType(t string) error {
 }
 
 // For is the node groups of a cluster whose sandboxes need the sandbox
-// groups in sandbox (gvisor, microvm), in All's order: those, plus the
-// system group when something runs on it:
+// groups in sandbox (gvisor, microvm, nitro), in All's order: those, plus
+// the system group when something runs on it:
 //   - without Auto Mode, everything that is not a sandbox: there are no
 //     other nodes;
 //   - with Auto Mode and RDS (rds) and a sandbox group, the control plane,
@@ -86,7 +95,7 @@ func For(autoMode, rds, pinned bool, sandbox []string) []string {
 }
 
 func hasSandbox(groups []string) bool {
-	return slices.Contains(groups, GVisor) || slices.Contains(groups, MicroVM)
+	return slices.Contains(groups, GVisor) || slices.Contains(groups, MicroVM) || slices.Contains(groups, Nitro)
 }
 
 // Check refuses an unknown or repeated group, and without Auto Mode a list
@@ -107,7 +116,7 @@ func Check(autoMode bool, groups []string) error {
 	system := slices.Contains(groups, System)
 	switch {
 	case !autoMode && !sandbox:
-		return errors.New("a cluster without EKS Auto Mode needs the gvisor or microvm node group: no other nodes run sandboxes")
+		return errors.New("a cluster without EKS Auto Mode needs the gvisor, microvm or nitro node group: no other nodes run sandboxes")
 	case !autoMode && !system:
 		return errors.New("a cluster without EKS Auto Mode needs the system node group: no other nodes run the control plane")
 	}
@@ -136,4 +145,43 @@ func Format(groups []string) string {
 		return None
 	}
 	return strings.Join(groups, ",")
+}
+
+// The nitro group's nodes come from a Nitro Sandbox AMI, which awslabs/
+// amazon-eks-ami builds with enable_pod_isolation=true: its nodeadm drop-in
+// (/etc/eks/nodeadm.d/10-pod-isolation.yaml) labels each node
+// NitroSandboxLabel=true, points the kubelet at the sandbox's CRI proxy and
+// registers the isolated-sandbox runtime handler, and the node advertises
+// NitroSandboxResource, one per sandbox it can run. The EKS optimized AMI
+// has none of this, so setup-aws and the installer both check the resource.
+//
+//	https://docs.aws.amazon.com/eks/latest/userguide/sandboxing-ami-create-update.html
+const (
+	NitroSandboxLabel    = "eks.amazonaws.com/nitro-sandbox"
+	NitroSandboxResource = "eks.amazonaws.com/nitro-sandbox"
+	NitroAMIDoc          = "https://docs.aws.amazon.com/eks/latest/userguide/sandboxing-ami-create-update.html"
+)
+
+// NitroAMIBuild is how to build a Nitro Sandbox AMI for Kubernetes version
+// (such as 1.37) from awslabs/amazon-eks-ami.
+func NitroAMIBuild(version string) string {
+	return "in a clone of https://github.com/awslabs/amazon-eks-ami: make k8s=" + version + " os_distro=al2023 enable_pod_isolation=true"
+}
+
+// SandboxCount reads a node's allocatable NitroSandboxResource, a
+// Kubernetes quantity of a whole number of sandboxes: "4", or "1k" for a
+// thousand. ok is false for anything else, which counts as none.
+func SandboxCount(q string) (n int64, ok bool) {
+	mult := int64(1)
+	for suffix, m := range map[string]int64{"k": 1e3, "M": 1e6, "G": 1e9} {
+		if v, cut := strings.CutSuffix(q, suffix); cut {
+			q, mult = v, m
+			break
+		}
+	}
+	n, err := strconv.ParseInt(q, 10, 64)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, false
+	}
+	return n * mult, true
 }

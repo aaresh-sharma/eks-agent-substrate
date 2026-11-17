@@ -62,8 +62,9 @@ func main() {
 		cluster    = flag.String("cluster", os.Getenv("CLUSTER_NAME"), "preselect this cluster, or the name of a new one (CLUSTER_NAME; the wizard also offers config.env's)")
 		tag        = flag.String("tag", conf("SUBSTRATE_TAG", state.DefaultTag), "Substrate release to install (SUBSTRATE_TAG)")
 		imageRepo  = flag.String("image-repo", conf("SUBSTRATE_IMAGE_REPO", state.DefaultImageRepo), "where the release's images come from (SUBSTRATE_IMAGE_REPO)")
-		classes    = flag.String("sandbox-classes", conf("SANDBOX_CLASSES", state.DefaultSandboxClasses), "sandbox classes, comma-separated: gvisor, microvm and nitro (the AWS Nitro sandbox, EKS Auto Mode only), in any combination (SANDBOX_CLASSES)")
+		classes    = flag.String("sandbox-classes", conf("SANDBOX_CLASSES", state.DefaultSandboxClasses), "sandbox classes, comma-separated: gvisor, microvm and nitro (the AWS Nitro sandbox: EKS Auto Mode, or the nitro node group with --nitro-compute node-group), in any combination (SANDBOX_CLASSES)")
 		database   = flag.String("database", controlplane.DatabaseRDS, "the control plane's database: rds (Amazon RDS for PostgreSQL) or bundled (in-cluster PostgreSQL)")
+		nitroComp  = flag.String("nitro-compute", conf("NITRO_COMPUTE", plugin.NitroAutoMode), "where the nitro class (the AWS Nitro sandbox) runs: auto-mode (nodes EKS Auto Mode launches) or node-group (the nitro node group, from a Nitro Sandbox AMI, NITRO_AMI_ID) (NITRO_COMPUTE)")
 		demoMode   = flag.Bool("demo", false, "end the install with the counter demo on its sandbox classes, and check it")
 		teardown   = flag.Bool("teardown", false, "open the wizard on the teardown of --cluster: remove Substrate, then its AWS resources")
 		keepClust  = flag.Bool("keep-cluster", false, "with --teardown: remove Substrate and its AWS data but never offer to delete the cluster")
@@ -113,6 +114,7 @@ func main() {
 		exitOn(fmt.Errorf("--database is %q; want %s or %s", *database, controlplane.DatabaseRDS, controlplane.DatabaseBundled))
 	}
 	exitOn(state.ValidSandboxClasses(*classes))
+	exitOn(plugin.CheckNitroCompute(*nitroComp))
 
 	findOverlay := func() string {
 		dir, err := eksoverlay.Find(*overlay, starts...)
@@ -136,7 +138,7 @@ func main() {
 			tags = controlplane.DefaultTags
 		}
 		b := builder{setupAWS: *setupAWS, cwd: cwd, exeDir: exeDir}
-		return plugin.Options{SetupAWS: absPath(b.findSetupAWS()), Tags: tags}
+		return plugin.Options{SetupAWS: absPath(b.findSetupAWS()), Tags: tags, NitroCompute: *nitroComp}
 	}
 	cpOptions := func() controlplane.Options {
 		return controlplane.Options{
@@ -218,6 +220,7 @@ func main() {
 	s := state.NewSetupFrom(cfg.Lookup)
 	s.Profile, s.Region, s.ClusterName, s.SubstrateTag = *profile, *region, *cluster, *tag
 	s.ImageRepo, s.SandboxClasses = *imageRepo, *classes
+	s.NewClusterConfig.NitroCompute = *nitroComp
 	if s.ClusterName == "" && !*teardown {
 		// config.local.env's cluster, ready to pick or create; never a teardown's target, which is named.
 		s.ClusterName = conf("CLUSTER_NAME", "")

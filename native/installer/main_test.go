@@ -149,7 +149,7 @@ func TestSandboxClassesCommentSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 		plugins []string
 		want    []string
 	}{{nil, nil}, {[]string{mode3.ID}, []string{"microvm"}}, {[]string{llmgateway.ID}, []string{"system"}}} {
-		if got := state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, c.plugins); !slices.Equal(got, c.want) {
+		if got := state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, plugin.NitroAutoMode, c.plugins); !slices.Equal(got, c.want) {
 			t.Errorf("Auto Mode, bundled, nitro, %v: %v, want %v", c.plugins, got, c.want)
 		}
 	}
@@ -194,7 +194,8 @@ func TestSandboxClassesCommentSaysWhenAPluginAddsANodeGroup(t *testing.T) {
 	for _, want := range []string{
 		"the microvm group for the mode3 plugin",
 		"or for a plugin that runs on it",
-		"With SANDBOX_CLASSES=nitro it makes a node group only for a plugin that adds one (mode3's microvm, or system for a plugin that runs on it), and none without such a plugin.",
+		"With SANDBOX_CLASSES=nitro on Auto Mode's nodes it makes a node group only for a plugin that adds one (mode3's microvm, or system for a plugin that runs on it), and none without such a plugin.",
+		"the nitro group with NITRO_COMPUTE=node-group",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("the SANDBOX_CLASSES comment lacks %q:\n%s", want, doc)

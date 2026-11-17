@@ -631,7 +631,7 @@ func (m Model) body(h, cut int) string {
 		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.NitroSandbox:
 		b.WriteString(theme.Title.Render("Set up Nitro sandboxes") + "\n")
-		b.WriteString(theme.Subtle.Render("The AWS Nitro sandbox class: NodePool ate-isolated on EKS Auto Mode, atelet-iso, and a counter pool on RuntimeClass isolated-sandbox, checked across a suspend and resume") + "\n\n")
+		b.WriteString(theme.Subtle.Render(nitroSubtitle(m.s.NewClusterConfig.NitroCompute)) + "\n\n")
 		b.WriteString(m.taskView(m.tasks[cur], cut))
 	case state.Welcome:
 		b.WriteString(theme.Logo() + "\n\n")

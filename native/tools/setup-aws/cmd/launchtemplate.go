@@ -12,40 +12,55 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
+
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 )
 
 // Each node group gets its own launch template with the EC2 settings that
 // matter for isolation: IMDSv2 only with a hop limit of 1, so a pod in its
 // own network namespace cannot get an IMDS token (and with it the node
-// role's credentials); an encrypted gp3 root volume; and, on microvm, nested
-// virtualization, which gives a regular instance /dev/kvm for Kata. Without
+// role's credentials); an encrypted gp3 root volume; on microvm, nested
+// virtualization, which gives a regular instance /dev/kvm for Kata; and on
+// nitro, Nitro Enclaves, which the Nitro Sandbox AMI needs. Without
 // a template EKS makes one with hop limit 2.
 //
 //	https://docs.aws.amazon.com/eks/latest/userguide/launch-templates.html
 //	https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-options.html
 //	https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html
+//	https://docs.aws.amazon.com/enclaves/latest/user/create-enclave.html
 type ltRef struct {
 	id      string
 	version int64
 }
 
-// launchTemplateName is the node group's launch template:
-// <cluster>-microvm-nested-virt for microvm, <cluster>-<group>-nodes for the
-// system and gvisor groups.
+// launchTemplateName is the node group's launch template (nodeTemplateName).
 func (r *clusterRun) launchTemplateName(g nodeGroupSpec) string {
-	if g.NestedVirt {
-		return r.e.names.Cluster + "-microvm-nested-virt"
+	return nodeTemplateName(r.e.names.Cluster, g.Name)
+}
+
+// nodeTemplateName is node group group's launch template, as create cluster
+// names it and teardown and inventory look for it:
+// <cluster>-microvm-nested-virt for microvm, <cluster>-<group>-nodes for the
+// others (system, gvisor, nitro).
+func nodeTemplateName(cluster, group string) string {
+	if group == nodegroups.MicroVM {
+		return cluster + "-microvm-nested-virt"
 	}
-	return r.e.names.Cluster + "-" + g.Name + "-nodes"
+	return cluster + "-" + group + "-nodes"
 }
 
 // rootDevice is the root volume of the Amazon Linux 2023 EKS AMIs.
 const rootDevice = "/dev/xvda"
 
-// groupImage is the AMI group g's template names: NODE_AMI_ID, or for a
-// self-managed group the recommended EKS optimized AL2023 AMI of its
-// architecture; nil when EKS picks it (a managed group without NODE_AMI_ID).
+// groupImage is the AMI group g's template names (nodeGroupSpec.Image):
+// NITRO_AMI_ID for the nitro group; else NODE_AMI_ID, or for a self-managed
+// group the recommended EKS optimized AL2023 AMI of its architecture; nil
+// when EKS picks it (a managed group without NODE_AMI_ID), and before
+// preflight has read the AMI.
 func (r *clusterRun) groupImage(g nodeGroupSpec) *nodeImage {
+	if g.Name == nodegroups.Nitro {
+		return r.nitroImage
+	}
 	if r.image != nil {
 		return r.image
 	}
@@ -57,11 +72,19 @@ func (r *clusterRun) groupImage(g nodeGroupSpec) *nodeImage {
 
 // groupRootDevice is the root device of group g's AMI: the named AMI's
 // own, else the EKS AL2023 AMIs'.
-func (r *clusterRun) groupRootDevice(g nodeGroupSpec) string {
-	if im := r.groupImage(g); im != nil {
-		return im.RootDevice
+func groupRootDevice(g nodeGroupSpec) string {
+	if g.Image != nil {
+		return g.Image.RootDevice
 	}
 	return rootDevice
+}
+
+// imageSetting is the setting that names group g's AMI.
+func imageSetting(g nodeGroupSpec) string {
+	if g.Name == nodegroups.Nitro {
+		return "NITRO_AMI_ID"
+	}
+	return "NODE_AMI_ID"
 }
 
 func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunchTemplateData, error) {
@@ -72,7 +95,7 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 			HttpEndpoint:            ec2types.LaunchTemplateInstanceMetadataEndpointStateEnabled,
 		},
 		BlockDeviceMappings: []ec2types.LaunchTemplateBlockDeviceMappingRequest{{
-			DeviceName: aws.String(r.groupRootDevice(g)),
+			DeviceName: aws.String(groupRootDevice(g)),
 			Ebs: &ec2types.LaunchTemplateEbsBlockDeviceRequest{VolumeSize: aws.Int32(g.VolumeGB), VolumeType: ec2types.VolumeTypeGp3,
 				DeleteOnTermination: aws.Bool(true), Encrypted: aws.Bool(true)},
 		}},
@@ -80,12 +103,16 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 	if g.NestedVirt {
 		d.CpuOptions = &ec2types.LaunchTemplateCpuOptionsRequest{NestedVirtualization: ec2types.NestedVirtualizationSpecificationEnabled}
 	}
+	if g.Enclave {
+		d.EnclaveOptions = &ec2types.LaunchTemplateEnclaveOptionsRequest{Enabled: aws.Bool(true)}
+	}
 	// With a custom AMI, EKS adds no bootstrap: the node joins from the
 	// NodeConfig in the template's user data. A self-managed node always
 	// does, and also names its instance profile and security group, which
-	// EKS sets for a managed group's nodes.
-	im := r.groupImage(g)
-	if r.selfManaged() && im == nil {
+	// EKS sets for a managed group's nodes. The nitro group always names its
+	// Nitro Sandbox AMI.
+	im := g.Image
+	if (r.selfManaged() || g.Name == nodegroups.Nitro) && im == nil {
 		return nil, fmt.Errorf("internal: node group %s has no AMI", g.Name)
 	}
 	if im != nil {
@@ -146,6 +173,7 @@ func (r *clusterRun) groupUserData(g nodeGroupSpec, im *nodeImage) (string, erro
 		}
 	}
 	maps.Copy(labels, g.Labels)
+	maps.Copy(labels, g.NodeLabels)
 	return nodeUserData(j, labels, g.Taints)
 }
 
@@ -155,7 +183,9 @@ type ltSettings struct {
 	NestedVirt, Tokens, Endpoint, VolumeType string
 	HopLimit, VolumeSize                     int32
 	Encrypted, DeleteOnTermination           bool
-	RootDevice, ImageID, UserData            string
+	// Enclave is Nitro Enclaves on (the nitro group).
+	Enclave                       bool
+	RootDevice, ImageID, UserData string
 	// A self-managed node's instance profile and security groups (sorted,
 	// comma-separated).
 	InstanceProfile, SecurityGroups string
@@ -171,6 +201,7 @@ func requestSettings(d *ec2types.RequestLaunchTemplateData) ltSettings {
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
+	s.Enclave = d.EnclaveOptions != nil && aws.ToBool(d.EnclaveOptions.Enabled)
 	if m := d.MetadataOptions; m != nil {
 		s.Tokens, s.Endpoint, s.HopLimit = string(m.HttpTokens), string(m.HttpEndpoint), aws.ToInt32(m.HttpPutResponseHopLimit)
 	}
@@ -197,6 +228,7 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
+	s.Enclave = d.EnclaveOptions != nil && aws.ToBool(d.EnclaveOptions.Enabled)
 	if m := d.MetadataOptions; m != nil {
 		s.Tokens, s.Endpoint, s.HopLimit = string(m.HttpTokens), string(m.HttpEndpoint), aws.ToInt32(m.HttpPutResponseHopLimit)
 	}

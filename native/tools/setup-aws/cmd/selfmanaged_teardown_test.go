@@ -14,9 +14,10 @@ import (
 const tdNodeRoleARN = "arn:aws:iam::111122223333:role/demo-us-west-2-eks-node"
 
 // selfManagedDeployment is fullDeployment with self-managed node groups:
-// instead of the managed node groups, an Auto Scaling group per group with
-// its instance, the node role in its owned instance profile, and the role's
-// owned EC2_LINUX access entry.
+// instead of the managed node groups, an Auto Scaling group per group (every
+// group create cluster knows, the nitro group's too) with its instance, the
+// node role in its owned instance profile, and the role's owned EC2_LINUX
+// access entry.
 func selfManagedDeployment() *tdFake {
 	f := fullDeployment()
 	for k, o := range f.objs {
@@ -60,7 +61,7 @@ func TestInventoryTaggingAPIAutoScalingGroups(t *testing.T) {
 					n++
 				}
 			}
-			if want := map[string]int{"managed": 0, "self-managed": 3}[name]; n != want {
+			if want := map[string]int{"managed": 0, "self-managed": len(nodegroups.All)}[name]; n != want {
 				t.Errorf("%d Auto Scaling group rows, want %d", n, want)
 			}
 			e, _, logs := tdTestEnv(t, f, false, true)
@@ -303,7 +304,8 @@ func TestTeardownLeavesWhatIsNotItsOwn(t *testing.T) {
 	f.put(&tdObj{kind: "access entry", id: tdNodeRoleARN, tags: map[string]string{}})
 	f.put(&tdObj{kind: "profile", id: "demo-us-west-2-eks-node", tags: map[string]string{}})
 	f.objs["role|demo-us-west-2-eks-node"].profiles = []string{"demo-us-west-2-eks-node"}
-	for _, ng := range nodegroups.All {
+	// fullDeployment's managed node groups.
+	for _, ng := range defaultGroups {
 		f.put(&tdObj{kind: "asg", id: "eks-" + ng + "-0001", tags: own("eks:nodegroup-name", ng)})
 	}
 	e, _, logs := tdTestEnv(t, f, false, false)

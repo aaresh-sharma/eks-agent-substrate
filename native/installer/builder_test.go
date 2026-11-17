@@ -539,3 +539,63 @@ func TestSetupAWSStepsRunTheSiblingBinaryOrGoRun(t *testing.T) {
 		}
 	}
 }
+
+// NITRO_COMPUTE: the default adds --nitro-compute to no step and the nitro
+// knobs to no shown command; node-group reaches every child that deploys,
+// checks or removes the Nitro sandbox's plugin, and only those, and a new
+// cluster's command shows the nitro group and its AMI. An exported
+// NITRO_COMPUTE that differs from the run's is overridden.
+func TestNitroComputeReachesThePluginChildrenOnly(t *testing.T) {
+	takes := map[string]bool{"control plane": true, "demo": true, "verify": true, "remove": true, "plugins": true, "nitro": true}
+	specs := func(s *state.Setup) map[string]execx.Spec {
+		b, _ := testBuilder()
+		m := allSpecs(b, s)
+		m["nitro"] = b.nitro(s)
+		return m
+	}
+	// The default, with NITRO_COMPUTE unset, exported empty (which the run
+	// and its children read as unset), or exported as the default.
+	for _, env := range []string{"unset", "", plugin.NitroAutoMode} {
+		t.Setenv("NITRO_COMPUTE", env)
+		if env == "unset" {
+			os.Unsetenv("NITRO_COMPUTE")
+		}
+		for _, classes := range []string{state.DefaultSandboxClasses, "gvisor,nitro", "nitro"} {
+			_, s := testBuilder()
+			s.SandboxClasses = classes
+			s.NewCluster("demo")
+			for name, sp := range specs(s) {
+				if slices.Contains(sp.Argv, "--nitro-compute") || strings.Contains(sp.Display, "NITRO_") {
+					t.Errorf("default, NITRO_COMPUTE %q, %s: %s: argv %q, shown %q", env, classes, name, sp.Argv, sp.Display)
+				}
+			}
+		}
+	}
+	t.Setenv("NITRO_COMPUTE", "")
+	os.Unsetenv("NITRO_COMPUTE")
+
+	_, s := testBuilder()
+	s.SandboxClasses = "gvisor,microvm,nitro"
+	s.NewClusterConfig.NitroCompute, s.NewClusterConfig.NitroAMIID = plugin.NitroNodeGroup, "ami-0a17000000000000e"
+	s.NewCluster("demo")
+	for name, sp := range specs(s) {
+		i := slices.Index(sp.Argv, "--nitro-compute")
+		if (i >= 0) != takes[name] || i >= 0 && sp.Argv[i+1] != plugin.NitroNodeGroup {
+			t.Errorf("node-group: %s: argv %q", name, sp.Argv)
+		}
+	}
+	cc := specs(s)["create cluster"]
+	if !strings.HasPrefix(cc.Display, "NODE_GROUPS=system,gvisor,microvm,nitro NITRO_AMI_ID=ami-0a17000000000000e ") ||
+		!slices.Contains(cc.Env, "NITRO_AMI_ID=ami-0a17000000000000e") || !slices.Contains(cc.Env, "NITRO_INSTANCE_TYPE=m8i.xlarge") ||
+		!slices.Contains(cc.Env, "NITRO_NODES=1") {
+		t.Errorf("create cluster: shown %q, env %q", cc.Display, cc.Env)
+	}
+
+	t.Setenv("NITRO_COMPUTE", plugin.NitroNodeGroup)
+	_, s = testBuilder()
+	s.SandboxClasses = "nitro"
+	s.NewClusterConfig.NitroCompute = plugin.NitroAutoMode
+	if n := specs(s)["nitro"]; !strings.Contains(strings.Join(n.Argv, " "), "--nitro-compute auto-mode") {
+		t.Errorf("an exported node-group under the run's auto-mode: argv %q", n.Argv)
+	}
+}

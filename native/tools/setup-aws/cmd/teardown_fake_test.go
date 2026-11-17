@@ -65,10 +65,14 @@ type tdFake struct {
 	deny   map[string]bool // write op, or one of the reads that check it -> AccessDenied
 	vanish map[string]bool // write op -> the resource was deleted behind our back
 	tagged []rgttypes.ResourceTagMapping
+	// names are the names the reads of derived names ask for, by operation
+	// (DescribeAutoScalingGroups, and DescribeLaunchTemplates' filter
+	// launch-template-name), one entry per read.
+	names map[string][][]string
 }
 
 func newTDFake() *tdFake {
-	return &tdFake{objs: map[string]*tdObj{}, deny: map[string]bool{}, vanish: map[string]bool{}}
+	return &tdFake{objs: map[string]*tdObj{}, names: map[string][][]string{}, deny: map[string]bool{}, vanish: map[string]bool{}}
 }
 
 func (f *tdFake) clients() *tdClients {
@@ -883,6 +887,11 @@ func (t *tfEC2) DescribeRouteTables(_ context.Context, in *ec2.DescribeRouteTabl
 }
 func (t *tfEC2) DescribeLaunchTemplates(_ context.Context, in *ec2.DescribeLaunchTemplatesInput, _ ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplatesOutput, error) {
 	defer t.lock()()
+	for _, fl := range in.Filters {
+		if aws.ToString(fl.Name) == "launch-template-name" {
+			t.names["DescribeLaunchTemplates"] = append(t.names["DescribeLaunchTemplates"], fl.Values)
+		}
+	}
 	out := &ec2.DescribeLaunchTemplatesOutput{}
 	for _, o := range t.find(kLT, in.Filters) {
 		out.LaunchTemplates = append(out.LaunchTemplates, ec2types.LaunchTemplate{LaunchTemplateId: aws.String(o.id), LaunchTemplateName: aws.String(o.name), Tags: tagsOf(o.tags)})
@@ -1204,6 +1213,9 @@ func (t *tfASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.Des
 	}
 	if len(in.AutoScalingGroupNames) == 0 && len(in.Filters) == 0 {
 		panic("fake: DescribeAutoScalingGroups with no names or filters")
+	}
+	if len(in.AutoScalingGroupNames) > 0 {
+		f.names["DescribeAutoScalingGroups"] = append(f.names["DescribeAutoScalingGroups"], in.AutoScalingGroupNames)
 	}
 	out := &autoscaling.DescribeAutoScalingGroupsOutput{}
 	for _, o := range f.list("asg") {

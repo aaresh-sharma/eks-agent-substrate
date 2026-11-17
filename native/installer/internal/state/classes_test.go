@@ -27,6 +27,8 @@ func init() {
 		{ID: "s-nitro", Order: 5, Class: ClassNitro, NeedsAutoMode: "needs EKS Auto Mode"},
 		{ID: "s-agent", Order: 6, Nodes: []string{"gvisor"}, Requires: []string{"s-gw"}},
 		{ID: "s-rot", Order: 7, Nodes: []string{"system"}, NeedsRDS: "rotates the RDS logins"},
+		{ID: "s-iso", Order: 8, NeedsAutoMode: "needs EKS Auto Mode",
+			AutoModeOptional: func(o plugin.Options) bool { return o.NitroCompute == plugin.NitroNodeGroup }},
 	} {
 		plugin.Register(p)
 	}
@@ -71,8 +73,33 @@ func TestNewNodeGroupsEveryRow(t *testing.T) {
 		{"no Auto Mode, bundled, gvisor: system is required", false, bundled, "gvisor", nil, "system,gvisor"},
 		{"no Auto Mode, default", false, rds, DefaultSandboxClasses, nil, "system,gvisor,microvm"},
 	} {
-		if got := strings.Join(NewNodeGroups(c.auto, c.database, c.classes, c.plugins), ","); got != c.want {
+		if got := strings.Join(NewNodeGroups(c.auto, c.database, c.classes, plugin.NitroAutoMode, c.plugins), ","); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+		// Without the nitro class, NITRO_COMPUTE changes nothing.
+		if !HasClass(c.classes, ClassNitro) {
+			if got := strings.Join(NewNodeGroups(c.auto, c.database, c.classes, plugin.NitroNodeGroup, c.plugins), ","); got != c.want {
+				t.Errorf("%s, node-group: %q, want %q", c.name, got, c.want)
+			}
+		}
+	}
+	// NITRO_COMPUTE=node-group: the nitro class makes the nitro group, a
+	// sandbox group like the others (the system group with RDS on Auto Mode,
+	// and always without Auto Mode).
+	for _, c := range []struct {
+		name          string
+		auto          bool
+		database      string
+		classes, want string
+	}{
+		{"Auto Mode, bundled, Nitro alone", true, bundled, "nitro", "nitro"},
+		{"Auto Mode, RDS, Nitro alone", true, rds, "nitro", "system,nitro"},
+		{"no Auto Mode, bundled, Nitro alone", false, bundled, "nitro", "system,nitro"},
+		{"Auto Mode, RDS, all three", true, rds, "gvisor,microvm,nitro", "system,gvisor,microvm,nitro"},
+		{"Auto Mode, bundled, gvisor and Nitro", true, bundled, "gvisor,nitro", "gvisor,nitro"},
+	} {
+		if got := strings.Join(NewNodeGroups(c.auto, c.database, c.classes, plugin.NitroNodeGroup, nil), ","); got != c.want {
+			t.Errorf("node-group, %s: %q, want %q", c.name, got, c.want)
 		}
 	}
 	// Setup.NodeGroups is the same for a new cluster, with its database,
@@ -94,6 +121,17 @@ func TestNewNodeGroupsEveryRow(t *testing.T) {
 	if g := s.NodeGroups(); !slices.Equal(g, []string{"system", "microvm"}) {
 		t.Errorf("connected: %v", g)
 	}
+	// A connected cluster's nitro group comes from its nodes' labels.
+	s.SelectCluster(awsxCluster("c"), []string{"nitro", "system"})
+	if g := s.NodeGroups(); !slices.Equal(g, []string{"system", "nitro"}) {
+		t.Errorf("connected with nitro nodes: %v", g)
+	}
+	// A new cluster with NITRO_COMPUTE=node-group makes it.
+	s.NewClusterConfig.NitroCompute, s.SandboxClasses, s.Database = plugin.NitroNodeGroup, "nitro", DatabaseBundled
+	s.NewCluster("c")
+	if g := s.NodeGroups(); !slices.Equal(g, []string{"nitro"}) {
+		t.Errorf("new, node-group, Nitro alone: %v", g)
+	}
 }
 
 // The refusals: the Nitro class without Auto Mode, a class or plugin whose
@@ -102,14 +140,39 @@ func TestNewNodeGroupsEveryRow(t *testing.T) {
 // class to run it on; each with what makes it available. A plugin on the
 // system group is never refused on a new cluster: it makes the group.
 func TestClassAndPluginRefusals(t *testing.T) {
-	if ClassProblem(ClassNitro, false, true, "c", nil) == "" || ClassProblem(ClassNitro, true, true, "c", nil) != "" {
+	am, ng := plugin.NitroAutoMode, plugin.NitroNodeGroup
+	if ClassProblem(ClassNitro, false, true, "c", nil, am) == "" || ClassProblem(ClassNitro, true, true, "c", nil, am) != "" {
 		t.Error("nitro and Auto Mode")
 	}
-	if why := ClassProblem(ClassGVisor, true, false, "c", []string{"system", "microvm"}); !strings.Contains(why, "c has no gvisor node group") {
+	if why := ClassProblem(ClassGVisor, true, false, "c", []string{"system", "microvm"}, am); !strings.Contains(why, "c has no gvisor node group") {
 		t.Errorf("connected without gvisor: %q", why)
 	}
-	if ClassProblem(ClassGVisor, true, false, "c", []string{"gvisor"}) != "" || ClassProblem(ClassGVisor, true, true, "c", nil) != "" {
+	if ClassProblem(ClassGVisor, true, false, "c", []string{"gvisor"}, am) != "" || ClassProblem(ClassGVisor, true, true, "c", nil, am) != "" {
 		t.Error("gvisor refused with its nodes, or on a new cluster")
+	}
+	// NITRO_COMPUTE=node-group: no Auto Mode needed on a new cluster (it
+	// makes the nitro group); a connected cluster needs a node labeled
+	// ate.dev/pool=nitro, with or without Auto Mode. auto-mode still needs
+	// Auto Mode, and says so even where the nitro group is there.
+	for _, c := range []struct {
+		auto, newCluster bool
+		pools            []string
+		compute, want    string
+	}{
+		{false, true, nil, ng, ""},
+		{true, true, nil, ng, ""},
+		{false, false, []string{"system", "nitro"}, ng, ""},
+		{true, false, []string{"nitro"}, ng, ""},
+		{false, false, []string{"system"}, ng, "c has no nitro node group (no node labeled ate.dev/pool=nitro)"},
+		{true, false, []string{"isolated"}, ng, "c has no nitro node group"},
+		{false, true, nil, am, "needs EKS Auto Mode"},
+		{false, true, nil, "", "needs EKS Auto Mode"},
+		{false, false, []string{"nitro"}, am, "c has a nitro node group, which NITRO_COMPUTE=node-group uses"},
+		{true, false, nil, am, ""},
+	} {
+		if why := ClassProblem(ClassNitro, c.auto, c.newCluster, "c", c.pools, c.compute); (c.want == "") != (why == "") || !strings.Contains(why, c.want) {
+			t.Errorf("%+v: %q", c, why)
+		}
 	}
 
 	get := func(id string) plugin.Plugin { p, _ := plugin.Get(id); return p }
@@ -204,5 +267,25 @@ func TestClassesReachAteSetupTheDemoAndThePlugins(t *testing.T) {
 	s.SandboxClasses = "gvisor"
 	if slices.Contains(InstallOrder(s), NitroSandbox) || len(s.InstallPlugins()) != 1 {
 		t.Errorf("without the class: order %v, plugins %v", InstallOrder(s), s.InstallPlugins())
+	}
+}
+
+// PluginProblem's Auto Mode refusal follows the plugin's AutoModeOptional:
+// with NITRO_COMPUTE=node-group a plugin that may run off Auto Mode is
+// offered there; with auto-mode it is refused as before.
+func TestPluginProblemHonoursAutoModeOptional(t *testing.T) {
+	get := func(id string) plugin.Plugin { p, _ := plugin.Get(id); return p }
+	for _, c := range []struct {
+		compute string
+		want    string
+	}{{plugin.NitroAutoMode, "needs EKS Auto Mode; c has Auto Mode off"}, {"", "needs EKS Auto Mode; c has Auto Mode off"}, {plugin.NitroNodeGroup, ""}} {
+		s := &Setup{NewClusterConfig: ClusterConfig{AutoMode: "", NitroCompute: c.compute}, SandboxClasses: "gvisor"}
+		s.NewCluster("c")
+		if got := s.PluginProblem(get("s-iso"), nil); got != c.want {
+			t.Errorf("NITRO_COMPUTE=%q: %q, want %q", c.compute, got, c.want)
+		}
+		if got := s.PluginProblem(get("s-nitro"), nil); got != "needs EKS Auto Mode; c has Auto Mode off" {
+			t.Errorf("NITRO_COMPUTE=%q: a plugin without AutoModeOptional: %q", c.compute, got)
+		}
 	}
 }

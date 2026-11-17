@@ -31,13 +31,17 @@ const (
 
 func selfManaged(c *clusterConfig) { c.NodeGroupType = nodegroups.SelfManaged }
 
+// defaultGroups are the node groups NODE_GROUPS names by default: every
+// group but nitro.
+var defaultGroups, _ = nodegroups.Parse(nodegroups.Default)
+
 // selfManagedCreates is what a fresh account gets with
 // NODE_GROUP_TYPE=self-managed: freshCreates with an instance profile, the
 // node role's access entry and an Auto Scaling group per group in place of
 // the managed node groups.
 func selfManagedCreates() map[string]int {
 	m := maps.Clone(freshCreates)
-	for _, g := range nodegroups.All {
+	for _, g := range defaultGroups {
 		delete(m, "CreateNodegroup "+g)
 		m["CreateAutoScalingGroup demo-"+g] = 1
 	}
@@ -97,7 +101,7 @@ func TestCreateClusterManagedSendsNoNewCalls(t *testing.T) {
 			t.Errorf("%s: profile %v, security groups %v, image %v, user data %v", lt, d.IamInstanceProfile, d.SecurityGroupIds, d.ImageId, d.UserData)
 		}
 	}
-	for _, g := range nodegroups.All {
+	for _, g := range defaultGroups {
 		if f.ngIn[g].AmiType != ekstypes.AMITypesAl2023X8664Standard {
 			t.Errorf("%s: AMI type %q", g, f.ngIn[g].AmiType)
 		}
