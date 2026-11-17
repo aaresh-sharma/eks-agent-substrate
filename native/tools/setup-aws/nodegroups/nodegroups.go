@@ -1,8 +1,8 @@
-// Package nodegroups is the rule for which managed node groups `setup-aws
-// create cluster` makes, shared with the installer, which shows them on its
-// Settings and Review screens and passes them as NODE_GROUPS. Like phases it
-// has no dependencies, so the installer imports it through its replace
-// directive without cobra or the AWS SDK.
+// Package nodegroups is the rule for which node groups `setup-aws create
+// cluster` makes, and of which type, shared with the installer, which shows
+// them on its Settings and Review screens and passes them as NODE_GROUPS and
+// NODE_GROUP_TYPE. Like phases it has no dependencies, so the installer
+// imports it through its replace directive without cobra or the AWS SDK.
 //
 // The gvisor and microvm groups run sandboxes: worker Pods of the gVisor
 // and microVM (Kata) classes. The system group runs what is pinned to it
@@ -36,6 +36,25 @@ const None = "none"
 
 // Default is NODE_GROUPS when it is unset: all three, as before the rule.
 var Default = Format(All)
+
+// The node group types, NODE_GROUP_TYPE: EKS managed node groups, or
+// self-managed ones, an Auto Scaling group per node group whose nodes join
+// the cluster from their launch template. A cluster has one type.
+const (
+	Managed     = "managed"
+	SelfManaged = "self-managed"
+)
+
+// Types are the node group types; Managed is the default.
+var Types = []string{Managed, SelfManaged}
+
+// CheckType refuses a NODE_GROUP_TYPE that is not one of Types.
+func CheckType(t string) error {
+	if !slices.Contains(Types, t) {
+		return fmt.Errorf("NODE_GROUP_TYPE=%q is not a node group type (want %s)", t, strings.Join(Types, " or "))
+	}
+	return nil
+}
 
 // For is the node groups of a cluster whose sandboxes need the sandbox
 // groups in sandbox (gvisor, microvm), in All's order: those, plus the

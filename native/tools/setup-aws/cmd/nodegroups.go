@@ -17,7 +17,7 @@ import (
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 )
 
-// nodeGroupSpec is one managed node group of the cluster.
+// nodeGroupSpec is one node group of the cluster, managed or self-managed.
 type nodeGroupSpec struct {
 	Name              string
 	InstanceType      string
@@ -26,6 +26,16 @@ type nodeGroupSpec struct {
 	NestedVirt        bool
 	Labels            map[string]string
 	Taints            []ekstypes.Taint
+}
+
+// groupExists reports whether node group name exists as a group of the
+// run's type: an EKS managed node group, or a self-managed group's Auto
+// Scaling group.
+func (r *clusterRun) groupExists(name string) bool {
+	if r.selfManaged() {
+		return r.asgs[name] != nil
+	}
+	return r.nodegroups[name] != nil
 }
 
 // groups are the node groups NODE_GROUPS names, of the system, gvisor and

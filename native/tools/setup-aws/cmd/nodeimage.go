@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 // A custom AMI (NODE_AMI_ID) replaces the Amazon EKS optimized Amazon Linux
@@ -88,34 +89,96 @@ func describeImage(ctx context.Context, c clusterEC2API, id, setting string) (*n
 	return n, nil
 }
 
-// checkImage reads NODE_AMI_ID, when it is set, for the groups to make: its
-// architecture must be the one each group's instance type runs, and its root
+// checkImage reads the AMI of the groups to make, when their templates
+// name one: NODE_AMI_ID when it is set, else for self-managed groups the
+// recommended EKS optimized AL2023 AMI (resolveImages). Each AMI's
+// architecture must be the one its group's instance type runs, and its root
 // snapshot must fit the group's root volume. checkInstanceTypes runs first.
 func (r *clusterRun) checkImage(ctx context.Context) error {
-	if r.cfg.NodeAMIID == "" || len(r.groups()) == 0 {
+	if (r.cfg.NodeAMIID == "" && !r.selfManaged()) || len(r.groups()) == 0 {
 		return nil
 	}
 	// The NodeConfig carries an IPv4 service CIDR; a new cluster is IPv4.
 	if r.cluster != nil && r.cluster.KubernetesNetworkConfig != nil && r.cluster.KubernetesNetworkConfig.IpFamily == ekstypes.IpFamilyIpv6 {
-		return fmt.Errorf("cluster %s is an IPv6 cluster; NODE_AMI_ID supports IPv4 clusters only", r.e.names.Cluster)
+		return fmt.Errorf("cluster %s is an IPv6 cluster; nodes that join from a NodeConfig (NODE_AMI_ID, NODE_GROUP_TYPE=self-managed) support IPv4 clusters only", r.e.names.Cluster)
+	}
+	if r.cfg.NodeAMIID == "" {
+		return r.resolveImages(ctx)
 	}
 	im, err := describeImage(ctx, r.c.EC2, r.cfg.NodeAMIID, "NODE_AMI_ID")
 	if err != nil {
 		return err
 	}
 	for _, g := range r.groups() {
-		if r.enaRequired[g.InstanceType] && !im.ENA {
-			return fmt.Errorf("NODE_AMI_ID=%s has no ENA support, which the %s node group's %s requires", im.ID, g.Name, g.InstanceType)
-		}
-		if want := archOf(r.amiTypes[g.InstanceType]); im.Arch != want {
-			return fmt.Errorf("NODE_AMI_ID=%s is %s, but the %s node group's %s runs %s; pick an AMI or an instance type of the same architecture",
-				im.ID, im.Arch, g.Name, g.InstanceType, want)
-		}
-		if im.RootGB > g.VolumeGB {
-			return fmt.Errorf("NODE_AMI_ID=%s has a %d GB root snapshot, more than the %s node group's %d GB root volume", im.ID, im.RootGB, g.Name, g.VolumeGB)
+		if err := r.imageFits(im, "NODE_AMI_ID", g); err != nil {
+			return err
 		}
 	}
 	r.image = im
 	slog.Info("custom node AMI", "ami", im.ID, "name", im.Name, "arch", string(im.Arch), "rootDevice", im.RootDevice)
+	return nil
+}
+
+// imageFits refuses im (from setting) for group g.
+func (r *clusterRun) imageFits(im *nodeImage, setting string, g nodeGroupSpec) error {
+	if r.enaRequired[g.InstanceType] && !im.ENA {
+		return fmt.Errorf("%s=%s has no ENA support, which the %s node group's %s requires", setting, im.ID, g.Name, g.InstanceType)
+	}
+	if want := archOf(r.amiTypes[g.InstanceType]); im.Arch != want {
+		return fmt.Errorf("%s=%s is %s, but the %s node group's %s runs %s; pick an AMI or an instance type of the same architecture",
+			setting, im.ID, im.Arch, g.Name, g.InstanceType, want)
+	}
+	if im.RootGB > g.VolumeGB {
+		return fmt.Errorf("%s=%s has a %d GB root snapshot, more than the %s node group's %d GB root volume", setting, im.ID, im.RootGB, g.Name, g.VolumeGB)
+	}
+	return nil
+}
+
+// eksAMIParameter is the public SSM parameter that names the recommended
+// Amazon EKS optimized AL2023 AMI of a Kubernetes version and architecture.
+//
+//	https://docs.aws.amazon.com/eks/latest/userguide/retrieve-ami-id.html
+func eksAMIParameter(version string, arch ec2types.ArchitectureValues) string {
+	return "/aws/service/eks/optimized-ami/" + version + "/amazon-linux-2023/" + string(arch) + "/standard/recommended/image_id"
+}
+
+// resolveImages reads, for the self-managed groups still to make, the
+// recommended AMI of each architecture they run, for the cluster's version
+// (KUBERNETES_VERSION for a new cluster): one SSM read per architecture,
+// before any template is made, so every template of the run names the same
+// AMI. The parameter changes with each AMI release; a group that exists
+// keeps the AMI it was made with.
+func (r *clusterRun) resolveImages(ctx context.Context) error {
+	version := r.cfg.KubernetesVersion
+	if r.cluster != nil && aws.ToString(r.cluster.Version) != "" {
+		version = aws.ToString(r.cluster.Version)
+	}
+	for _, g := range r.groups() {
+		if r.groupExists(g.Name) {
+			continue
+		}
+		arch := archOf(r.amiTypes[g.InstanceType])
+		name := eksAMIParameter(version, arch)
+		im := r.archImages[arch]
+		if im == nil {
+			out, err := r.c.SSM.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(name)})
+			switch {
+			case hasCode(err, "ParameterNotFound"):
+				return fmt.Errorf("SSM has no parameter %s: no EKS optimized AL2023 AMI for Kubernetes %s on %s in %s; set NODE_AMI_ID", name, version, arch, r.e.names.Region)
+			case err != nil:
+				return fmt.Errorf("read SSM parameter %s: %w", name, err)
+			case out.Parameter == nil || aws.ToString(out.Parameter.Value) == "":
+				return fmt.Errorf("SSM parameter %s is empty", name)
+			}
+			if im, err = describeImage(ctx, r.c.EC2, aws.ToString(out.Parameter.Value), "SSM parameter "+name); err != nil {
+				return err
+			}
+			r.archImages[arch] = im
+			slog.Info("EKS optimized AMI", "arch", string(arch), "ami", im.ID, "name", im.Name)
+		}
+		if err := r.imageFits(im, "SSM parameter "+name, g); err != nil {
+			return err
+		}
+	}
 	return nil
 }

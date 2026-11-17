@@ -19,6 +19,9 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	sqtypes "github.com/aws/aws-sdk-go-v2/service/servicequotas/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 )
 
 // clusterFake is one in-memory account for `create cluster`: EC2, EKS, IAM,
@@ -63,7 +66,42 @@ type clusterFake struct {
 
 	roles   map[string]*fakeRole
 	asgTags map[string]map[string]string
+
+	// Self-managed node groups: instance profiles, the access entries'
+	// types, Auto Scaling groups (asgStuck keeps them from launching), their
+	// failed scaling activities, SSM parameters, and the nodes the
+	// Kubernetes API lists (notReady keeps them NotReady).
+	profiles   map[string]*fakeProfile
+	entryTypes map[string]string
+	asgs       map[string]*asgtypes.AutoScalingGroup
+	asgIn      map[string]*autoscaling.CreateAutoScalingGroupInput
+	asgStuck   bool
+	activities map[string][]asgtypes.Activity
+	params     map[string]string
+	notReady   bool
+	kubeCalls  int
+	// kubeErrs are the answers of the next node lists, in order; kubeDown
+	// answers every one after them. roleLag is how many times
+	// AddRoleToInstanceProfile does not find a role that exists yet (IAM's
+	// lag after CreateRole).
+	kubeErrs []error
+	kubeDown error
+	roleLag  int
 }
+
+type fakeProfile struct {
+	tags  map[string]string
+	roles []string
+	// tagsInGet: GetInstanceProfile returns the tags too; otherwise only
+	// ListInstanceProfileTags does.
+	tagsInGet bool
+}
+
+// The recommended EKS optimized AL2023 AMIs the fake's SSM names for 1.37.
+const (
+	eksAMIx86 = "ami-0e1e0000000000086"
+	eksAMIarm = "ami-0e1e000000000000a"
+)
 
 type fakeLT struct {
 	lt       ec2types.LaunchTemplate
@@ -95,17 +133,29 @@ func newClusterFake() *clusterFake {
 		images: map[string]ec2types.Image{},
 		types: map[string]ec2types.InstanceTypeInfo{
 			"m8i.xlarge": nestedVirtType("m8i.xlarge", true), "m8i.2xlarge": nestedVirtType("m8i.2xlarge", true),
-			"m7i.2xlarge": nestedVirtType("m7i.2xlarge", false)},
+			"m7i.2xlarge": nestedVirtType("m7i.2xlarge", false), "m8g.2xlarge": armType("m8g.2xlarge")},
 		offerings: map[string][]string{
-			"us-west-2a": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge"}, "us-west-2b": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge"},
-			"us-west-2c": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge"}, "us-west-2d": {"m7i.2xlarge"}},
+			"us-west-2a": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"}, "us-west-2b": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"},
+			"us-west-2c": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"}, "us-west-2d": {"m7i.2xlarge"}},
 		entries: map[string]map[string]string{}, access: map[string][]ekstypes.AssociatedAccessPolicy{},
 		addons: map[string]*ekstypes.Addon{}, addonIn: map[string]*eks.CreateAddonInput{},
 		ngs: map[string]*ekstypes.Nodegroup{}, ngIn: map[string]*eks.CreateNodegroupInput{},
 		roles: map[string]*fakeRole{
 			// The caller's own role (fsts: assumed-role/Admin/me).
 			"Admin": {arn: "arn:aws:iam::111122223333:role/Admin", tags: map[string]string{}}},
-		asgTags: map[string]map[string]string{},
+		asgTags:  map[string]map[string]string{},
+		profiles: map[string]*fakeProfile{}, entryTypes: map[string]string{},
+		asgs: map[string]*asgtypes.AutoScalingGroup{}, asgIn: map[string]*autoscaling.CreateAutoScalingGroupInput{},
+		activities: map[string][]asgtypes.Activity{},
+		params: map[string]string{
+			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/image_id": eksAMIx86,
+			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/arm64/standard/recommended/image_id":  eksAMIarm,
+		},
+	}
+	for id, arch := range map[string]ec2types.ArchitectureValues{eksAMIx86: ec2types.ArchitectureValuesX8664, eksAMIarm: ec2types.ArchitectureValuesArm64} {
+		im := testImage(arch, "/dev/xvda", 20)
+		im.ImageId, im.Name = aws.String(id), aws.String("amazon-eks-node-al2023-"+string(arch)+"-standard-1.37-v20261101")
+		f.images[id] = im
 	}
 	for i, z := range []string{"a", "b", "c", "d"} {
 		f.zones = append(f.zones, ec2types.AvailabilityZone{ZoneName: aws.String("us-west-2" + z), ZoneId: aws.String(fmt.Sprintf("usw2-az%d", i+1))})
@@ -116,8 +166,15 @@ func newClusterFake() *clusterFake {
 	return f
 }
 
+func armType(name string) ec2types.InstanceTypeInfo {
+	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name),
+		ProcessorInfo: &ec2types.ProcessorInfo{SupportedArchitectures: []ec2types.ArchitectureType{ec2types.ArchitectureTypeArm64}},
+		NetworkInfo:   &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}
+}
+
 func (f *clusterFake) clients() *ClusterClients {
-	return &ClusterClients{EC2: (*fcEC2)(f), EKS: (*fcEKS)(f), IAM: (*fcIAM)(f), ASG: (*fcASG)(f), Quotas: (*fcQuotas)(f)}
+	return &ClusterClients{EC2: (*fcEC2)(f), EKS: (*fcEKS)(f), IAM: (*fcIAM)(f), ASG: (*fcASG)(f), Quotas: (*fcQuotas)(f),
+		SSM: (*fcSSM)(f), Kube: f.kube}
 }
 
 func (f *clusterFake) id(prefix string) string { f.n++; return fmt.Sprintf("%s-%04d", prefix, f.n) }
@@ -666,7 +723,10 @@ func (e *fcEC2) DescribeLaunchTemplates(_ context.Context, in *ec2.DescribeLaunc
 // responseData is what DescribeLaunchTemplateVersions returns for the
 // fields the tool compares.
 func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunchTemplateData {
-	out := &ec2types.ResponseLaunchTemplateData{ImageId: d.ImageId, UserData: d.UserData}
+	out := &ec2types.ResponseLaunchTemplateData{ImageId: d.ImageId, UserData: d.UserData, SecurityGroupIds: d.SecurityGroupIds}
+	if d.IamInstanceProfile != nil {
+		out.IamInstanceProfile = &ec2types.LaunchTemplateIamInstanceProfileSpecification{Name: d.IamInstanceProfile.Name}
+	}
 	if d.CpuOptions != nil {
 		out.CpuOptions = &ec2types.LaunchTemplateCpuOptions{NestedVirtualization: d.CpuOptions.NestedVirtualization}
 	}
@@ -808,10 +868,22 @@ func (e *fcEKS) CreateCluster(_ context.Context, in *eks.CreateClusterInput, _ .
 }
 
 func (e *fcEKS) DescribeAccessEntry(_ context.Context, in *eks.DescribeAccessEntryInput, _ ...func(*eks.Options)) (*eks.DescribeAccessEntryOutput, error) {
-	if _, ok := e.entries[aws.ToString(in.PrincipalArn)]; !e.clusterExists(in.ClusterName) || !ok {
+	// deny takes "DescribeAccessEntry <principal>" too, for one entry.
+	if err := e.f().read("DescribeAccessEntry"); err != nil {
+		return nil, err
+	}
+	if code, ok := e.deny["DescribeAccessEntry "+aws.ToString(in.PrincipalArn)]; ok {
+		return nil, apiErr(code)
+	}
+	tags, ok := e.entries[aws.ToString(in.PrincipalArn)]
+	if !e.clusterExists(in.ClusterName) || !ok {
 		return nil, apiErr("ResourceNotFoundException")
 	}
-	return &eks.DescribeAccessEntryOutput{AccessEntry: &ekstypes.AccessEntry{PrincipalArn: in.PrincipalArn}}, nil
+	t := e.entryTypes[aws.ToString(in.PrincipalArn)]
+	if t == "" {
+		t = "STANDARD"
+	}
+	return &eks.DescribeAccessEntryOutput{AccessEntry: &ekstypes.AccessEntry{PrincipalArn: in.PrincipalArn, Type: aws.String(t), Tags: tags}}, nil
 }
 
 func (e *fcEKS) CreateAccessEntry(_ context.Context, in *eks.CreateAccessEntryInput, _ ...func(*eks.Options)) (*eks.CreateAccessEntryOutput, error) {
@@ -823,11 +895,18 @@ func (e *fcEKS) CreateAccessEntry(_ context.Context, in *eks.CreateAccessEntryIn
 	if !strings.Contains(p, ":role/") && !strings.Contains(p, ":user/") {
 		return nil, apiErr("InvalidParameterException")
 	}
+	if t := aws.ToString(in.Type); t != "STANDARD" && t != "EC2_LINUX" {
+		return nil, apiErr("InvalidParameterException")
+	}
+	if t := aws.ToString(in.Type); t == "EC2_LINUX" && f.roles[strings.TrimPrefix(p, "arn:aws:iam::111122223333:role/")] == nil {
+		return nil, apiErr("InvalidParameterException")
+	}
 	w := "CreateAccessEntry " + p
 	if err := f.begin(w); err != nil {
 		return nil, err
 	}
 	f.entries[p] = in.Tags
+	f.entryTypes[p] = aws.ToString(in.Type)
 	return &eks.CreateAccessEntryOutput{}, f.end(w)
 }
 
@@ -849,9 +928,16 @@ func (e *fcEKS) AssociateAccessPolicy(_ context.Context, in *eks.AssociateAccess
 	return &eks.AssociateAccessPolicyOutput{}, f.end(w)
 }
 
+// anyNodegroupActive: a managed node group is ACTIVE, or a self-managed
+// group has an instance in service.
 func (e *fcEKS) anyNodegroupActive() bool {
 	for _, ng := range e.ngs {
 		if ng.Status == ekstypes.NodegroupStatusActive {
+			return true
+		}
+	}
+	for _, a := range e.asgs {
+		if len(a.Instances) > 0 && !e.notReady {
 			return true
 		}
 	}
@@ -913,6 +999,10 @@ func (e *fcEKS) UpdateAddon(_ context.Context, in *eks.UpdateAddonInput, _ ...fu
 }
 
 func (e *fcEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroupInput, _ ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error) {
+	// Recorded by node group, so a test can deny one and count them.
+	if err := e.f().read("DescribeNodegroup " + aws.ToString(in.NodegroupName)); err != nil {
+		return nil, err
+	}
 	ng := e.ngs[aws.ToString(in.NodegroupName)]
 	if !e.clusterExists(in.ClusterName) || ng == nil {
 		return nil, apiErr("ResourceNotFoundException")
@@ -1105,4 +1195,224 @@ func (e *fcQuotas) GetServiceQuota(_ context.Context, in *servicequotas.GetServi
 
 func (e *fcQuotas) GetAWSDefaultServiceQuota(_ context.Context, in *servicequotas.GetAWSDefaultServiceQuotaInput, _ ...func(*servicequotas.Options)) (*servicequotas.GetAWSDefaultServiceQuotaOutput, error) {
 	return &servicequotas.GetAWSDefaultServiceQuotaOutput{Quota: &sqtypes.ServiceQuota{Value: aws.Float64(5)}}, nil
+}
+
+// --- self-managed node groups ---------------------------------------------------
+
+func (e *fcIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfileInput, _ ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
+	if err := e.f().read("GetInstanceProfile"); err != nil {
+		return nil, err
+	}
+	name := aws.ToString(in.InstanceProfileName)
+	p := e.profiles[name]
+	if p == nil {
+		return nil, apiErr("NoSuchEntity")
+	}
+	ip := &iamtypes.InstanceProfile{InstanceProfileName: in.InstanceProfileName}
+	for _, r := range p.roles {
+		ip.Roles = append(ip.Roles, iamtypes.Role{RoleName: aws.String(r)})
+	}
+	if p.tagsInGet {
+		for _, k := range sortedKeys(p.tags) {
+			ip.Tags = append(ip.Tags, iamtypes.Tag{Key: aws.String(k), Value: aws.String(p.tags[k])})
+		}
+	}
+	return &iam.GetInstanceProfileOutput{InstanceProfile: ip}, nil
+}
+
+func (e *fcIAM) ListInstanceProfileTags(_ context.Context, in *iam.ListInstanceProfileTagsInput, _ ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error) {
+	if err := e.f().read("ListInstanceProfileTags"); err != nil {
+		return nil, err
+	}
+	p := e.profiles[aws.ToString(in.InstanceProfileName)]
+	if p == nil {
+		return nil, apiErr("NoSuchEntity")
+	}
+	out := &iam.ListInstanceProfileTagsOutput{}
+	for _, k := range sortedKeys(p.tags) {
+		out.Tags = append(out.Tags, iamtypes.Tag{Key: aws.String(k), Value: aws.String(p.tags[k])})
+	}
+	return out, nil
+}
+
+func (e *fcIAM) CreateInstanceProfile(_ context.Context, in *iam.CreateInstanceProfileInput, _ ...func(*iam.Options)) (*iam.CreateInstanceProfileOutput, error) {
+	f := e.f()
+	name := aws.ToString(in.InstanceProfileName)
+	if f.profiles[name] != nil {
+		return nil, apiErr("EntityAlreadyExists")
+	}
+	w := "CreateInstanceProfile " + name
+	if err := f.begin(w); err != nil {
+		return nil, err
+	}
+	tags := map[string]string{}
+	for _, t := range in.Tags {
+		tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	f.profiles[name] = &fakeProfile{tags: tags}
+	return &iam.CreateInstanceProfileOutput{}, f.end(w)
+}
+
+func (e *fcIAM) AddRoleToInstanceProfile(_ context.Context, in *iam.AddRoleToInstanceProfileInput, _ ...func(*iam.Options)) (*iam.AddRoleToInstanceProfileOutput, error) {
+	f := e.f()
+	p := f.profiles[aws.ToString(in.InstanceProfileName)]
+	if p == nil {
+		return nil, &smithy.GenericAPIError{Code: "NoSuchEntity", Message: "Instance Profile " + aws.ToString(in.InstanceProfileName) + " cannot be found."}
+	}
+	if f.roleLag > 0 || f.roles[aws.ToString(in.RoleName)] == nil {
+		f.roleLag = max(f.roleLag-1, 0)
+		return nil, &smithy.GenericAPIError{Code: "NoSuchEntity", Message: "The role with name " + aws.ToString(in.RoleName) + " cannot be found."}
+	}
+	if len(p.roles) > 0 {
+		return nil, apiErr("LimitExceeded")
+	}
+	w := "AddRoleToInstanceProfile " + aws.ToString(in.InstanceProfileName) + " " + aws.ToString(in.RoleName)
+	if err := f.begin(w); err != nil {
+		return nil, err
+	}
+	p.roles = append(p.roles, aws.ToString(in.RoleName))
+	return &iam.AddRoleToInstanceProfileOutput{}, f.end(w)
+}
+
+// DescribeAutoScalingGroups finds groups by name or by tag filter. A group
+// launches its instances, InService, between two reads (unless asgStuck).
+func (e *fcASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+	f := (*clusterFake)(e)
+	if err := f.read("DescribeAutoScalingGroups"); err != nil {
+		return nil, err
+	}
+	if len(in.AutoScalingGroupNames) == 0 && len(in.Filters) == 0 {
+		panic("fake: DescribeAutoScalingGroups with no names or filters lists every group in the Region")
+	}
+	out := &autoscaling.DescribeAutoScalingGroupsOutput{}
+	for _, name := range sortedKeysOf(f.asgs) {
+		a := f.asgs[name]
+		if len(in.AutoScalingGroupNames) > 0 && !slices.Contains(in.AutoScalingGroupNames, name) {
+			continue
+		}
+		tags := map[string]string{}
+		for _, t := range a.Tags {
+			tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
+		}
+		hit := true
+		for _, fl := range in.Filters {
+			k, ok := strings.CutPrefix(aws.ToString(fl.Name), "tag:")
+			if !ok {
+				panic("fake: unknown Auto Scaling filter " + aws.ToString(fl.Name))
+			}
+			hit = hit && slices.Contains(fl.Values, tags[k])
+		}
+		if !hit {
+			continue
+		}
+		c := *a
+		c.Instances = slices.Clone(a.Instances)
+		out.AutoScalingGroups = append(out.AutoScalingGroups, c)
+		for len(a.Instances) < int(aws.ToInt32(a.DesiredCapacity)) && !f.asgStuck {
+			a.Instances = append(a.Instances, asgtypes.Instance{InstanceId: aws.String(f.id("i")), LifecycleState: asgtypes.LifecycleStateInService})
+		}
+	}
+	return out, nil
+}
+
+func (e *fcASG) CreateAutoScalingGroup(_ context.Context, in *autoscaling.CreateAutoScalingGroupInput, _ ...func(*autoscaling.Options)) (*autoscaling.CreateAutoScalingGroupOutput, error) {
+	f := (*clusterFake)(e)
+	name := aws.ToString(in.AutoScalingGroupName)
+	if f.asgs[name] != nil {
+		return nil, apiErr("AlreadyExists")
+	}
+	lt := f.lts[aws.ToString(in.LaunchTemplate.LaunchTemplateId)]
+	v, _ := strconv.Atoi(aws.ToString(in.LaunchTemplate.Version))
+	if lt == nil || v < 1 || v > len(lt.versions) {
+		return nil, apiErr("ValidationError")
+	}
+	// Auto Scaling checks the template's instance profile, as RunInstances would.
+	if p := lt.versions[v-1].IamInstanceProfile; p == nil || f.profiles[aws.ToString(p.Name)] == nil {
+		return nil, &smithy.GenericAPIError{Code: "ValidationError", Message: "Invalid IAM Instance Profile name"}
+	}
+	for _, s := range strings.Split(aws.ToString(in.VPCZoneIdentifier), ",") {
+		if f.subnets[s] == nil {
+			return nil, apiErr("ValidationError")
+		}
+	}
+	for _, t := range in.Tags {
+		if !aws.ToBool(t.PropagateAtLaunch) {
+			return nil, fmt.Errorf("tag %s does not propagate to instances", aws.ToString(t.Key))
+		}
+	}
+	w := "CreateAutoScalingGroup " + name
+	if err := f.begin(w); err != nil {
+		return nil, err
+	}
+	f.asgIn[name] = in
+	a := &asgtypes.AutoScalingGroup{AutoScalingGroupName: in.AutoScalingGroupName, DesiredCapacity: in.DesiredCapacity,
+		MinSize: in.MinSize, MaxSize: in.MaxSize}
+	for _, t := range in.Tags {
+		a.Tags = append(a.Tags, asgtypes.TagDescription{ResourceId: in.AutoScalingGroupName, Key: t.Key, Value: t.Value, PropagateAtLaunch: t.PropagateAtLaunch})
+	}
+	f.asgs[name] = a
+	return &autoscaling.CreateAutoScalingGroupOutput{}, f.end(w)
+}
+
+func (e *fcASG) DescribeScalingActivities(_ context.Context, in *autoscaling.DescribeScalingActivitiesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error) {
+	f := (*clusterFake)(e)
+	if err := f.read("DescribeScalingActivities"); err != nil {
+		return nil, err
+	}
+	return &autoscaling.DescribeScalingActivitiesOutput{Activities: f.activities[aws.ToString(in.AutoScalingGroupName)]}, nil
+}
+
+type fcSSM clusterFake
+
+func (e *fcSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	f := (*clusterFake)(e)
+	if err := f.read("GetParameter"); err != nil {
+		return nil, err
+	}
+	v, ok := f.params[aws.ToString(in.Name)]
+	if !ok {
+		return nil, apiErr("ParameterNotFound")
+	}
+	return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Name: in.Name, Value: aws.String(v)}}, nil
+}
+
+// kube is the cluster's Kubernetes API: a node per instance in service of
+// each Auto Scaling group, labeled with the pool of its group.
+func (f *clusterFake) kube(_ context.Context, c *ekstypes.Cluster) (nodeLister, error) {
+	f.kubeCalls++
+	if c == nil || c.Status != ekstypes.ClusterStatusActive {
+		return nil, fmt.Errorf("fake: the Kubernetes API of a cluster that is not ACTIVE")
+	}
+	return fakeNodes{f}, nil
+}
+
+type fakeNodes struct{ f *clusterFake }
+
+func (n fakeNodes) Nodes(_ context.Context, sel string) ([]kubeNode, error) {
+	if err := n.f.read("ListNodes"); err != nil {
+		return nil, err
+	}
+	if len(n.f.kubeErrs) > 0 {
+		err := n.f.kubeErrs[0]
+		n.f.kubeErrs = n.f.kubeErrs[1:]
+		return nil, err
+	}
+	if n.f.kubeDown != nil {
+		return nil, n.f.kubeDown
+	}
+	k, v, ok := strings.Cut(sel, "=")
+	if !ok {
+		panic("fake: label selector " + sel)
+	}
+	var out []kubeNode
+	for _, name := range sortedKeysOf(n.f.asgs) {
+		pool := strings.TrimPrefix(name, "demo-")
+		for _, i := range n.f.asgs[name].Instances {
+			labels := map[string]string{"ate.dev/pool": pool}
+			if labels[k] == v {
+				out = append(out, kubeNode{Name: aws.ToString(i.InstanceId), Labels: labels, Ready: !n.f.notReady})
+			}
+		}
+	}
+	return out, nil
 }

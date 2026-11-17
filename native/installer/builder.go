@@ -154,8 +154,12 @@ func (b builder) createCluster(s *state.Setup) execx.Spec {
 	if s.NewClusterConfig.NodeAMIID != "" {
 		settings = append(settings, "NODE_AMI_ID="+s.NewClusterConfig.NodeAMIID)
 	}
+	// So is a node group type other than the default.
+	if t := s.NewClusterConfig.NodeGroupType; t != "" && t != nodegroups.Managed {
+		settings = append(settings, "NODE_GROUP_TYPE="+t)
+	}
 	return b.setupAWSSpec(s, "setup-aws create cluster", settings, s.NewClusterConfig.Env(),
-		simPhases(phases.Cluster, simStart(s, "Creating the cluster..."),
+		simPhases(phases.ClusterFor(s.NewClusterConfig.NodeGroupType), simStart(s, "Creating the cluster..."),
 			`level=INFO msg="Cluster ready." cluster=`+s.ClusterName+` created=27 changed=0 took=19m40s`),
 		"create", "cluster")
 }

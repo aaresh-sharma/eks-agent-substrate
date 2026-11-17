@@ -3,12 +3,16 @@
 // The installer's progress checklists light a row when its phase's line
 // appears, so both sides import these lists instead of copying strings.
 //
-// It has no dependencies and no init side effects, so the installer can
-// import it (through a replace directive, as substrate-gke's installer
-// imports tools/setup-gcp) without pulling in cobra or the AWS SDK.
+// It has no dependencies but nodegroups and no init side effects, so the
+// installer can import it (through a replace directive, as substrate-gke's
+// installer imports tools/setup-gcp) without pulling in cobra or the AWS SDK.
 package phases
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
+)
 
 // Bootstrap is `setup-aws bootstrap`.
 var Bootstrap = []string{
@@ -31,6 +35,24 @@ var Cluster = []string{
 	"Creating the node groups' launch templates...",
 	"Creating the managed node groups...",
 	"Waiting for the node groups to be ACTIVE...",
+}
+
+// ClusterSelfManaged is `setup-aws create cluster` with
+// NODE_GROUP_TYPE=self-managed: Cluster's first seven phases, then the
+// node group phases of self-managed node groups.
+var ClusterSelfManaged = append(Cluster[:7:7],
+	"Creating the self-managed node groups...",
+	"Waiting for the self-managed nodes to be Ready...",
+)
+
+// ClusterFor is the create cluster list of a node group type
+// (nodegroups.Types). Any other value gets Cluster: create cluster refuses
+// it in its first phase.
+func ClusterFor(nodeGroupType string) []string {
+	if nodeGroupType == nodegroups.SelfManaged {
+		return ClusterSelfManaged
+	}
+	return Cluster
 }
 
 // RDS is `setup-aws create rds`.

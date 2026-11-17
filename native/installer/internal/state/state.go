@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
+
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/controlplane"
 )
@@ -231,6 +233,9 @@ type ClusterConfig struct {
 	// NodeAMIID is config.env's NODE_AMI_ID: the node groups' AMI, or empty
 	// for the Amazon EKS optimized Amazon Linux 2023 AMI.
 	NodeAMIID string
+	// NodeGroupType is config.env's NODE_GROUP_TYPE: nodegroups.Managed
+	// (EKS managed node groups) or nodegroups.SelfManaged.
+	NodeGroupType string
 }
 
 // clusterKnobs are the environment variables of ClusterConfig with
@@ -249,6 +254,7 @@ var clusterKnobs = []struct {
 	{"MICROVM_NODES", "2", func(c *ClusterConfig) *string { return &c.MicroVMNodes }},
 	{"EKS_PUBLIC_ACCESS_CIDRS", "auto", func(c *ClusterConfig) *string { return &c.PublicAccessCIDRs }}, // auto: setup-aws allows this machine's address, a /32
 	{"NODE_AMI_ID", "", func(c *ClusterConfig) *string { return &c.NodeAMIID }},
+	{"NODE_GROUP_TYPE", nodegroups.Managed, func(c *ClusterConfig) *string { return &c.NodeGroupType }},
 }
 
 // ClusterConfigFromEnv reads the knobs with lookup (os.LookupEnv), falling
@@ -283,6 +289,9 @@ func (c ClusterConfig) Summary(groups []string) string {
 		auto = "Auto Mode on"
 	}
 	line := fmt.Sprintf("EKS %s · %s · %s · API from %s", c.KubernetesVersion, auto, c.GroupsLine(groups), c.PublicAccessCIDRs)
+	if c.NodeGroupType == nodegroups.SelfManaged && len(groups) > 0 {
+		line += " · self-managed node groups"
+	}
 	if c.NodeAMIID != "" && len(groups) > 0 {
 		line += " · node AMI " + c.NodeAMIID
 	}

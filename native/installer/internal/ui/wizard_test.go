@@ -230,6 +230,106 @@ func TestSettingsNodeAMI(t *testing.T) {
 	}
 }
 
+// A new cluster's node group type: managed by default; enter or space
+// toggles it, n applies it, and the cluster summary and the Create the
+// cluster checklist follow it. A connected cluster has no such row.
+func TestSettingsNodeGroupType(t *testing.T) {
+	s := newSetup("fresh")
+	m := toSettings(t, testDeps(&recorder{}), s)
+	row := func(m Model) string {
+		for _, l := range strings.Split(m.View(), "\n") {
+			if strings.Contains(l, "Node group type") {
+				return l
+			}
+		}
+		t.Fatalf("no Node group type row:\n%s", m.View())
+		return ""
+	}
+	m = cursorTo(t, m, "NODE_GROUP_TYPE")
+	if l := row(m); !strings.Contains(l, " managed") || strings.Contains(l, "self-managed") {
+		t.Fatalf("row %q, want managed", l)
+	}
+	m = press(m, "enter")
+	if m.set.values["NODE_GROUP_TYPE"] != "self-managed" || m.set.editing || !strings.Contains(row(m), "self-managed") {
+		t.Fatalf("enter: %q (editing %v), row %q", m.set.values["NODE_GROUP_TYPE"], m.set.editing, row(m))
+	}
+	m = press(m, " ")
+	if m.set.values["NODE_GROUP_TYPE"] != "managed" {
+		t.Fatalf("space: %q", m.set.values["NODE_GROUP_TYPE"])
+	}
+	m = press(m, "enter", "n")
+	if m.m.Current() != state.Plugins || s.NewClusterConfig.NodeGroupType != "self-managed" {
+		t.Fatalf("at %s, NodeGroupType %q", m.m.Current().Title(), s.NewClusterConfig.NodeGroupType)
+	}
+	if got := s.NewClusterConfig.Summary(s.NodeGroups()); !strings.Contains(got, " · self-managed node groups") {
+		t.Errorf("summary %q", got)
+	}
+	_, items, _ := m.longStep(state.CreateCluster)
+	if len(items) != 9 || items[7].Label != "Creating the self-managed node groups" || items[8].Label != "Waiting for the self-managed nodes to be Ready" {
+		t.Errorf("checklist %+v", items)
+	}
+
+	m = toStep(t, New(testDeps(&recorder{}), newSetup("new")), state.Settings)
+	if strings.Contains(m.View(), "Node group type") {
+		t.Errorf("a connected cluster has a Node group type row:\n%s", m.View())
+	}
+}
+
+// The side panel of the Node group type row shows the value and config.env's,
+// as a toggle's does.
+func TestSettingsNodeGroupTypePanel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.env"), []byte("NODE_GROUP_TYPE=managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := state.LoadConfig(dir, func(string) (string, bool) { return "", false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := testDeps(&recorder{})
+	d.Config = cfg
+	m := cursorTo(t, toSettings(t, d, newSetup("fresh")), "NODE_GROUP_TYPE")
+	m = press(m, "enter")
+	// The narrow panel wraps each line after its colon.
+	v := m.View()
+	for _, want := range []string{"Now:", "NODE_GROUP_TYPE=self-", "config.env:", "NODE_GROUP_TYPE=managed"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("no %q in the panel:\n%s", want, v)
+		}
+	}
+}
+
+// A key without a row is not used, so a bad value of it does not hold up
+// the run: on a connected cluster the new cluster's knobs (an empty or
+// unknown NODE_GROUP_TYPE, a bad KUBERNETES_VERSION). A new cluster's
+// still must be fixed.
+func TestSettingsIgnoresKeysWithoutARow(t *testing.T) {
+	s := newSetup("new")
+	s.NewClusterConfig.NodeGroupType, s.NewClusterConfig.KubernetesVersion = "", "1.2"
+	m := toStep(t, New(testDeps(&recorder{}), s), state.Settings)
+	if m.s.ClusterIsNew {
+		t.Fatal("cluster new is new")
+	}
+	if m = press(m, "n"); m.m.Current() != state.Plugins {
+		t.Fatalf("a connected cluster stayed on %s: %q\n%s", m.m.Current().Title(), m.notice, m.View())
+	}
+	// SANDBOX_CLASSES has no row of its own, but a row per class: a class
+	// named twice must still be fixed.
+	s = newSetup("fresh")
+	s.SandboxClasses = "gvisor,gvisor"
+	m = press(toSettings(t, testDeps(&recorder{}), s), "n")
+	if m.m.Current() != state.Settings || !strings.Contains(m.notice, "need a fix") {
+		t.Errorf("went past SANDBOX_CLASSES=gvisor,gvisor to %s", m.m.Current().Title())
+	}
+
+	s = newSetup("fresh")
+	s.NewClusterConfig.NodeGroupType = "bogus"
+	m = press(toSettings(t, testDeps(&recorder{}), s), "n")
+	if m.m.Current() != state.Settings || !strings.Contains(m.View(), "managed or self-managed") {
+		t.Errorf("a new cluster went past NODE_GROUP_TYPE=bogus to %s", m.m.Current().Title())
+	}
+}
+
 // The sandbox classes keep at least one, and they and the database reach the
 // run: the RDS step goes, the demo checks only gvisor.
 func TestSettingsDatabaseAndClassesChangeTheRun(t *testing.T) {
@@ -708,7 +808,7 @@ func TestOutcomeStaysOnAShortScreen(t *testing.T) {
 		s.ClusterIsNew = true
 		m := sized(New(testDeps(&recorder{}), s))
 		m.jump(state.InstallOrder(s), state.CreateCluster)
-		tk := newTask(execx.Spec{Label: "create cluster", Display: strings.Repeat("CLUSTER_NAME=fresh ", 8)}, steps.Cluster())
+		tk := newTask(execx.Spec{Label: "create cluster", Display: strings.Repeat("CLUSTER_NAME=fresh ", 8)}, steps.Cluster(""))
 		tk.done, tk.err, tk.active = true, err, 2
 		for i := range 20 {
 			tk.lines = append(tk.lines, fmt.Sprintf("output line %d", i))

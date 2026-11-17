@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
@@ -55,6 +56,9 @@ type clusterConfig struct {
 	// NodeAMIID is NODE_AMI_ID: the AMI of the node groups to make, or ""
 	// for the Amazon EKS optimized Amazon Linux 2023 AMI EKS picks.
 	NodeAMIID string
+	// NodeGroupType is NODE_GROUP_TYPE (nodegroups.Types): EKS managed node
+	// groups, or self-managed ones (selfmanaged.go). Empty is managed.
+	NodeGroupType string
 }
 
 var ccfg clusterConfig
@@ -69,9 +73,11 @@ API endpoint limited to EKS_PUBLIC_ACCESS_CIDRS (by default "auto": this
 machine's public address, a /32, looked up at https://checkip.amazonaws.com
 for a new cluster; an explicit value is applied to an existing one), and a
 check that this machine reaches it; a cluster-admin access entry
-for the caller; the add-ons; and the managed node groups NODE_GROUPS names
-(by default system, gvisor and microvm), each with its launch template
-(IMDSv2 only, hop limit 1, encrypted gp3, nested virtualization on microvm).
+for the caller; the add-ons; and the node groups NODE_GROUPS names (by
+default system, gvisor and microvm), each with its launch template (IMDSv2
+only, hop limit 1, encrypted gp3, nested virtualization on microvm): EKS
+managed node groups, or with NODE_GROUP_TYPE=self-managed an Auto Scaling
+group each, with an instance profile and an access entry for the node role.
 Without Auto Mode the system group and a gvisor or microvm group are
 required. With it any of the three, or none, will do: Auto Mode's nodes run
 what no group is made for, and NODE_GROUPS=none makes no node group (and no
@@ -102,9 +108,11 @@ func init() {
 	f.IntVar(&ccfg.GvisorNodes, "gvisor-nodes", getEnv("GVISOR_NODES", 2), "nodes in the gvisor node group (GVISOR_NODES)")
 	f.IntVar(&ccfg.MicrovmNodes, "microvm-nodes", getEnv("MICROVM_NODES", 2), "nodes in the microvm node group (MICROVM_NODES)")
 	f.StringVar(&ccfg.NodeGroups, "node-groups", getEnv("NODE_GROUPS", nodegroups.Default),
-		`managed node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
+		`node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
 	f.StringVar(&ccfg.NodeAMIID, "node-ami-id", getEnv("NODE_AMI_ID", ""),
 		`AMI of the node groups to make, one that joins with nodeadm (Amazon Linux 2023); empty: the Amazon EKS optimized AL2023 AMI (NODE_AMI_ID)`)
+	f.StringVar(&ccfg.NodeGroupType, "node-group-type", getEnv("NODE_GROUP_TYPE", nodegroups.Managed),
+		`"managed": EKS managed node groups; "self-managed": an Auto Scaling group per node group, whose nodes join with nodeadm (NODE_GROUP_TYPE)`)
 	createCmd.AddCommand(createClusterCmd)
 }
 
@@ -145,11 +153,17 @@ type clusterRun struct {
 	// enaRequired are the instance types that run only AMIs with ENA.
 	enaRequired map[string]bool
 	image       *nodeImage // NODE_AMI_ID, when set
-	vpcID       string
-	eipID       string
-	public      []string // subnet IDs
-	private     []string
-	templates   map[string]ltRef // by node group
+	// archImages are the AMIs of self-managed groups without NODE_AMI_ID,
+	// by architecture: the recommended EKS optimized AL2023 AMI.
+	archImages map[ec2types.ArchitectureValues]*nodeImage
+	// asgs are the Auto Scaling groups of this deployment's self-managed
+	// node groups that exist, by node group.
+	asgs      map[string]*asgtypes.AutoScalingGroup
+	vpcID     string
+	eipID     string
+	public    []string // subnet IDs
+	private   []string
+	templates map[string]ltRef // by node group
 }
 
 func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
@@ -157,10 +171,14 @@ func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
 	for k, v := range e.tags {
 		tags[k] = v
 	}
+	if strings.TrimSpace(cfg.NodeGroupType) == "" {
+		cfg.NodeGroupType = nodegroups.Managed
+	}
 	r := &clusterRun{e: e, c: c, cfg: cfg, auto: cfg.AutoMode == "on", tags: tags,
 		autoCIDRs:  strings.TrimSpace(cfg.PublicAccessCIDRs) == publicAccessAuto,
 		nodegroups: map[string]*ekstypes.Nodegroup{}, addons: map[string]*ekstypes.Addon{},
-		amiTypes: map[string]ekstypes.AMITypes{}, enaRequired: map[string]bool{}, templates: map[string]ltRef{}}
+		amiTypes: map[string]ekstypes.AMITypes{}, enaRequired: map[string]bool{}, templates: map[string]ltRef{},
+		archImages: map[ec2types.ArchitectureValues]*nodeImage{}, asgs: map[string]*asgtypes.AutoScalingGroup{}}
 	// Empty is unset, as getEnv reads NODE_GROUPS: the default three.
 	ng := cfg.NodeGroups
 	if strings.TrimSpace(ng) == "" {
@@ -186,12 +204,16 @@ func (r *clusterRun) run(ctx context.Context) error {
 		r.ensureNodegroups,
 		r.waitReady,
 	}
-	if len(steps) != len(phases.Cluster) {
-		return fmt.Errorf("internal: %d cluster steps for %d phases", len(steps), len(phases.Cluster))
+	if r.selfManaged() {
+		steps[7], steps[8] = r.ensureAutoScalingGroups, r.waitSelfManaged
+	}
+	list := phases.ClusterFor(r.cfg.NodeGroupType)
+	if len(steps) != len(list) {
+		return fmt.Errorf("internal: %d cluster steps for %d phases", len(steps), len(list))
 	}
 	start := time.Now()
 	for i, step := range steps {
-		slog.Info(phases.Line(phases.Cluster, i))
+		slog.Info(phases.Line(list, i))
 		t := time.Now()
 		if err := step(ctx); err != nil {
 			return err
@@ -251,6 +273,9 @@ func (r *clusterRun) preflight(ctx context.Context) error {
 	if err := r.readCluster(ctx); err != nil {
 		return err
 	}
+	if err := r.checkGroupType(ctx); err != nil {
+		return err
+	}
 	if err := r.checkInstanceTypes(ctx); err != nil {
 		return err
 	}
@@ -284,6 +309,9 @@ func (r *clusterRun) validate() error {
 	case "on", "off", "":
 	default:
 		return fmt.Errorf(`AUTO_MODE must be "on", "off" or empty, not %q`, r.cfg.AutoMode)
+	}
+	if err := nodegroups.CheckType(r.cfg.NodeGroupType); err != nil {
+		return err
 	}
 	if err := versionAtLeast(r.cfg.KubernetesVersion, r.e.cfg.MinKubernetesMinor); err != nil {
 		return fmt.Errorf("KUBERNETES_VERSION: %w", err)

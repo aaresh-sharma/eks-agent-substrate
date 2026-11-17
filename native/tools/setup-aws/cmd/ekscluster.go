@@ -348,7 +348,7 @@ func (r *clusterRun) ensureAccess(ctx context.Context) error {
 		for _, p := range out.AssociatedAccessPolicies {
 			if aws.ToString(p.PolicyArn) == r.clusterAdminPolicy() && p.AccessScope != nil && p.AccessScope.Type == ekstypes.AccessScopeTypeCluster {
 				slog.Info("cluster access ok", "principal", who)
-				return nil
+				return r.ensureNodeAccess(ctx)
 			}
 		}
 	}
@@ -367,5 +367,5 @@ func (r *clusterRun) ensureAccess(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("access policy of %s: %w", who, err)
 	}
-	return nil
+	return r.ensureNodeAccess(ctx)
 }

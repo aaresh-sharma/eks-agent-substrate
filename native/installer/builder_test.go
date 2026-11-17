@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -284,6 +285,40 @@ func TestCreateClusterShowsACustomAMIOnly(t *testing.T) {
 	sp = b.createCluster(s)
 	if !strings.Contains(sp.Display, "NODE_AMI_ID=ami-0123456789abcdef0 ") || !slices.Contains(sp.Env, "NODE_AMI_ID=ami-0123456789abcdef0") {
 		t.Errorf("custom AMI: shown %q, env %q", sp.Display, sp.Env)
+	}
+}
+
+// NODE_GROUP_TYPE reaches setup-aws; the shown command carries it only
+// when it is not the default, and the dry-run replays the type's phases.
+func TestCreateClusterShowsSelfManagedOnly(t *testing.T) {
+	b, s := testBuilder()
+	sp := b.createCluster(s)
+	if strings.Contains(sp.Display, "NODE_GROUP_TYPE") || !slices.Contains(sp.Env, "NODE_GROUP_TYPE=managed") ||
+		!slices.Contains(sp.SimLines, fmt.Sprintf("level=INFO msg=%q", phases.Line(phases.Cluster, 7))) {
+		t.Errorf("default: shown %q, env %q, sim %q", sp.Display, sp.Env, sp.SimLines)
+	}
+	s.NewClusterConfig.NodeGroupType = "self-managed"
+	sp = b.createCluster(s)
+	if !strings.Contains(sp.Display, "NODE_GROUP_TYPE=self-managed ") || !slices.Contains(sp.Env, "NODE_GROUP_TYPE=self-managed") {
+		t.Errorf("self-managed: shown %q, env %q", sp.Display, sp.Env)
+	}
+	for i := range phases.ClusterSelfManaged {
+		if !slices.Contains(sp.SimLines, fmt.Sprintf("level=INFO msg=%q", phases.Line(phases.ClusterSelfManaged, i))) {
+			t.Errorf("the dry-run lacks %q", phases.Line(phases.ClusterSelfManaged, i))
+		}
+	}
+	// Empty is no setting of its own either (setup-aws takes it as
+	// managed): the environment carries it once, as every knob.
+	s.NewClusterConfig.NodeGroupType = ""
+	sp = b.createCluster(s)
+	n := 0
+	for _, e := range sp.Env {
+		if strings.HasPrefix(e, "NODE_GROUP_TYPE=") {
+			n++
+		}
+	}
+	if n != 1 || strings.Contains(sp.Display, "NODE_GROUP_TYPE") {
+		t.Errorf("empty: %d NODE_GROUP_TYPE entries in %q, shown %q", n, sp.Env, sp.Display)
 	}
 }
 

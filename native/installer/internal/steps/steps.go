@@ -59,8 +59,11 @@ func FromPhases(list []string) []ChecklistItem {
 // Bootstrap tracks `setup-aws bootstrap`.
 func Bootstrap() []ChecklistItem { return FromPhases(phases.Bootstrap) }
 
-// Cluster tracks `setup-aws create cluster`.
-func Cluster() []ChecklistItem { return FromPhases(phases.Cluster) }
+// Cluster tracks `setup-aws create cluster` for a node group type
+// (NODE_GROUP_TYPE): the node group rows differ.
+func Cluster(nodeGroupType string) []ChecklistItem {
+	return FromPhases(phases.ClusterFor(nodeGroupType))
+}
 
 // RDS tracks `setup-aws create rds`.
 func RDS() []ChecklistItem { return FromPhases(phases.RDS) }

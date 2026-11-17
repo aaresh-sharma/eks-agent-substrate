@@ -23,6 +23,7 @@ MICROVM_INSTANCE_TYPE=m8i.2xlarge
 SYSTEM_NODES=2
 GVISOR_NODES=2
 MICROVM_NODES=2
+NODE_GROUP_TYPE=managed
 # Space-separated key=value tags.
 TAGS="project=agent-substrate auto-delete=no"
 EKS_PUBLIC_ACCESS_CIDRS='0.0.0.0/0'
@@ -217,6 +218,7 @@ func TestValidateConfigBothWays(t *testing.T) {
 		"KUBERNETES_VERSION": "1.36", "AUTO_MODE": "yes", "SYSTEM_INSTANCE_TYPE": "big", "GVISOR_NODES": "0",
 		"MICROVM_NODES": "100", "TAGS": "a=b c", "EKS_PUBLIC_ACCESS_CIDRS": "", "SUBSTRATE_TAG": "latest",
 		"SUBSTRATE_IMAGE_REPO": "Not A Repo", "SANDBOX_CLASSES": "kata", "NODE_AMI_ID": "ami-xyz",
+		"NODE_GROUP_TYPE": "unmanaged",
 	} {
 		v := map[string]string{}
 		for k, x := range good {
@@ -241,6 +243,24 @@ func TestValidateConfigBothWays(t *testing.T) {
 		v["NODE_AMI_ID"] = value
 		if _, bad := ValidateConfig(v)["NODE_AMI_ID"]; bad == ok {
 			t.Errorf("NODE_AMI_ID=%q: refused=%v, want %v", value, bad, !ok)
+		}
+	}
+	// NODE_GROUP_TYPE: one of setup-aws's two types, spelled as it spells
+	// them; empty is not the default here, since config.env sets it. The
+	// finding fits the Settings column.
+	for value, ok := range map[string]bool{"managed": true, "self-managed": true, "": false, "Managed": false,
+		"self_managed": false, "selfmanaged": false, " managed": false} {
+		v := map[string]string{}
+		for k, x := range good {
+			v[k] = x
+		}
+		v["NODE_GROUP_TYPE"] = value
+		msg, bad := ValidateConfig(v)["NODE_GROUP_TYPE"]
+		if bad == ok {
+			t.Errorf("NODE_GROUP_TYPE=%q: refused=%v, want %v", value, bad, !ok)
+		}
+		if bad && (msg != "managed or self-managed" || len(msg) > 30) {
+			t.Errorf("NODE_GROUP_TYPE finding %q", msg)
 		}
 	}
 	// Both ways for setup-aws's default: "auto" alone is accepted; "auto"
