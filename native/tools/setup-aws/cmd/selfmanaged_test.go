@@ -93,7 +93,7 @@ func TestCreateClusterManagedSendsNoNewCalls(t *testing.T) {
 	}
 	for _, lt := range []string{"demo-system-nodes", "demo-gvisor-nodes", "demo-microvm-nested-virt"} {
 		d := latestData(t, f, lt)
-		if d.IamInstanceProfile != nil || d.SecurityGroupIds != nil || d.ImageId != nil || d.UserData != nil {
+		if d.IamInstanceProfile != nil || d.SecurityGroupIds != nil || d.ImageId != nil || d.UserData != nil || d.InstanceType != "" {
 			t.Errorf("%s: profile %v, security groups %v, image %v, user data %v", lt, d.IamInstanceProfile, d.SecurityGroupIds, d.ImageId, d.UserData)
 		}
 	}
@@ -122,7 +122,7 @@ func TestCreateClusterManagedSendsNoNewCalls(t *testing.T) {
 // denyNewCalls denies every read self-managed node groups added, the node
 // role's access entry included, so a managed run that makes one fails.
 func denyNewCalls(f *clusterFake) {
-	for _, op := range []string{"GetParameter", "GetInstanceProfile", "ListInstanceProfileTags",
+	for _, op := range []string{"GetParameter", "GetInstanceProfile", "ListInstanceProfileTags", "ListNodegroups",
 		"DescribeAutoScalingGroups", "DescribeScalingActivities", "ListNodes", "DescribeAccessEntry " + nodeRoleARN} {
 		f.deny[op] = "AccessDenied"
 	}
@@ -171,6 +171,9 @@ func TestCreateClusterManagedAddingAGroupReadsTheAutoScalingGroupsOnce(t *testin
 	if want := map[string]bool{"system": true, "gvisor": true}; !maps.Equal(read, want) || len(f.writes) != 0 {
 		t.Errorf("node groups read %v, want %v; writes %v", read, want, f.writes)
 	}
+	if n := countOf(f.reads, "ListNodegroups"); n != 0 {
+		t.Errorf("a managed run listed the node groups %d times", n)
+	}
 }
 
 func TestPhasesClusterForEachType(t *testing.T) {
@@ -214,12 +217,16 @@ func TestCreateClusterSelfManaged(t *testing.T) {
 	}
 	sg := aws.ToString(f.cluster.ResourcesVpcConfig.ClusterSecurityGroupId)
 	private := strings.Join(f.clusterIn.ResourcesVpcConfig.SubnetIds, ",")
-	for _, g := range []struct{ name, lt, taint string }{
-		{"system", "demo-system-nodes", "ate.dev/workloadType"},
-		{"gvisor", "demo-gvisor-nodes", "ate.dev/sandboxClass"},
-		{"microvm", "demo-microvm-nested-virt", "ate.dev/sandboxClass"},
+	for _, g := range []struct{ name, lt, taint, typ string }{
+		{"system", "demo-system-nodes", "ate.dev/workloadType", "m8i.xlarge"},
+		{"gvisor", "demo-gvisor-nodes", "ate.dev/sandboxClass", "m8i.2xlarge"},
+		{"microvm", "demo-microvm-nested-virt", "ate.dev/sandboxClass", "m8i.2xlarge"},
 	} {
 		d := latestData(t, f, g.lt)
+		// Auto Scaling takes the instance type from the template.
+		if string(d.InstanceType) != g.typ {
+			t.Errorf("%s: template instance type %q, want %s", g.name, d.InstanceType, g.typ)
+		}
 		if aws.ToString(d.ImageId) != eksAMIx86 || d.IamInstanceProfile == nil || aws.ToString(d.IamInstanceProfile.Name) != nodeProfile ||
 			!slices.Equal(d.SecurityGroupIds, []string{sg}) {
 			t.Errorf("%s: image %s, profile %v, security groups %v", g.name, aws.ToString(d.ImageId), d.IamInstanceProfile, d.SecurityGroupIds)
@@ -448,6 +455,12 @@ func TestCreateClusterInstanceProfileReuse(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "instance profile "+nodeProfile) || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want a refusal naming the profile (%q), got %v", c.want, err)
 			}
+			if strings.Contains(err.Error(), "delete") || strings.Contains(err.Error(), "remove it") || !strings.Contains(err.Error(), "use another CLUSTER_NAME") {
+				t.Errorf("want another CLUSTER_NAME and no change by hand, got %v", err)
+			}
+			if c.p.tags[OwnerTagKey] == "demo.us-west-2" {
+				wantRecreate(t, err)
+			}
 			for _, w := range f.writes {
 				if strings.HasPrefix(w, "AddRoleToInstanceProfile") || strings.HasPrefix(w, "CreateAutoScalingGroup") || strings.HasPrefix(w, "CreateLaunchTemplate") {
 					t.Errorf("wrote %s after the refusal", w)
@@ -474,6 +487,9 @@ func TestCreateClusterNodeAccessEntryReuse(t *testing.T) {
 			}
 			if !ok && (err == nil || !strings.Contains(err.Error(), "type STANDARD")) {
 				t.Errorf("a STANDARD entry: %v", err)
+			}
+			if !ok {
+				wantRecreate(t, err)
 			}
 		})
 	}
@@ -503,10 +519,23 @@ func TestCreateClusterRefusesForeignAutoScalingGroups(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "Auto Scaling group demo-gvisor") || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want a refusal naming demo-gvisor (%q), got %v", c.want, err)
 			}
+			if strings.Contains(err.Error(), "delete or rename") {
+				t.Errorf("says to delete by hand: %v", err)
+			}
 			if len(f.writes) != 0 || f.kubeCalls != 0 {
 				t.Errorf("went past preflight: writes %v, Kubernetes clients %d", f.writes, f.kubeCalls)
 			}
 		})
+	}
+}
+
+// wantRecreate checks that a refusal says to go on through the installer's
+// teardown, or with another CLUSTER_NAME, and never to delete by hand.
+func wantRecreate(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again") ||
+		!strings.Contains(err.Error(), "use another CLUSTER_NAME") || strings.Contains(err.Error(), "delete") || strings.Contains(err.Error(), "remove it") {
+		t.Errorf("want the teardown way on and no delete by hand, got %v", err)
 	}
 }
 
@@ -525,6 +554,7 @@ func TestCreateClusterRefusesMixedNodeGroupTypes(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "managed node groups gvisor, microvm, system") || !strings.Contains(err.Error(), "NODE_GROUP_TYPE=managed") {
 			t.Fatalf("want a mixed-type refusal, got %v", err)
 		}
+		wantRecreate(t, err)
 		if len(f.writes) != 0 {
 			t.Errorf("writes %v", f.writes)
 		}
@@ -539,6 +569,7 @@ func TestCreateClusterRefusesMixedNodeGroupTypes(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "self-managed node groups demo-system, demo-gvisor") || !strings.Contains(err.Error(), "NODE_GROUP_TYPE=self-managed") {
 			t.Fatalf("want a mixed-type refusal, got %v", err)
 		}
+		wantRecreate(t, err)
 		if len(f.writes) != 0 {
 			t.Errorf("writes %v", f.writes)
 		}
@@ -561,9 +592,10 @@ func TestCreateClusterRefusesMixedNodeGroupTypes(t *testing.T) {
 
 // The one-type rule holds across every node group name, not only the ones a
 // run wants: on Auto Mode, a run of one type with other NODE_GROUPS than the
-// last run of the other type stops too. A denied read of a node group it
-// does not want stops a self-managed run; another owner's Auto Scaling group
-// of a name it does not make is left alone.
+// last run of the other type stops too, and a self-managed run finds managed
+// node groups of any name, on every page of the list. A denied list stops a
+// self-managed run; another owner's Auto Scaling group of a name it does not
+// make is left alone.
 func TestCreateClusterRefusesMixedNodeGroupTypesOfOtherNames(t *testing.T) {
 	groups := func(g string) func(*clusterConfig) { return func(c *clusterConfig) { c.NodeGroups = g } }
 	t.Run("self-managed gvisor on managed system", func(t *testing.T) {
@@ -588,15 +620,35 @@ func TestCreateClusterRefusesMixedNodeGroupTypesOfOtherNames(t *testing.T) {
 			t.Fatalf("want a mixed-type refusal naming demo-system, got %v (writes %v)", err, f.writes)
 		}
 	})
-	t.Run("a denied read of a node group not wanted", func(t *testing.T) {
+	t.Run("self-managed on managed groups of other names", func(t *testing.T) {
 		f := newClusterFake()
 		if err := clusterTestRun(t, f, false, selfManaged, groups("system,gvisor")).run(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		f.deny["DescribeNodegroup microvm"] = "AccessDenied"
+		// Made outside the installer, with names it never uses; the last
+		// is on the list's second page.
+		for _, g := range []string{"batch", "ingest", "workers"} {
+			f.ngs[g] = &ekstypes.Nodegroup{NodegroupName: aws.String(g), Status: ekstypes.NodegroupStatusActive}
+		}
+		f.writes, f.reads = nil, nil
+		err := clusterTestRun(t, f, false, selfManaged, groups("system,gvisor")).run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "has the managed node groups batch, ingest, workers,") || len(f.writes) != 0 {
+			t.Fatalf("want a mixed-type refusal naming every managed group, got %v (writes %v)", err, f.writes)
+		}
+		wantRecreate(t, err)
+		if n := countOf(f.reads, "ListNodegroups"); n != 2 {
+			t.Errorf("ListNodegroups %d times, want 2 (two pages)", n)
+		}
+	})
+	t.Run("a denied list of the node groups", func(t *testing.T) {
+		f := newClusterFake()
+		if err := clusterTestRun(t, f, false, selfManaged, groups("system,gvisor")).run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.deny["ListNodegroups"] = "AccessDenied"
 		f.writes = nil
 		err := clusterTestRun(t, f, false, selfManaged, groups("system,gvisor")).run(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "describe node group microvm") || !strings.Contains(err.Error(), "AccessDenied") || len(f.writes) != 0 {
+		if err == nil || !strings.Contains(err.Error(), "list the node groups of cluster demo") || !strings.Contains(err.Error(), "AccessDenied") || len(f.writes) != 0 {
 			t.Fatalf("want the denied read, got %v (writes %v)", err, f.writes)
 		}
 	})
@@ -746,6 +798,36 @@ func TestCreateClusterSelfManagedWaitTimesOut(t *testing.T) {
 	})
 }
 
+// DescribeAutoScalingGroups can miss a group for a while after
+// CreateAutoScalingGroup: the wait goes on, and a group it never returns is
+// named at the timeout, not at the first read.
+func TestCreateClusterSelfManagedWaitsForTheNewAutoScalingGroup(t *testing.T) {
+	t.Run("returned late", func(t *testing.T) {
+		f := newClusterFake()
+		f.asgLag = 3
+		if err := clusterTestRun(t, f, false, selfManaged).run(context.Background()); err != nil {
+			t.Fatalf("a group not returned yet stopped the wait: %v", err)
+		}
+		for g, n := range f.asgHidden {
+			if n != 0 {
+				t.Errorf("%s: %d reads left that miss it", g, n)
+			}
+		}
+	})
+	t.Run("never returned", func(t *testing.T) {
+		shortNodeWait(t)
+		f := newClusterFake()
+		f.asgLag = 1 << 30
+		err := clusterTestRun(t, f, false, selfManaged).run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "DescribeAutoScalingGroups does not return Auto Scaling group demo-system") {
+			t.Fatalf("want a timeout naming the group, got %v", err)
+		}
+		if n := countOf(f.reads, "DescribeAutoScalingGroups"); n < 3 {
+			t.Errorf("stopped after %d reads", n)
+		}
+	})
+}
+
 // The node lists of the wait: a blip (no answer, 429, a 5xx) is "not yet"
 // and the wait goes on; 401 or 403 stops it at once; a wait that only gets
 // blips times out with the last one.
@@ -800,6 +882,7 @@ func TestCreateClusterSelfManagedTemplateDrift(t *testing.T) {
 	for name, edit := range map[string]func(*ec2types.RequestLaunchTemplateData){
 		"instance profile": func(d *ec2types.RequestLaunchTemplateData) { d.IamInstanceProfile = nil },
 		"security group":   func(d *ec2types.RequestLaunchTemplateData) { d.SecurityGroupIds = []string{"sg-other"} },
+		"instance type":    func(d *ec2types.RequestLaunchTemplateData) { d.InstanceType = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newClusterFake()

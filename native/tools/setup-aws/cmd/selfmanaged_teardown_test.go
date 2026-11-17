@@ -230,6 +230,36 @@ func TestTeardownRetriesTheInstanceProfileDeleteConflict(t *testing.T) {
 	}
 }
 
+// IAM can still see the node role in its instance profile for a moment after
+// deleteRole took it out: DeleteConflict is retried until the role goes, on
+// a managed deployment (EKS's profile) and a self-managed one. A conflict
+// that never clears fails the step at tdTimeout and names it.
+func TestTeardownRetriesTheRoleDeleteConflict(t *testing.T) {
+	const role = "role|demo-us-west-2-eks-node"
+	for name, deployment := range map[string]func() *tdFake{"managed": fullDeployment, "self-managed": selfManagedDeployment} {
+		t.Run(name, func(t *testing.T) {
+			f := deployment()
+			f.objs[role].conflicts = 2
+			e, _, logs := tdTestEnv(t, f, false, false)
+			if err := e.teardown(context.Background()); err != nil {
+				t.Fatalf("teardown: %v\n%s", err, logs)
+			}
+			if n := countCalls(f.calls, "DeleteRole demo-us-west-2-eks-node"); n != 3 || f.objs[role] != nil {
+				t.Errorf("DeleteRole %d times, want 3; role left %v", n, f.objs[role] != nil)
+			}
+		})
+	}
+	t.Run("never clears", func(t *testing.T) {
+		f := selfManagedDeployment()
+		f.objs[role].conflicts = 1 << 30
+		e, _, _ := tdTestEnv(t, f, false, false)
+		err := e.teardown(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "IAM role demo-us-west-2-eks-node to be free") || !strings.Contains(err.Error(), "DeleteConflict") {
+			t.Fatalf("want the conflict at the timeout, got %v", err)
+		}
+	})
+}
+
 // An owned instance profile that still holds a role teardown keeps (one
 // without the owner tag) loses the role, then goes; the role stays.
 func TestTeardownEmptiesTheInstanceProfile(t *testing.T) {

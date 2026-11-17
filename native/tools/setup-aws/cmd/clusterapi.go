@@ -64,6 +64,9 @@ type (
 		UpdateAddon(context.Context, *eks.UpdateAddonInput, ...func(*eks.Options)) (*eks.UpdateAddonOutput, error)
 		DescribeNodegroup(context.Context, *eks.DescribeNodegroupInput, ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error)
 		CreateNodegroup(context.Context, *eks.CreateNodegroupInput, ...func(*eks.Options)) (*eks.CreateNodegroupOutput, error)
+		// ListNodegroups finds every managed node group of a cluster that
+		// a self-managed run would add groups to.
+		ListNodegroups(context.Context, *eks.ListNodegroupsInput, ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error)
 	}
 	// clusterIAMAPI extends the shared IAMAPI, so ownedRole (iam.go) checks
 	// the cluster's roles the same way it checks the Pod Identity roles.

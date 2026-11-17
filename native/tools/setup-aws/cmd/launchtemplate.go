@@ -102,6 +102,10 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 		}
 		d.IamInstanceProfile = &ec2types.LaunchTemplateIamInstanceProfileSpecificationRequest{Name: aws.String(r.instanceProfileName())}
 		d.SecurityGroupIds = []string{sg}
+		// An Auto Scaling group without a mixed instances policy takes its
+		// instance type from the template; a managed node group takes it
+		// in CreateNodegroup instead.
+		d.InstanceType = ec2types.InstanceType(g.InstanceType)
 	}
 	// The node group's instances, their volumes and network interfaces get
 	// the deployment's tags at launch.
@@ -155,10 +159,11 @@ type ltSettings struct {
 	// A self-managed node's instance profile and security groups (sorted,
 	// comma-separated).
 	InstanceProfile, SecurityGroups string
+	InstanceType                    string
 }
 
 func requestSettings(d *ec2types.RequestLaunchTemplateData) ltSettings {
-	s := ltSettings{ImageID: aws.ToString(d.ImageId), UserData: aws.ToString(d.UserData),
+	s := ltSettings{ImageID: aws.ToString(d.ImageId), UserData: aws.ToString(d.UserData), InstanceType: string(d.InstanceType),
 		SecurityGroups: strings.Join(sortedCopy(d.SecurityGroupIds), ",")}
 	if d.IamInstanceProfile != nil {
 		s.InstanceProfile = aws.ToString(d.IamInstanceProfile.Name)
@@ -184,7 +189,7 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 	if d == nil {
 		return s
 	}
-	s.ImageID, s.UserData = aws.ToString(d.ImageId), aws.ToString(d.UserData)
+	s.ImageID, s.UserData, s.InstanceType = aws.ToString(d.ImageId), aws.ToString(d.UserData), string(d.InstanceType)
 	s.SecurityGroups = strings.Join(sortedCopy(d.SecurityGroupIds), ",")
 	if d.IamInstanceProfile != nil {
 		s.InstanceProfile = aws.ToString(d.IamInstanceProfile.Name)

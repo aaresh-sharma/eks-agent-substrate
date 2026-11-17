@@ -113,7 +113,7 @@ func (r *clusterRun) ensureInstanceProfile(ctx context.Context) error {
 		return nil
 	}
 	if owner := tags[OwnerTagKey]; owner != r.e.names.OwnerValue {
-		return fmt.Errorf("IAM instance profile %s exists but is not owned by %s (%s=%q); delete or rename it, or pick another CLUSTER_NAME",
+		return fmt.Errorf("IAM instance profile %s exists but is not owned by %s (%s=%q); use another CLUSTER_NAME",
 			name, r.e.names.OwnerValue, OwnerTagKey, owner)
 	}
 	for _, have := range ip.Roles {
@@ -123,8 +123,8 @@ func (r *clusterRun) ensureInstanceProfile(ctx context.Context) error {
 		}
 	}
 	if len(ip.Roles) > 0 {
-		return fmt.Errorf("IAM instance profile %s holds role %s, not %s, and a profile holds one role; remove it from the profile and run again",
-			name, aws.ToString(ip.Roles[0].RoleName), role)
+		return fmt.Errorf("IAM instance profile %s holds role %s, not %s, and a profile holds one role; %s",
+			name, aws.ToString(ip.Roles[0].RoleName), role, recreate)
 	}
 	if err := r.change(what, add); err != nil {
 		return fmt.Errorf("instance profile %s: %w", name, err)
@@ -148,7 +148,7 @@ func (r *clusterRun) ensureNodeAccess(ctx context.Context) error {
 		switch {
 		case err == nil:
 			if t := aws.ToString(out.AccessEntry.Type); t != accessTypeNode {
-				return fmt.Errorf("the node role %s has an access entry of type %s, and self-managed nodes need %s; delete that entry and run again", who, t, accessTypeNode)
+				return fmt.Errorf("the node role %s has an access entry of type %s, and self-managed nodes need %s; %s", who, t, accessTypeNode, recreate)
 			}
 			slog.Info("node access ok", "principal", who)
 			return nil
@@ -199,14 +199,39 @@ func asgTagMap(ts []asgtypes.TagDescription) map[string]string {
 	return m
 }
 
+// recreate is the way on from what create cluster does not change in place.
+// It never says to delete a resource by hand: the installer's teardown
+// checks the owner of each resource it deletes.
+const recreate = "tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again, or use another CLUSTER_NAME"
+
+// managedNodegroups names every EKS managed node group of the cluster,
+// whatever its name, with those readCluster read.
+func (r *clusterRun) managedNodegroups(ctx context.Context) ([]string, error) {
+	names := map[string]bool{}
+	for g := range r.nodegroups {
+		names[g] = true
+	}
+	p := eks.NewListNodegroupsPaginator(r.c.EKS, &eks.ListNodegroupsInput{ClusterName: aws.String(r.e.names.Cluster)})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list the node groups of cluster %s: %w", r.e.names.Cluster, err)
+		}
+		for _, g := range page.Nodegroups {
+			names[g] = true
+		}
+	}
+	return tdKeys(names), nil
+}
+
 // checkGroupType finds the self-managed groups that exist, and refuses a
-// cluster that has node groups of the other type, of any name in
-// nodegroups.All: a cluster has one node group type. readCluster has read
-// the managed node groups of the wanted names; a self-managed run reads the
-// others too. A managed run reads the Auto Scaling groups only on an
-// existing cluster with a node group still to make, the one case where it
-// would add a group, so a new or complete cluster reads nothing more than
-// before.
+// cluster that has node groups of the other type: a cluster has one node
+// group type. A self-managed run lists every managed node group of the
+// cluster, of any name. A managed run reads the managed node groups of the
+// wanted names only (readCluster), and the Auto Scaling groups of every name
+// in nodegroups.All only on an existing cluster with a node group still to
+// make, the one case where it would add a group, so a new or complete
+// cluster reads nothing more than before.
 func (r *clusterRun) checkGroupType(ctx context.Context) error {
 	var wanted []string
 	missing := false
@@ -219,24 +244,13 @@ func (r *clusterRun) checkGroupType(ctx context.Context) error {
 	}
 	cluster := r.e.names.Cluster
 	if r.selfManaged() && r.cluster != nil {
-		managed := tdKeys(r.nodegroups)
-		for _, g := range nodegroups.All {
-			if slices.Contains(wanted, g) {
-				continue
-			}
-			_, err := r.c.EKS.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: aws.String(cluster), NodegroupName: aws.String(g)})
-			if isNotFound(err) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("describe node group %s: %w", g, err)
-			}
-			managed = append(managed, g)
+		managed, err := r.managedNodegroups(ctx)
+		if err != nil {
+			return err
 		}
 		if len(managed) > 0 {
-			slices.Sort(managed)
-			return fmt.Errorf("cluster %s has the managed node groups %s, and NODE_GROUP_TYPE=self-managed: a cluster has one node group type. Set NODE_GROUP_TYPE=managed, or delete them (aws eks delete-nodegroup --cluster-name %s --nodegroup-name <name>) and run again",
-				cluster, strings.Join(managed, ", "), cluster)
+			return fmt.Errorf("cluster %s has the managed node groups %s, and NODE_GROUP_TYPE=self-managed: a cluster has one node group type. Set NODE_GROUP_TYPE=managed to match the cluster, or %s",
+				cluster, strings.Join(managed, ", "), recreate)
 		}
 	}
 	if !r.selfManaged() && (r.cluster == nil || !missing) {
@@ -266,7 +280,7 @@ func (r *clusterRun) checkGroupType(ctx context.Context) error {
 		}
 		switch {
 		case !mine:
-			return fmt.Errorf("Auto Scaling group %s exists but is not owned by %s (%s=%q); delete or rename it, or pick another CLUSTER_NAME",
+			return fmt.Errorf("Auto Scaling group %s exists but is not owned by %s (%s=%q); use another CLUSTER_NAME",
 				name, r.e.names.OwnerValue, OwnerTagKey, owner)
 		case aws.ToString(a.Status) != "":
 			return fmt.Errorf("Auto Scaling group %s is %s; wait for it to be gone and run again", name, strings.ToLower(aws.ToString(a.Status)))
@@ -275,8 +289,8 @@ func (r *clusterRun) checkGroupType(ctx context.Context) error {
 		owned = append(owned, name)
 	}
 	if !r.selfManaged() && len(owned) > 0 {
-		return fmt.Errorf("cluster %s has the self-managed node groups %s (Auto Scaling groups), and NODE_GROUP_TYPE=managed: a cluster has one node group type. Set NODE_GROUP_TYPE=self-managed, or delete them (aws autoscaling delete-auto-scaling-group --force-delete --auto-scaling-group-name <name>) and run again",
-			cluster, strings.Join(owned, ", "))
+		return fmt.Errorf("cluster %s has the self-managed node groups %s (Auto Scaling groups), and NODE_GROUP_TYPE=managed: a cluster has one node group type. Set NODE_GROUP_TYPE=self-managed to match the cluster, or %s",
+			cluster, strings.Join(owned, ", "), recreate)
 	}
 	if r.cluster == nil && len(owned) > 0 {
 		return fmt.Errorf("the Auto Scaling groups %s exist, but cluster %s does not, and their nodes cannot join a new one; delete them with setup-aws teardown and run again",
@@ -461,13 +475,19 @@ func (r *clusterRun) waitSelfManaged(ctx context.Context) error {
 		name := r.asgName(g.Name)
 		var desired int32
 		var readErr error
+		// DescribeAutoScalingGroups can miss a group for a while after
+		// CreateAutoScalingGroup: that is "not yet", and absent keeps it for
+		// the timeout.
+		absent := false
 		err := waitFor(ctx, "the instances of Auto Scaling group "+name+" to be InService", nodeWaitTimeout, func() (bool, error) {
 			a, err := r.describeASG(ctx, name)
+			absent = err == nil && a == nil
 			switch {
 			case err != nil:
 				readErr = err
 			case a == nil:
-				readErr = fmt.Errorf("Auto Scaling group %s is gone", name)
+				slog.Info("DescribeAutoScalingGroups does not return the group yet; retrying", "asg", name)
+				return false, nil
 			case aws.ToString(a.Status) != "":
 				readErr = fmt.Errorf("Auto Scaling group %s is %s", name, strings.ToLower(aws.ToString(a.Status)))
 			default:
@@ -477,7 +497,11 @@ func (r *clusterRun) waitSelfManaged(ctx context.Context) error {
 			return false, readErr
 		})
 		if err != nil {
-			if readErr == nil && ctx.Err() == nil {
+			switch {
+			case readErr != nil || ctx.Err() != nil:
+			case absent:
+				err = fmt.Errorf("%w; DescribeAutoScalingGroups does not return Auto Scaling group %s", err, name)
+			default:
 				if why := r.lastScalingFailure(ctx, name); why != "" {
 					err = fmt.Errorf("%w; the last failed scaling activity: %s", err, why)
 				}

@@ -353,21 +353,27 @@ each group's instances are `InService` and as many nodes labeled
 `ate.dev/pool=<group>` are `Ready`.
 
 A cluster has one node group type. `create cluster` stops when the cluster
-has node groups of the other type, and names the way out. An Auto Scaling
-group or the instance profile is reused or deleted only with this
-deployment's owner tag. An `EC2_LINUX` access entry that EKS made for the
-node role is used as it is, and only an entry with the owner tag is deleted.
-They are cluster resources: a full teardown deletes them, `--keep-cluster`
-keeps them, and `setup-aws inventory` lists them. Like a managed group, a
-self-managed group keeps its launch template version and AMI; to change
-them, delete the group and run `create cluster` again.
+has node groups of the other type: on a cluster that exists, a self-managed
+run lists every managed node group, whatever its name. Then set
+`NODE_GROUP_TYPE` to match the cluster, or tear the deployment down
+([Tear down](#tear-down)) and create it again, or use another
+`CLUSTER_NAME`. An Auto Scaling group or the instance profile is reused or
+deleted only with this deployment's owner tag. An `EC2_LINUX` access entry
+that EKS made for the node role is used as it is, and only an entry with the
+owner tag is deleted. They are cluster resources: a full teardown deletes
+them, `--keep-cluster` keeps them, and `setup-aws inventory` lists them.
+Like a managed group, a self-managed group keeps its launch template version
+and AMI. To change them, tear the deployment down and create it again, or
+use another `CLUSTER_NAME`: deleting AWS resources by hand bypasses the
+installer's ownership checks.
 
 Self-managed groups need more permissions than managed ones. `create
 cluster` calls `iam:GetInstanceProfile`, `iam:ListInstanceProfileTags`,
 `iam:CreateInstanceProfile` with `iam:TagInstanceProfile`,
 `iam:AddRoleToInstanceProfile`, `iam:PassRole` on the node role (the
 instance profile hands it to each node), `eks:CreateAccessEntry`,
-`ssm:GetParameter`, `autoscaling:DescribeAutoScalingGroups`,
+`eks:ListNodegroups` (on a cluster that exists), `ssm:GetParameter`,
+`autoscaling:DescribeAutoScalingGroups`,
 `autoscaling:CreateAutoScalingGroup` with `autoscaling:CreateOrUpdateTags`,
 and `autoscaling:DescribeScalingActivities`. Auto Scaling launches the
 instances from the launch template as the caller, so the caller also needs

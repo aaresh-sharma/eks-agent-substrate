@@ -42,7 +42,7 @@ type tdObj struct {
 	main, isDefault, protect   bool
 	deleting                   bool
 	pending                    int // reads left before a deleting resource is gone
-	conflicts                  int // a profile's DeleteConflict answers left once it is empty (IAM's lag)
+	conflicts                  int // a role's or profile's DeleteConflict answers left once it is free (IAM's lag)
 	inline, attached, profiles []string
 	objects                    int
 	tags                       map[string]string
@@ -445,6 +445,10 @@ func (t *tfIAM) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...func
 		return nil, err
 	}
 	if len(o.inline)+len(o.attached)+len(o.profiles) > 0 {
+		return nil, apiErr("DeleteConflict")
+	}
+	if o.conflicts > 0 {
+		o.conflicts--
 		return nil, apiErr("DeleteConflict")
 	}
 	t.f().remove(o)

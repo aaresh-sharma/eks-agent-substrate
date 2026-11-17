@@ -87,6 +87,11 @@ type clusterFake struct {
 	kubeErrs []error
 	kubeDown error
 	roleLag  int
+	// asgLag is how many reads of DescribeAutoScalingGroups miss a group
+	// after CreateAutoScalingGroup made it (Auto Scaling's lag); asgHidden
+	// counts them down by group.
+	asgLag    int
+	asgHidden map[string]int
 }
 
 type fakeProfile struct {
@@ -146,7 +151,7 @@ func newClusterFake() *clusterFake {
 		asgTags:  map[string]map[string]string{},
 		profiles: map[string]*fakeProfile{}, entryTypes: map[string]string{},
 		asgs: map[string]*asgtypes.AutoScalingGroup{}, asgIn: map[string]*autoscaling.CreateAutoScalingGroupInput{},
-		activities: map[string][]asgtypes.Activity{},
+		asgHidden: map[string]int{}, activities: map[string][]asgtypes.Activity{},
 		params: map[string]string{
 			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/image_id": eksAMIx86,
 			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/arm64/standard/recommended/image_id":  eksAMIarm,
@@ -723,7 +728,7 @@ func (e *fcEC2) DescribeLaunchTemplates(_ context.Context, in *ec2.DescribeLaunc
 // responseData is what DescribeLaunchTemplateVersions returns for the
 // fields the tool compares.
 func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunchTemplateData {
-	out := &ec2types.ResponseLaunchTemplateData{ImageId: d.ImageId, UserData: d.UserData, SecurityGroupIds: d.SecurityGroupIds}
+	out := &ec2types.ResponseLaunchTemplateData{ImageId: d.ImageId, UserData: d.UserData, SecurityGroupIds: d.SecurityGroupIds, InstanceType: d.InstanceType}
 	if d.IamInstanceProfile != nil {
 		out.IamInstanceProfile = &ec2types.LaunchTemplateIamInstanceProfileSpecification{Name: d.IamInstanceProfile.Name}
 	}
@@ -1015,6 +1020,25 @@ func (e *fcEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroupIn
 	return &eks.DescribeNodegroupOutput{Nodegroup: &c}, nil
 }
 
+// ListNodegroups lists the managed node groups by name, two to a page, so
+// a caller that reads only the first page misses some.
+func (e *fcEKS) ListNodegroups(_ context.Context, in *eks.ListNodegroupsInput, _ ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error) {
+	if err := e.f().read("ListNodegroups"); err != nil {
+		return nil, err
+	}
+	if !e.clusterExists(in.ClusterName) {
+		return nil, apiErr("ResourceNotFoundException")
+	}
+	names := sortedKeysOf(e.ngs)
+	start, _ := strconv.Atoi(aws.ToString(in.NextToken))
+	end := min(start+2, len(names))
+	out := &eks.ListNodegroupsOutput{Nodegroups: names[start:end]}
+	if end < len(names) {
+		out.NextToken = aws.String(strconv.Itoa(end))
+	}
+	return out, nil
+}
+
 func (e *fcEKS) CreateNodegroup(_ context.Context, in *eks.CreateNodegroupInput, _ ...func(*eks.Options)) (*eks.CreateNodegroupOutput, error) {
 	f := e.f()
 	name := aws.ToString(in.NodegroupName)
@@ -1290,6 +1314,10 @@ func (e *fcASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.Des
 		if len(in.AutoScalingGroupNames) > 0 && !slices.Contains(in.AutoScalingGroupNames, name) {
 			continue
 		}
+		if f.asgHidden[name] > 0 {
+			f.asgHidden[name]--
+			continue
+		}
 		tags := map[string]string{}
 		for _, t := range a.Tags {
 			tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
@@ -1326,6 +1354,11 @@ func (e *fcASG) CreateAutoScalingGroup(_ context.Context, in *autoscaling.Create
 	if lt == nil || v < 1 || v > len(lt.versions) {
 		return nil, apiErr("ValidationError")
 	}
+	// Without a mixed instances policy the template must name the instance
+	// type (InvalidQueryParameter, as AWS answers).
+	if in.MixedInstancesPolicy == nil && lt.versions[v-1].InstanceType == "" {
+		return nil, &smithy.GenericAPIError{Code: "InvalidQueryParameter", Message: "An instance type does not exist in the specified launch template."}
+	}
 	// Auto Scaling checks the template's instance profile, as RunInstances would.
 	if p := lt.versions[v-1].IamInstanceProfile; p == nil || f.profiles[aws.ToString(p.Name)] == nil {
 		return nil, &smithy.GenericAPIError{Code: "ValidationError", Message: "Invalid IAM Instance Profile name"}
@@ -1351,6 +1384,7 @@ func (e *fcASG) CreateAutoScalingGroup(_ context.Context, in *autoscaling.Create
 		a.Tags = append(a.Tags, asgtypes.TagDescription{ResourceId: in.AutoScalingGroupName, Key: t.Key, Value: t.Value, PropagateAtLaunch: t.PropagateAtLaunch})
 	}
 	f.asgs[name] = a
+	f.asgHidden[name] = f.asgLag
 	return &autoscaling.CreateAutoScalingGroupOutput{}, f.end(w)
 }
 

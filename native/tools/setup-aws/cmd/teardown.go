@@ -392,8 +392,12 @@ func (e *tdEnv) deleteRole(ctx context.Context, role string) error {
 			}
 		}
 	}
-	_, err := e.c.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: r})
-	return err
+	// IAM can still see the role in a profile, or a policy on it, for a
+	// moment after it was taken off.
+	return retryOn(ctx, "IAM role "+role+" to be free", func() error {
+		_, err := e.c.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: r})
+		return err
+	}, "DeleteConflict")
 }
 
 // ---- phase 2: RDS and its logins ---------------------------------------------
