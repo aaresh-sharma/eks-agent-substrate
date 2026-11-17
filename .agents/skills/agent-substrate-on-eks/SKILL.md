@@ -112,8 +112,8 @@ jq .status`.
 
 ## Change the configuration
 
-- Cluster knobs (Kubernetes version, Auto Mode, node types and counts, API
-  CIDRs), `TAGS`, the release and its image repository: the wizard's
+- Cluster knobs (Kubernetes version, Auto Mode, node types and counts, the
+  node AMI `NODE_AMI_ID`, API CIDRs), `TAGS`, the release and its image repository: the wizard's
   Settings screen, which writes `config.local.env`, or edit
   `config.local.env`. Node groups and Auto Mode are fixed once the cluster
   exists; change them with a new cluster.

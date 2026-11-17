@@ -148,8 +148,13 @@ func simStart(s *state.Setup, what string) string {
 // the node groups the run's sandbox classes and plugins need (NODE_GROUPS,
 // shown in the command: none on Auto Mode with only the AWS Nitro sandbox).
 func (b builder) createCluster(s *state.Setup) execx.Spec {
-	groups := "NODE_GROUPS=" + nodegroups.Format(s.NodeGroups())
-	return b.setupAWSSpec(s, "setup-aws create cluster", []string{groups}, s.NewClusterConfig.Env(),
+	settings := []string{"NODE_GROUPS=" + nodegroups.Format(s.NodeGroups())}
+	// A custom AMI is shown too: a pasted command without it would make the
+	// groups from EKS's AMI.
+	if s.NewClusterConfig.NodeAMIID != "" {
+		settings = append(settings, "NODE_AMI_ID="+s.NewClusterConfig.NodeAMIID)
+	}
+	return b.setupAWSSpec(s, "setup-aws create cluster", settings, s.NewClusterConfig.Env(),
 		simPhases(phases.Cluster, simStart(s, "Creating the cluster..."),
 			`level=INFO msg="Cluster ready." cluster=`+s.ClusterName+` created=27 changed=0 took=19m40s`),
 		"create", "cluster")

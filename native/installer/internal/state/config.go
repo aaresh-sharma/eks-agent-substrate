@@ -288,7 +288,7 @@ func (c Config) LocalPath() string {
 var ManagedKeys = []string{
 	"CLUSTER_NAME", "AWS_REGION", "AWS_PROFILE", "KUBERNETES_VERSION", "AUTO_MODE",
 	"SYSTEM_INSTANCE_TYPE", "SYSTEM_NODES", "GVISOR_INSTANCE_TYPE", "GVISOR_NODES",
-	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
+	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "NODE_AMI_ID", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
 	"SUBSTRATE_TAG", "SUBSTRATE_IMAGE_REPO", "SANDBOX_CLASSES",
 }
 
@@ -396,6 +396,7 @@ var (
 	cidrRe    = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$`)
 	releaseRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)
 	imageRe   = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$`)
+	amiRe     = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
 )
 
 // ValidateConfig returns a message for each of values' managed keys that
@@ -419,6 +420,8 @@ func ValidateConfig(values map[string]string) map[string]string {
 		check(g+"_INSTANCE_TYPE", typeRe.MatchString(values[g+"_INSTANCE_TYPE"]), "an EC2 instance type such as m8i.2xlarge")
 		check(g+"_NODES", nodesRe.MatchString(values[g+"_NODES"]), "a node count from 1 to 99")
 	}
+	check("NODE_AMI_ID", values["NODE_AMI_ID"] == "" || amiRe.MatchString(values["NODE_AMI_ID"]),
+		"an AMI ID (ami-...), or empty")
 	for _, kv := range strings.Fields(values["TAGS"]) {
 		check("TAGS", tagRe.MatchString(kv), "space-separated key=value pairs (letters, digits and _ . : / + @ -)")
 	}

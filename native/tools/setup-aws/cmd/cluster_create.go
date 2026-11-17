@@ -52,6 +52,9 @@ type clusterConfig struct {
 	// NodeGroups is NODE_GROUPS: the node groups to make, comma-separated,
 	// or "none" (nodegroups.Parse); nodegroups.Check is the rule.
 	NodeGroups string
+	// NodeAMIID is NODE_AMI_ID: the AMI of the node groups to make, or ""
+	// for the Amazon EKS optimized Amazon Linux 2023 AMI EKS picks.
+	NodeAMIID string
 }
 
 var ccfg clusterConfig
@@ -100,6 +103,8 @@ func init() {
 	f.IntVar(&ccfg.MicrovmNodes, "microvm-nodes", getEnv("MICROVM_NODES", 2), "nodes in the microvm node group (MICROVM_NODES)")
 	f.StringVar(&ccfg.NodeGroups, "node-groups", getEnv("NODE_GROUPS", nodegroups.Default),
 		`managed node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
+	f.StringVar(&ccfg.NodeAMIID, "node-ami-id", getEnv("NODE_AMI_ID", ""),
+		`AMI of the node groups to make, one that joins with nodeadm (Amazon Linux 2023); empty: the Amazon EKS optimized AL2023 AMI (NODE_AMI_ID)`)
 	createCmd.AddCommand(createClusterCmd)
 }
 
@@ -137,6 +142,7 @@ type clusterRun struct {
 	addons     map[string]*ekstypes.Addon
 	azs        []string
 	amiTypes   map[string]ekstypes.AMITypes // by instance type
+	image      *nodeImage                   // NODE_AMI_ID, when set
 	vpcID      string
 	eipID      string
 	public     []string // subnet IDs
@@ -244,6 +250,9 @@ func (r *clusterRun) preflight(ctx context.Context) error {
 		return err
 	}
 	if err := r.checkInstanceTypes(ctx); err != nil {
+		return err
+	}
+	if err := r.checkImage(ctx); err != nil {
 		return err
 	}
 	if r.cluster == nil {

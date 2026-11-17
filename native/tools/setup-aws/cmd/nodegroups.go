@@ -71,7 +71,7 @@ func (r *clusterRun) allGroups() []nodeGroupSpec {
 
 func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupInput {
 	lt := r.templates[g.Name]
-	return &eks.CreateNodegroupInput{
+	in := &eks.CreateNodegroupInput{
 		ClusterName:   aws.String(r.e.names.Cluster),
 		NodegroupName: aws.String(g.Name),
 		NodeRole:      aws.String(r.roleARN(r.nodeRoleName())),
@@ -86,6 +86,11 @@ func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupI
 		Taints: g.Taints,
 		Tags:   r.tags,
 	}
+	// A group whose launch template names an AMI takes no AMI type.
+	if r.image != nil {
+		in.AmiType = ""
+	}
+	return in
 }
 
 // ensureNodegroups creates the node groups that do not exist. It does not
@@ -97,6 +102,10 @@ func (r *clusterRun) ensureNodegroups(ctx context.Context) error {
 				return err
 			}
 			slog.Info("node group exists", "nodegroup", g.Name, "status", ng.Status)
+			if custom := ng.AmiType == ekstypes.AMITypesCustom; custom != (r.image != nil) {
+				slog.Warn("the node group was made with another NODE_AMI_ID setting and keeps its nodes; delete it and run again to change its AMI",
+					"nodegroup", g.Name, "amiType", string(ng.AmiType), "NODE_AMI_ID", r.cfg.NodeAMIID)
+			}
 			continue
 		}
 		in := r.createNodegroupInput(g)

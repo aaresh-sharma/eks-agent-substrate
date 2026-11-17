@@ -272,6 +272,21 @@ func TestCreateClusterCarriesTheConfigKnobs(t *testing.T) {
 	}
 }
 
+// NODE_AMI_ID reaches setup-aws, and the shown command carries it only
+// when it is set: the default command is unchanged.
+func TestCreateClusterShowsACustomAMIOnly(t *testing.T) {
+	b, s := testBuilder()
+	sp := b.createCluster(s)
+	if strings.Contains(sp.Display, "NODE_AMI_ID") || !slices.Contains(sp.Env, "NODE_AMI_ID=") {
+		t.Errorf("default: shown %q, env %q", sp.Display, sp.Env)
+	}
+	s.NewClusterConfig.NodeAMIID = "ami-0123456789abcdef0"
+	sp = b.createCluster(s)
+	if !strings.Contains(sp.Display, "NODE_AMI_ID=ami-0123456789abcdef0 ") || !slices.Contains(sp.Env, "NODE_AMI_ID=ami-0123456789abcdef0") {
+		t.Errorf("custom AMI: shown %q, env %q", sp.Display, sp.Env)
+	}
+}
+
 // AC8.5: each setup-aws step's dry-run replay lights every row of its
 // checklist in order, because both come from the same phase list.
 func TestDryRunLinesWalkEveryPhase(t *testing.T) {

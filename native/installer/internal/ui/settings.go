@@ -65,7 +65,8 @@ func settingsFields(newCluster bool, groups []string) []field {
 		f = append(f,
 			field{kind: fText, key: "KUBERNETES_VERSION", label: "Kubernetes version", section: "New cluster"},
 			field{kind: fToggle, key: "AUTO_MODE", label: "EKS Auto Mode", section: "New cluster"},
-			field{kind: fText, key: "EKS_PUBLIC_ACCESS_CIDRS", label: "API access CIDRs", section: "New cluster"})
+			field{kind: fText, key: "EKS_PUBLIC_ACCESS_CIDRS", label: "API access CIDRs", section: "New cluster"},
+			field{kind: fText, key: "NODE_AMI_ID", label: "Node AMI", section: "New cluster"})
 	}
 	for _, c := range state.Classes {
 		f = append(f, field{kind: fClass, key: c, label: state.ClassTitle(c), section: "Sandbox classes"})
@@ -99,6 +100,7 @@ var help = map[string]string{
 	"KUBERNETES_VERSION":      "The EKS version of the new cluster. Substrate needs 1.37 or newer (the PodCertificate APIs).",
 	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the node groups. Fixed when the cluster is created. The AWS Nitro sandbox class needs it.",
 	"EKS_PUBLIC_ACCESS_CIDRS": "Address ranges allowed to reach the Kubernetes API endpoint, space-separated. Requests are still authenticated by IAM.",
+	"NODE_AMI_ID":             "The AMI of the node groups. Empty: the Amazon EKS optimized Amazon Linux 2023 AMI, which EKS picks. An AMI you bring must join the cluster with nodeadm (Amazon Linux 2023).",
 	"TAGS":                    "Space-separated key=value tags on every AWS resource the install creates. The owner tag agent-substrate-on-eks/deployment=<cluster>.<region> is always added.",
 	"SUBSTRATE_TAG":           "The Agent Substrate release to install, such as v1.0.0. An install runs one release: with the AWS Nitro sandbox class (or the mode 3 plugin) it is the fork's release that class installs, and this one is kept for a run without it.",
 	"SUBSTRATE_IMAGE_REPO":    "Where the release's images come from.",
@@ -318,6 +320,7 @@ func (m *Model) applySettings() {
 		{"KUBERNETES_VERSION", &c.KubernetesVersion}, {"AUTO_MODE", &c.AutoMode}, {"EKS_PUBLIC_ACCESS_CIDRS", &c.PublicAccessCIDRs},
 		{"SYSTEM_INSTANCE_TYPE", &c.SystemInstanceType}, {"GVISOR_INSTANCE_TYPE", &c.GVisorInstanceType}, {"MICROVM_INSTANCE_TYPE", &c.MicroVMInstanceType},
 		{"SYSTEM_NODES", &c.SystemNodes}, {"GVISOR_NODES", &c.GVisorNodes}, {"MICROVM_NODES", &c.MicroVMNodes},
+		{"NODE_AMI_ID", &c.NodeAMIID},
 		{"TAGS", &m.s.Tags}, {"SUBSTRATE_TAG", &m.s.SubstrateTag}, {"SUBSTRATE_IMAGE_REPO", &m.s.ImageRepo},
 		{classKey, &m.s.SandboxClasses}, {dbKey, &m.s.Database},
 	} {
@@ -469,6 +472,9 @@ func (m Model) settingsView() string {
 		}
 		if f.key == "SUBSTRATE_TAG" && relBy != "" {
 			shown = rel.Tag + " (fork)"
+		}
+		if f.key == "NODE_AMI_ID" && shown == "" {
+			shown = "EKS optimized AL2023"
 		}
 		if st.editing && i == st.cursor {
 			in := []rune(st.input)
