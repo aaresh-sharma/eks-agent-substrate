@@ -576,3 +576,73 @@ func TestRemoveIsModeAgnostic(t *testing.T) {
 		})
 	}
 }
+
+// A read that fails is never "none": a denied read of Auto Mode's kinds, of
+// NodePool and NodeClass ate-isolated or of the RuntimeClass stops Remove,
+// and a denied list of the nitro nodes stops Deploy, each with its error and
+// nothing deleted, applied or made after it.
+func TestFailedReadsStop(t *testing.T) {
+	const bothCRDs = "customresourcedefinition.apiextensions.k8s.io/nodepools.karpenter.sh\ncustomresourcedefinition.apiextensions.k8s.io/nodeclasses.eks.amazonaws.com\n"
+	denied := errors.New("the API server answered 403 Forbidden")
+	changes := regexp.MustCompile(`\b(delete|apply|create)\b|^(counter image|build kubectl-ate|golden)`)
+	for _, c := range []struct {
+		name    string
+		auto    bool
+		compute string
+		fail    string
+		deploy  bool
+	}{
+		{"remove under auto-mode: the NodePool kind", true, plugin.NitroAutoMode, "get crd nodepools.karpenter.sh --ignore-not-found", false},
+		{"remove under node-group: Auto Mode's kinds", true, plugin.NitroNodeGroup, "get crd nodepools.karpenter.sh nodeclasses.eks.amazonaws.com", false},
+		{"remove under node-group: NodePool and NodeClass ate-isolated", true, plugin.NitroNodeGroup, "get nodepool,nodeclass ate-isolated", false},
+		{"remove under node-group: the RuntimeClass", false, plugin.NitroNodeGroup, "get runtimeclass isolated-sandbox", false},
+		{"remove under auto-mode without Auto Mode: the RuntimeClass", false, plugin.NitroAutoMode, "get runtimeclass isolated-sandbox", false},
+		{"deploy under node-group: the nitro nodes", false, plugin.NitroNodeGroup, "get nodes -l ate.dev/pool=nitro", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake(t)
+			// What each read would answer had it not failed: the kinds, both
+			// objects, an owned RuntimeClass no Pod uses (for Deploy none, so
+			// it has one to make), and nodes that run the pool.
+			rc := ownedRC
+			if c.deploy {
+				rc = ""
+			}
+			f.out["get crd nodepools.karpenter.sh"] = []string{bothCRDs}
+			f.out["get nodepool,nodeclass ate-isolated"] = []string{"nodepool.karpenter.sh/ate-isolated\nnodeclass.eks.amazonaws.com/ate-isolated\n"}
+			f.out["get nodes -l karpenter.sh/nodepool=ate-isolated"] = []string{""}
+			f.out["get runtimeclass isolated-sandbox"] = []string{rc}
+			f.out["get pods --all-namespaces"] = []string{""}
+			f.out["get nodes -l ate.dev/pool=nitro"] = []string{nodeList(nitroNode("n1", "amd64", "2", true))}
+			f.out["-n ate-system get ds atelet"] = []string{testAtelet}
+			f.fail = map[string]error{c.fail: denied}
+			o := testOptions(t, c.auto)
+			o.NitroCompute = c.compute
+			step := remove
+			if c.deploy {
+				step = deploy
+			}
+			if err := step(context.Background(), io.Discard, o); !errors.Is(err, denied) {
+				t.Fatalf("want the denied read, got %v:\n%s", err, strings.Join(f.log, "\n"))
+			}
+			at := -1
+			for i, l := range f.log {
+				if strings.HasPrefix(l, "kubectl "+c.fail) {
+					at = i
+					break
+				}
+			}
+			if at < 0 {
+				t.Fatalf("never read %q:\n%s", c.fail, strings.Join(f.log, "\n"))
+			}
+			for _, l := range f.log[at+1:] {
+				if changes.MatchString(l) {
+					t.Errorf("ran %q after the denied read", l)
+				}
+			}
+			if c.deploy && len(f.applies) != 0 {
+				t.Errorf("applied %q", f.applies)
+			}
+		})
+	}
+}

@@ -377,6 +377,34 @@ func TestCreateClusterNitroWaitsForSandboxCapacity(t *testing.T) {
 	}
 }
 
+// A wait that gets only blips times out with the last one, and blames
+// neither the AMI nor the nodes, which it never saw; a blip before an answer
+// is forgotten, and the timeout names what that answer showed.
+func TestCreateClusterNitroWaitTimesOutOnBlips(t *testing.T) {
+	shortNitroWait(t)
+	blip := &kubeError{Status: http.StatusServiceUnavailable, err: fmt.Errorf("list the nodes of cluster demo: the Kubernetes API answered 503 Service Unavailable")}
+	f := nitroFake()
+	f.kubeDown = blip
+	err := clusterTestRun(t, f, false, withNitro).run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "timed out") ||
+		!strings.Contains(err.Error(), "the last list of the nodes failed: list the nodes of cluster demo: the Kubernetes API answered 503 Service Unavailable") ||
+		strings.Contains(err.Error(), "NITRO_AMI_ID") || strings.Contains(err.Error(), "have not all joined") {
+		t.Errorf("want a timeout with the last failed list, got %v", err)
+	}
+	if n := countOf(f.reads, "ListNodes"); n < 2 {
+		t.Errorf("stopped after %d lists", n)
+	}
+
+	f = nitroFake()
+	f.nitroAlloc = ""
+	f.kubeErrs = []error{blip}
+	err = clusterTestRun(t, f, false, withNitro).run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "node ip-nitro-0 has no allocatable eks.amazonaws.com/nitro-sandbox") ||
+		!strings.Contains(err.Error(), "NITRO_AMI_ID must be a Nitro Sandbox AMI") || strings.Contains(err.Error(), "the last list") {
+		t.Errorf("want a timeout naming the last answer, got %v", err)
+	}
+}
+
 // An owned nitro template without Nitro Enclaves (made by hand, or by an
 // older run) gets a version with them: the drift check compares them.
 func TestCreateClusterNitroTemplateDrift(t *testing.T) {
