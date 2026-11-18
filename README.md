@@ -363,15 +363,17 @@ builds the counter image for those nodes' architecture and puts
 `counter-iso` on them. It reads the RuntimeClass and the nodes before it
 creates or applies anything, so a refusal leaves the cluster as it was.
 
-Removing `mode3-iso` does not trust `NITRO_COMPUTE`, which the cluster does
-not record. Whichever value the run has, it deletes the pool and its counter
+Removing `mode3-iso` follows the run's `NITRO_COMPUTE`, which the cluster
+does not record. Whichever value the run has, it deletes the pool and its counter
 image tag, `atelet-iso`, the `atelet-iso-credential-provider` ConfigMap, and
 the RuntimeClass only when it carries those labels and no Pod uses it. Only
 a run with `auto-mode` deletes NodePool and NodeClass `ate-isolated`. With
 `node-group` the installer never makes them, and objects of those names may
 belong to someone else, so a run with `node-group` leaves them and prints
 the ones it found. To delete the ones an Auto Mode deploy made, remove
-`mode3-iso` again with `--nitro-compute auto-mode`. On an Auto Mode cluster
+`mode3-iso` again with `--plugin-action remove --plugins mode3-iso
+--nitro-compute auto-mode`: name the plugin, since the first removal took it
+out of the cluster's record. On an Auto Mode cluster
 with `auto-mode` it does not read the RuntimeClass, which is Auto Mode's own
 there.
 
