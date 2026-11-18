@@ -190,13 +190,17 @@ type fake struct {
 	stdin map[string]string
 	// applies is the stdin of every `kubectl apply -f -`, in order.
 	applies []string
+	// creates is the stdin of every `kubectl create -f -`, in order.
+	creates []string
 	tmpls   map[string]string
 	// actors are the actors the ate API holds, each running on pod-1.
 	actors map[string]bool
 	// deleted are the counter image tags Remove deleted.
 	deleted []string
-	// fail fails each kubectl call whose arguments start with a key.
-	fail map[string]error
+	// fail fails each kubectl call whose arguments start with a key, after
+	// writing stderr's text for that key, as kubectl writes its error.
+	fail   map[string]error
+	stderr map[string]string
 }
 
 // testAppliedPool is NodePool ate-isolated as the API server returns it,
@@ -235,13 +239,17 @@ func newFake(t *testing.T) *fake {
 		f.log = append(f.log, "kubectl "+args)
 		for k, err := range f.fail {
 			if strings.HasPrefix(args, k) {
+				io.WriteString(w, f.stderr[k])
 				return err
 			}
 		}
 		if c.Stdin != nil {
 			f.stdin[args] = string(c.Stdin)
-			if args == "apply -f -" {
+			switch args {
+			case "apply -f -":
 				f.applies = append(f.applies, string(c.Stdin))
+			case "create -f -":
+				f.creates = append(f.creates, string(c.Stdin))
 			}
 		}
 		for k, v := range f.out {

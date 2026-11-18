@@ -161,24 +161,25 @@ func TestNodeGroupPool(t *testing.T) {
 }
 
 // The RuntimeClass decisions: none is made, with the spec and the
-// installer's labels, but only by makeRuntimeClass (the check changes
-// nothing); Auto Mode's (the same spec) is used as it is; one that differs
-// in handler, node selector or overhead is refused, naming the difference,
-// before anything else; a failed read is never "none".
+// installer's labels, but only by makeRuntimeClass, with create, never
+// apply (the check changes nothing); Auto Mode's (the same spec) is used as
+// it is; one that differs in handler, node selector or overhead is refused,
+// naming the difference, before anything else; a failed read is never
+// "none".
 func TestRuntimeClassDecisions(t *testing.T) {
 	f := newFake(t)
 	o := testOptionsNodeGroup(t)
 	m, err := checkRuntimeClass(context.Background(), io.Discard, o)
-	if err != nil || m == nil || len(f.applies) != 0 {
-		t.Fatalf("none: manifest %s, %v, applies %q", m, err, f.applies)
+	if err != nil || m == nil || len(f.applies) != 0 || len(f.creates) != 0 {
+		t.Fatalf("none: manifest %s, %v, applies %q, creates %q", m, err, f.applies, f.creates)
 	}
 	if err := makeRuntimeClass(context.Background(), io.Discard, o, m); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.applies) != 1 {
-		t.Fatalf("applies %q", f.applies)
+	if len(f.creates) != 1 || len(f.applies) != 0 || f.has("kubectl create -f -") != nil {
+		t.Fatalf("creates %q, applies %q", f.creates, f.applies)
 	}
-	rc := decode(t, []byte(f.applies[0]))
+	rc := decode(t, []byte(f.creates[0]))
 	meta, _ := json.Marshal(rc["metadata"])
 	over, _ := json.Marshal(rc["overhead"])
 	sched, _ := json.Marshal(rc["scheduling"])
@@ -186,9 +187,9 @@ func TestRuntimeClassDecisions(t *testing.T) {
 		string(meta) != `{"labels":{"agent-substrate-on-eks/deployment":"c1.us-east-1","app.kubernetes.io/managed-by":"substrate-eks"},"name":"isolated-sandbox"}` ||
 		string(over) != `{"podFixed":{"eks.amazonaws.com/nitro-sandbox":"1","memory":"256Mi"}}` ||
 		string(sched) != `{"nodeSelector":{"eks.amazonaws.com/nitro-sandbox":"true"}}` {
-		t.Errorf("made RuntimeClass %s", f.applies[0])
+		t.Errorf("made RuntimeClass %s", f.creates[0])
 	}
-	if diff, err := RuntimeClassDiff([]byte(f.applies[0])); err != nil || len(diff) != 0 {
+	if diff, err := RuntimeClassDiff([]byte(f.creates[0])); err != nil || len(diff) != 0 {
 		t.Errorf("the made one differs from the spec: %v %v", diff, err)
 	}
 
@@ -198,8 +199,8 @@ func TestRuntimeClassDecisions(t *testing.T) {
 	if err == nil {
 		err = makeRuntimeClass(context.Background(), io.Discard, testOptionsNodeGroup(t), m)
 	}
-	if err != nil || m != nil || len(f.applies) != 0 {
-		t.Errorf("Auto Mode's: %v, applies %q", err, f.applies)
+	if err != nil || m != nil || len(f.applies) != 0 || len(f.creates) != 0 {
+		t.Errorf("Auto Mode's: %v, applies %q, creates %q", err, f.applies, f.creates)
 	}
 
 	for want, rc := range map[string]string{
@@ -217,15 +218,94 @@ func TestRuntimeClassDecisions(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "left as it is") {
 			t.Errorf("want %q, got %v", want, err)
 		}
-		if len(f.applies) != 0 || f.has("kubectl get nodes") == nil {
-			t.Errorf("%s: went on: applies %q, log %q", want, f.applies, f.log)
+		if len(f.applies) != 0 || len(f.creates) != 0 || f.has("kubectl get nodes") == nil {
+			t.Errorf("%s: went on: applies %q, creates %q, log %q", want, f.applies, f.creates, f.log)
 		}
 	}
 
 	f = newFake(t)
 	f.fail = map[string]error{"get runtimeclass": errors.New("forbidden")}
-	if m, err := checkRuntimeClass(context.Background(), io.Discard, testOptionsNodeGroup(t)); err == nil || !strings.Contains(err.Error(), "forbidden") || m != nil || len(f.applies) != 0 {
-		t.Errorf("a denied read: %v, applies %q", err, f.applies)
+	if m, err := checkRuntimeClass(context.Background(), io.Discard, testOptionsNodeGroup(t)); err == nil || !strings.Contains(err.Error(), "forbidden") || m != nil || len(f.applies) != 0 || len(f.creates) != 0 {
+		t.Errorf("a denied read: %v, applies %q, creates %q", err, f.applies, f.creates)
+	}
+}
+
+// kubectl's answer when the RuntimeClass was made between the check and the
+// create, as it writes it to stderr; its error is only the exit status.
+const (
+	rcAlreadyExists = `Error from server (AlreadyExists): error when creating "STDIN": runtimeclasses.node.k8s.io "isolated-sandbox" already exists` + "\n"
+	rcForbidden     = `Error from server (Forbidden): error when creating "STDIN": runtimeclasses.node.k8s.io is forbidden` + "\n"
+)
+
+// A RuntimeClass made by another between the check and the create is never
+// changed: the create fails with AlreadyExists, and the one there is read
+// again and used when it has the Nitro sandbox's spec, or refused, naming
+// the difference, before anything else is applied. Another create failure
+// stops Deploy as it is, with no second read, and one gone again by then is
+// an error too.
+func TestRuntimeClassMadeMeanwhile(t *testing.T) {
+	exit1 := errors.New("kubectl --kubeconfig /kc: exit status 1")
+	for _, c := range []struct {
+		name, stderr, racer, want string
+	}{
+		{"the Nitro sandbox's", rcAlreadyExists, autoModeRC, ""},
+		{"another handler", rcAlreadyExists, strings.Replace(autoModeRC, `"handler":"isolated-sandbox"`, `"handler":"kata"`, 1), `handler "kata", not "isolated-sandbox"`},
+		{"another overhead", rcAlreadyExists, strings.Replace(autoModeRC, `"256Mi"`, `"512Mi"`, 1), "overhead.podFixed eks.amazonaws.com/nitro-sandbox=1,memory=512Mi"},
+		{"gone again", rcAlreadyExists, "", "is gone again"},
+		{"denied, not AlreadyExists", rcForbidden, autoModeRC, "exit status 1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake(t)
+			// None at the check, the racer's from then on.
+			f.out["get runtimeclass isolated-sandbox"] = []string{"", c.racer}
+			f.out["get nodes -l ate.dev/pool=nitro"] = []string{nodeList(nitroNode("n1", "amd64", "2", true))}
+			f.out["-n ate-system get ds atelet"] = []string{testAtelet}
+			f.fail = map[string]error{"create -f -": exit1}
+			f.stderr = map[string]string{"create -f -": c.stderr}
+			var out bytes.Buffer
+			err := deploy(context.Background(), &out, testOptionsNodeGroup(t))
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("%v\n%s", err, out.String())
+				}
+				if err := f.has("kubectl get runtimeclass isolated-sandbox --ignore-not-found -o json", "kubectl create -f -",
+					"kubectl get runtimeclass isolated-sandbox --ignore-not-found -o json", "kubectl -n ate-system get ds atelet"); err != nil {
+					t.Error(err)
+				}
+				if !strings.Contains(out.String(), "was made since it was read; checking that one\nRuntimeClass isolated-sandbox -> handler isolated-sandbox, the Nitro sandbox's") {
+					t.Errorf("output:\n%s", out.String())
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), c.want) {
+					t.Fatalf("want %q, got %v", c.want, err)
+				}
+				if len(f.applies) != 0 || f.has("kubectl -n ate-system get ds atelet") == nil {
+					t.Errorf("went on: applies %q, log %q", f.applies, f.log)
+				}
+			}
+			for _, a := range f.applies {
+				if strings.Contains(a, `"kind":"RuntimeClass"`) {
+					t.Errorf("applied the RuntimeClass: %s", a)
+				}
+			}
+			reads := 0
+			for _, l := range f.log {
+				if strings.HasPrefix(l, "kubectl get runtimeclass") {
+					reads++
+				}
+				if strings.Contains(l, "runtimeclass") && !strings.HasPrefix(l, "kubectl get runtimeclass") {
+					t.Errorf("wrote the RuntimeClass: %q", l)
+				}
+			}
+			// Read again only on AlreadyExists.
+			want := 2
+			if c.stderr == rcForbidden {
+				want = 1
+			}
+			if reads != want {
+				t.Errorf("read the RuntimeClass %d times, want %d:\n%s", reads, want, strings.Join(f.log, "\n"))
+			}
+		})
 	}
 }
 
@@ -343,7 +423,7 @@ func TestDeployNodeGroup(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	if err := f.has("kubectl get runtimeclass isolated-sandbox --ignore-not-found -o json",
-		"kubectl get nodes -l ate.dev/pool=nitro -o json", "kubectl apply -f -", "kubectl -n ate-system get ds atelet -o json", "kubectl apply -f -",
+		"kubectl get nodes -l ate.dev/pool=nitro -o json", "kubectl create -f -", "kubectl -n ate-system get ds atelet -o json", "kubectl apply -f -",
 		"build kubectl-ate", "counter image arm64 mode3-iso-"+mode3.Tag, "kubectl apply -f -", "ate create atespace ate-demo-counter-iso",
 		"ate get actor-template counter-iso", "kubectl -n ate-demo-counter-iso rollout status deploy/counter-iso --timeout=10m",
 		"kubectl -n ate-system rollout status ds/atelet-iso --timeout=5m", "ate create actor-template -f", "golden"); err != nil {
@@ -356,13 +436,13 @@ func TestDeployNodeGroup(t *testing.T) {
 			}
 		}
 	}
-	if len(f.applies) != 3 || !strings.Contains(f.applies[0], `"kind":"RuntimeClass"`) || !strings.Contains(f.applies[1], `"name":"atelet-iso"`) {
-		t.Fatalf("applies:\n%s", strings.Join(f.applies, "\n"))
+	if len(f.creates) != 1 || !strings.Contains(f.creates[0], `"kind":"RuntimeClass"`) || len(f.applies) != 2 || !strings.Contains(f.applies[0], `"name":"atelet-iso"`) {
+		t.Fatalf("creates:\n%s\napplies:\n%s", strings.Join(f.creates, "\n"), strings.Join(f.applies, "\n"))
 	}
-	if !strings.Contains(f.applies[1], `"values":["nitro"]`) || strings.Contains(f.applies[1], CredentialProviderConfigMap) {
-		t.Errorf("atelet-iso %s", f.applies[1])
+	if !strings.Contains(f.applies[0], `"values":["nitro"]`) || strings.Contains(f.applies[0], CredentialProviderConfigMap) {
+		t.Errorf("atelet-iso %s", f.applies[0])
 	}
-	pool := f.applies[2]
+	pool := f.applies[1]
 	if !strings.Contains(pool, "      ate.dev/pool: nitro\n") || !strings.Contains(pool, "      value: nitro\n") ||
 		strings.Contains(pool, "ate.dev/pool: isolated") || strings.Contains(pool, "value: isolated") ||
 		!strings.Contains(pool, "runtimeClassName: isolated-sandbox") ||
@@ -383,8 +463,8 @@ func TestDeployNodeGroup(t *testing.T) {
 		f.out["get nodes -l ate.dev/pool=nitro"] = []string{nodeList(nitroNode("n1", "amd64", "1", true))}
 		out.Reset()
 		err := deploy(context.Background(), &out, testOptionsNodeGroup(t))
-		if err == nil || !strings.Contains(err.Error(), "1 allocatable eks.amazonaws.com/nitro-sandbox in all") || len(f.applies) != 0 ||
-			f.has("kubectl apply") == nil || f.has("kubectl -n ate-system get ds atelet") == nil || strings.Contains(out.String(), "making it") {
+		if err == nil || !strings.Contains(err.Error(), "1 allocatable eks.amazonaws.com/nitro-sandbox in all") || len(f.applies) != 0 || len(f.creates) != 0 ||
+			f.has("kubectl apply") == nil || f.has("kubectl create") == nil || f.has("kubectl -n ate-system get ds atelet") == nil || strings.Contains(out.String(), "making it") {
 			t.Errorf("%s, too little capacity: %v, applies %d, log %q", name, err, len(f.applies), f.log)
 		}
 	}
@@ -512,10 +592,13 @@ func TestRemoveNodeGroup(t *testing.T) {
 // Remove does not trust NITRO_COMPUTE, which is not recorded: a node-group
 // install removed under auto-mode (on a cluster without Auto Mode) loses its
 // RuntimeClass, and an auto-mode install removed under node-group (on an
-// Auto Mode cluster) loses its NodePool, NodeClass and ConfigMap. Under
-// node-group, a cluster that runs its own Karpenter (the NodePool kind, no
-// NodeClass kind) or has neither object is left alone; under auto-mode on
-// an Auto Mode cluster no RuntimeClass is read, as before.
+// Auto Mode cluster) loses its ConfigMap. Under node-group, NodePool and
+// NodeClass ate-isolated are never deleted, whoever made them: those there
+// are named, with the auto-mode remove that deletes them, and a cluster that
+// runs its own Karpenter (the NodePool kind, no NodeClass kind) or has
+// neither object gets no such line. Under auto-mode on an Auto Mode cluster
+// the NodePool and NodeClass are deleted and no RuntimeClass is read, as
+// before.
 func TestRemoveIsModeAgnostic(t *testing.T) {
 	const bothCRDs = "customresourcedefinition.apiextensions.k8s.io/nodepools.karpenter.sh\ncustomresourcedefinition.apiextensions.k8s.io/nodeclasses.eks.amazonaws.com\n"
 	for _, c := range []struct {
@@ -525,14 +608,17 @@ func TestRemoveIsModeAgnostic(t *testing.T) {
 		crds, objs    string
 		rcRead, rcDel bool
 		nodePool      bool
+		// left is what the "Left as they are" line names; "" is no line.
+		left string
 	}{
-		{"node-group install, removed under auto-mode", false, plugin.NitroAutoMode, "", "", true, true, false},
-		{"node-group install, removed with NITRO_COMPUTE unset", false, "", "", "", true, true, false},
-		{"auto-mode install, removed under node-group", true, plugin.NitroNodeGroup, bothCRDs, "nodepool.karpenter.sh/ate-isolated\nnodeclass.eks.amazonaws.com/ate-isolated\n", true, false, true},
-		{"node-group, only its NodeClass left", true, plugin.NitroNodeGroup, bothCRDs, "nodeclass.eks.amazonaws.com/ate-isolated\n", true, false, true},
-		{"node-group, Auto Mode, nothing left", true, plugin.NitroNodeGroup, bothCRDs, "", true, false, false},
-		{"node-group, its own Karpenter", false, plugin.NitroNodeGroup, "customresourcedefinition.apiextensions.k8s.io/nodepools.karpenter.sh\n", "", true, true, false},
-		{"auto-mode on Auto Mode", true, plugin.NitroAutoMode, "crd/nodepools.karpenter.sh\n", "", false, false, true},
+		{"node-group install, removed under auto-mode", false, plugin.NitroAutoMode, "", "", true, true, false, ""},
+		{"node-group install, removed with NITRO_COMPUTE unset", false, "", "", "", true, true, false, ""},
+		{"auto-mode install, removed under node-group", true, plugin.NitroNodeGroup, bothCRDs, "nodepool.karpenter.sh/ate-isolated\nnodeclass.eks.amazonaws.com/ate-isolated\n", true, false, false,
+			"nodepool.karpenter.sh/ate-isolated, nodeclass.eks.amazonaws.com/ate-isolated"},
+		{"node-group, only a NodeClass there", true, plugin.NitroNodeGroup, bothCRDs, "nodeclass.eks.amazonaws.com/ate-isolated\n", true, false, false, "nodeclass.eks.amazonaws.com/ate-isolated"},
+		{"node-group, Auto Mode, neither there", true, plugin.NitroNodeGroup, bothCRDs, "", true, false, false, ""},
+		{"node-group, its own Karpenter", false, plugin.NitroNodeGroup, "customresourcedefinition.apiextensions.k8s.io/nodepools.karpenter.sh\n", "", true, true, false, ""},
+		{"auto-mode on Auto Mode", true, plugin.NitroAutoMode, "crd/nodepools.karpenter.sh\n", "", false, false, true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFake(t)
@@ -573,14 +659,48 @@ func TestRemoveIsModeAgnostic(t *testing.T) {
 			if read := f.has("kubectl get nodepool,nodeclass ate-isolated --ignore-not-found -o name") == nil; read != (c.compute == plugin.NitroNodeGroup && c.crds == bothCRDs) {
 				t.Errorf("read NodePool and NodeClass ate-isolated %v:\n%s", read, strings.Join(f.log, "\n"))
 			}
+			if line := "Left as they are: " + c.left + ". " + NodePoolLeftLine + "\n"; c.left != "" && !strings.Contains(out.String(), line) ||
+				c.left == "" && strings.Contains(out.String(), "Left as they are") {
+				t.Errorf("want the line for %q:\n%s", c.left, out.String())
+			}
 		})
+	}
+
+	// Under node-group, the NodePool and NodeClass left do not stop the
+	// rest: the installer's unused RuntimeClass is deleted after the line,
+	// and no node is waited for.
+	f := newFake(t)
+	f.out["get crd nodepools.karpenter.sh"] = []string{bothCRDs}
+	f.out["get nodepool,nodeclass ate-isolated"] = []string{"nodepool.karpenter.sh/ate-isolated\nnodeclass.eks.amazonaws.com/ate-isolated\n"}
+	f.out["get runtimeclass isolated-sandbox"] = []string{ownedRC}
+	f.out["get pods --all-namespaces"] = []string{""}
+	o := testOptions(t, true)
+	o.NitroCompute = plugin.NitroNodeGroup
+	var out bytes.Buffer
+	if err := remove(context.Background(), &out, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.has("kubectl get crd nodepools.karpenter.sh nodeclasses.eks.amazonaws.com --ignore-not-found -o name",
+		"kubectl get nodepool,nodeclass ate-isolated --ignore-not-found -o name", "kubectl get runtimeclass isolated-sandbox",
+		"kubectl delete runtimeclass isolated-sandbox --ignore-not-found"); err != nil {
+		t.Error(err)
+	}
+	if !strings.Contains(out.String(), NodePoolLeftLine+"\nDeleting RuntimeClass isolated-sandbox\n") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	for _, l := range f.log {
+		if strings.Contains(l, "delete nodepool") || strings.Contains(l, "delete nodeclass") || strings.Contains(l, "get nodes") {
+			t.Errorf("node-group remove ran %q", l)
+		}
 	}
 }
 
 // A read that fails is never "none": a denied read of Auto Mode's kinds, of
 // NodePool and NodeClass ate-isolated or of the RuntimeClass stops Remove,
 // and a denied list of the nitro nodes stops Deploy, each with its error and
-// nothing deleted, applied or made after it.
+// nothing deleted, applied or made after it. Under node-group, Remove reads
+// the NodePool and NodeClass only to name the ones it leaves, and a failed
+// read of them still stops it, before the RuntimeClass.
 func TestFailedReadsStop(t *testing.T) {
 	const bothCRDs = "customresourcedefinition.apiextensions.k8s.io/nodepools.karpenter.sh\ncustomresourcedefinition.apiextensions.k8s.io/nodeclasses.eks.amazonaws.com\n"
 	denied := errors.New("the API server answered 403 Forbidden")
@@ -640,8 +760,8 @@ func TestFailedReadsStop(t *testing.T) {
 					t.Errorf("ran %q after the denied read", l)
 				}
 			}
-			if c.deploy && len(f.applies) != 0 {
-				t.Errorf("applied %q", f.applies)
+			if c.deploy && (len(f.applies) != 0 || len(f.creates) != 0) {
+				t.Errorf("applied %q, created %q", f.applies, f.creates)
 			}
 		})
 	}

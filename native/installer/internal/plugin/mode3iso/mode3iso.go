@@ -24,7 +24,7 @@
 //     then the NodePool, whose nodes Auto Mode drains and terminates; it
 //     waits for them, then deletes the NodeClass. It is one Remove for
 //     both NITRO_COMPUTE values (remove), since a deploy may have run under
-//     either.
+//     either, but only auto-mode's deletes the NodePool and NodeClass.
 //
 // It makes no AWS resources of its own (Auto Mode owns the nodes, and the
 // counter repository is the deployment's), so it has no setup-aws half.
@@ -312,11 +312,13 @@ var deleteImage = mode3.DeleteCounterImage
 // the run names: NITRO_COMPUTE is not recorded with the plugin, and a deploy
 // under one after the other leaves the first one's objects. So it deletes
 // the counter pool and its image tag, atelet-iso, the credential provider
-// ConfigMap and NodePool ate-isolated with its NodeClass (auto-mode's), and
-// RuntimeClass isolated-sandbox when the installer made it and no Pod uses
-// it (node-group's, removeRuntimeClass). Under auto-mode on an Auto Mode
-// cluster it reads no RuntimeClass, as before NITRO_COMPUTE: there it is
-// Auto Mode's own.
+// ConfigMap, and RuntimeClass isolated-sandbox when the installer made it
+// and no Pod uses it (node-group's, removeRuntimeClass). Only under
+// auto-mode does it delete NodePool ate-isolated with its NodeClass, as
+// before NITRO_COMPUTE; under node-group it leaves them (nodePoolLeft):
+// node-group never makes them, and ones of that name may be another's.
+// Under auto-mode on an Auto Mode cluster it reads no RuntimeClass, as
+// before NITRO_COMPUTE: there it is Auto Mode's own.
 func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := Iso.Remove(ctx, w, o); err != nil {
 		return err
@@ -332,11 +334,18 @@ func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 	if err := plugin.Kubectl(ctx, w, o, providerManifest, nil, "delete", "-f", "-", "--ignore-not-found"); err != nil {
 		return err
 	}
-	pool, err := nodePoolMade(ctx, w, o)
-	if err != nil {
+	if nodeGroupMode(o) {
+		if err := nodePoolLeft(ctx, w, o); err != nil {
+			return err
+		}
+		return removeRuntimeClass(ctx, w, o)
+	}
+	// Without Auto Mode there is no NodePool kind, and nothing to delete.
+	var crd bytes.Buffer
+	if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "--ignore-not-found", "-o", "name"); err != nil {
 		return err
 	}
-	if pool {
+	if strings.TrimSpace(crd.String()) != "" {
 		fmt.Fprintln(w, "Deleting NodePool "+NodePoolName+"; Auto Mode drains and removes its nodes")
 		if err := plugin.Kubectl(ctx, w, o, nil, nil, "delete", "nodepool", NodePoolName, "--ignore-not-found", "--wait=true", "--timeout=10m"); err != nil {
 			return err
@@ -350,37 +359,37 @@ func remove(ctx context.Context, w io.Writer, o plugin.Options) error {
 			return err
 		}
 	}
-	if o.AutoMode && !nodeGroupMode(o) {
+	if o.AutoMode {
 		return nil
 	}
 	return removeRuntimeClass(ctx, w, o)
 }
 
-// nodePoolMade reports whether remove deletes NodePool ate-isolated and its
-// NodeClass. Under auto-mode, as before NITRO_COMPUTE: when the cluster has
-// the NodePool kind (without Auto Mode there is none, and nothing to
-// delete). Under node-group, only an auto-mode deploy made them: when the
-// cluster has both of Auto Mode's kinds (one that runs its own Karpenter has
-// NodePools and no NodeClass kind) and one of the two objects.
-func nodePoolMade(ctx context.Context, w io.Writer, o plugin.Options) (bool, error) {
+// NodePoolLeftLine ends the line node-group's Remove prints when NodePool
+// or NodeClass ate-isolated is on the cluster.
+const NodePoolLeftLine = "NITRO_COMPUTE=node-group never makes them, so it leaves them: a remove with NITRO_COMPUTE=auto-mode deletes the ones an Auto Mode deploy made"
+
+// nodePoolLeft is node-group's Remove for NodePool and NodeClass
+// ate-isolated: it deletes neither, and says which of them it leaves. It
+// reads them only on a cluster with both of Auto Mode's kinds (one that runs
+// its own Karpenter has NodePools and no NodeClass kind). A failed read stops
+// Remove, as every read does, though nothing is deleted on what it answers.
+func nodePoolLeft(ctx context.Context, w io.Writer, o plugin.Options) error {
 	var crd bytes.Buffer
-	if !nodeGroupMode(o) {
-		if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "--ignore-not-found", "-o", "name"); err != nil {
-			return false, err
-		}
-		return strings.TrimSpace(crd.String()) != "", nil
-	}
 	if err := plugin.Kubectl(ctx, w, o, nil, &crd, "get", "crd", "nodepools.karpenter.sh", "nodeclasses.eks.amazonaws.com", "--ignore-not-found", "-o", "name"); err != nil {
-		return false, err
+		return err
 	}
 	if len(strings.Fields(crd.String())) < 2 {
-		return false, nil
+		return nil
 	}
 	var objs bytes.Buffer
 	if err := plugin.Kubectl(ctx, w, o, nil, &objs, "get", "nodepool,nodeclass", NodePoolName, "--ignore-not-found", "-o", "name"); err != nil {
-		return false, err
+		return err
 	}
-	return strings.TrimSpace(objs.String()) != "", nil
+	if left := strings.Fields(objs.String()); len(left) > 0 {
+		fmt.Fprintf(w, "Left as they are: %s. %s\n", strings.Join(left, ", "), NodePoolLeftLine)
+	}
+	return nil
 }
 
 // waitNoNodes waits until no node carries the NodePool's label.

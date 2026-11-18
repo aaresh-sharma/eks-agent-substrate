@@ -9,8 +9,8 @@ package mode3iso
 // isolated-sandbox handler and advertises eks.amazonaws.com/nitro-sandbox.
 //
 //   - Deploy: RuntimeClass isolated-sandbox, the one EKS Auto Mode defines,
-//     made and labeled as the installer's when the cluster has none, and a
-//     refusal when it has another; nodes labeled ate.dev/pool=nitro whose
+//     created and labeled as the installer's when the cluster has none, and
+//     a refusal when it has another; nodes labeled ate.dev/pool=nitro whose
 //     Nitro sandbox capacity covers counter-iso's worker Pods; atelet-iso
 //     from atelet, on those nodes, with atelet's AL2023 volumes; the counter
 //     image for their architecture; and counter-iso on those nodes. No
@@ -18,10 +18,11 @@ package mode3iso
 //   - Verify: as on Auto Mode, with the workers on nodes labeled
 //     ate.dev/pool=nitro.
 //   - Remove (mode3iso.go's, whichever NITRO_COMPUTE the run names): the
-//     pool and its counter image tag, atelet-iso, what an auto-mode deploy
-//     may have left (the ConfigMap, NodePool ate-isolated and its
-//     NodeClass), and the RuntimeClass when it carries the installer's
-//     labels and no Pod uses it.
+//     pool and its counter image tag, atelet-iso, the ConfigMap an
+//     auto-mode deploy may have left, and the RuntimeClass when it carries
+//     the installer's labels and no Pod uses it. NodePool and NodeClass
+//     ate-isolated it leaves, saying so: only a remove under auto-mode
+//     deletes them.
 //
 //	https://docs.aws.amazon.com/eks/latest/userguide/sandboxing-ami-create-update.html
 
@@ -152,8 +153,7 @@ func getRuntimeClass(ctx context.Context, w io.Writer, o plugin.Options) ([]byte
 // checkRuntimeClass reads RuntimeClass isolated-sandbox and decides,
 // changing nothing: the one the Nitro sandbox needs is used (manifest is
 // nil), none is to be made (manifest is its, which makeRuntimeClass
-// applies), and any other is refused, naming each difference: it is never
-// changed.
+// creates), and any other is refused (useRuntimeClass).
 func checkRuntimeClass(ctx context.Context, w io.Writer, o plugin.Options) (manifest []byte, err error) {
 	have, err := getRuntimeClass(ctx, w, o)
 	if err != nil {
@@ -162,25 +162,48 @@ func checkRuntimeClass(ctx context.Context, w io.Writer, o plugin.Options) (mani
 	if have == nil {
 		return RuntimeClassManifest(o.Cluster + "." + o.Region)
 	}
+	return nil, useRuntimeClass(w, have)
+}
+
+// useRuntimeClass takes have, a RuntimeClass isolated-sandbox on the
+// cluster, as it is when it is the one the Nitro sandbox needs, and refuses
+// any other, naming each difference: it is never changed.
+func useRuntimeClass(w io.Writer, have []byte) error {
 	diff, err := RuntimeClassDiff(have)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(diff) > 0 {
-		return nil, fmt.Errorf("RuntimeClass %s exists with %s; the Nitro sandbox needs handler %s, scheduling.nodeSelector %s and overhead.podFixed %s. It is left as it is: delete it, or make it so, and deploy again",
+		return fmt.Errorf("RuntimeClass %s exists with %s; the Nitro sandbox needs handler %s, scheduling.nodeSelector %s and overhead.podFixed %s. It is left as it is: delete it, or make it so, and deploy again",
 			RuntimeClass, strings.Join(diff, "; "), RuntimeClass, fmtMap(wantNodeSelector), fmtMap(wantOverhead))
 	}
 	fmt.Fprintln(w, "RuntimeClass "+RuntimeClass+" -> handler "+RuntimeClass+", the Nitro sandbox's")
-	return nil, nil
+	return nil
 }
 
-// makeRuntimeClass applies m, checkRuntimeClass's manifest, when it is one.
+// makeRuntimeClass creates m, checkRuntimeClass's manifest, when it is one.
+// It creates and never applies, so one made since the check is not changed:
+// on AlreadyExists (kubectl says so on stderr, which reaches w) it reads
+// that one again and uses or refuses it as checkRuntimeClass would.
 func makeRuntimeClass(ctx context.Context, w io.Writer, o plugin.Options, m []byte) error {
 	if m == nil {
 		return nil
 	}
 	fmt.Fprintln(w, "RuntimeClass "+RuntimeClass+": none on the cluster; making it (handler "+RuntimeClass+", on nodes "+fmtMap(wantNodeSelector)+")")
-	return plugin.Kubectl(ctx, w, o, m, nil, "apply", "-f", "-")
+	var said bytes.Buffer
+	err := plugin.Kubectl(ctx, io.MultiWriter(w, &said), o, m, nil, "create", "-f", "-")
+	if err == nil || !strings.Contains(said.String(), "(AlreadyExists)") {
+		return err
+	}
+	have, rerr := getRuntimeClass(ctx, w, o)
+	if rerr != nil {
+		return rerr
+	}
+	if have == nil {
+		return fmt.Errorf("RuntimeClass %s was made by another while this deploy made it, and is gone again: deploy again: %w", RuntimeClass, err)
+	}
+	fmt.Fprintln(w, "RuntimeClass "+RuntimeClass+" was made since it was read; checking that one")
+	return useRuntimeClass(w, have)
 }
 
 // removeRuntimeClass deletes RuntimeClass isolated-sandbox when the
@@ -356,9 +379,10 @@ func iso(o plugin.Options) (mode3.Counter, error) {
 
 // deployNodeGroup is deploy on the nitro node group. It makes no AWS call:
 // the nodes are the deployment's node group's, tagged by its launch
-// template. It reads the RuntimeClass and the nodes before it applies
-// anything, so a refusal of either leaves the cluster as it was: Remove
-// does not run for a plugin whose deploy failed, which is never recorded.
+// template. It reads the RuntimeClass and the nodes before it creates or
+// applies anything, so a refusal of either leaves the cluster as it was:
+// Remove does not run for a plugin whose deploy failed, which is never
+// recorded.
 func deployNodeGroup(ctx context.Context, w io.Writer, o plugin.Options, tree string) error {
 	pool, err := iso(o)
 	if err != nil {

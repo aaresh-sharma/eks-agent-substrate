@@ -347,26 +347,33 @@ AMI.
 `mode3-iso` then makes no NodePool and no NodeClass. It uses RuntimeClass
 `isolated-sandbox` when the cluster has the one Auto Mode defines (handler
 `isolated-sandbox`, node selector `eks.amazonaws.com/nitro-sandbox: "true"`,
-overhead of 256Mi and one `eks.amazonaws.com/nitro-sandbox`), makes it with
-the labels `app.kubernetes.io/managed-by: substrate-eks` and
+overhead of 256Mi and one `eks.amazonaws.com/nitro-sandbox`), creates it
+with the labels `app.kubernetes.io/managed-by: substrate-eks` and
 `agent-substrate-on-eks/deployment: <cluster>.<region>` when there is none,
 and stops, naming the difference, when one with another spec exists: it
-never changes an object it does not own. It requires nodes labeled
+never changes an object it does not own. It creates the RuntimeClass with
+`kubectl create`, never `kubectl apply`, so one that someone makes between
+the read and the create is not changed: it reads that one and uses it or
+stops, as it would have. It requires nodes labeled
 `ate.dev/pool=nitro` with enough Nitro sandbox capacity for `counter-iso`'s
 two worker Pods, counting only the nodes labeled
 `eks.amazonaws.com/nitro-sandbox=true` (the RuntimeClass's node selector),
 runs `atelet-iso` there with atelet's own AL2023 credential provider paths,
 builds the counter image for those nodes' architecture and puts
 `counter-iso` on them. It reads the RuntimeClass and the nodes before it
-applies anything, so a refusal leaves the cluster as it was.
+creates or applies anything, so a refusal leaves the cluster as it was.
 
 Removing `mode3-iso` does not trust `NITRO_COMPUTE`, which the cluster does
 not record. Whichever value the run has, it deletes the pool and its counter
-image tag, `atelet-iso`, the `atelet-iso-credential-provider` ConfigMap,
-NodePool and NodeClass `ate-isolated` when an Auto Mode deploy left them,
-and the RuntimeClass only when it carries those labels and no Pod uses it.
-On an Auto Mode cluster with `auto-mode` it does not read the RuntimeClass,
-which is Auto Mode's own there.
+image tag, `atelet-iso`, the `atelet-iso-credential-provider` ConfigMap, and
+the RuntimeClass only when it carries those labels and no Pod uses it. Only
+a run with `auto-mode` deletes NodePool and NodeClass `ate-isolated`. With
+`node-group` the installer never makes them, and objects of those names may
+belong to someone else, so a run with `node-group` leaves them and prints
+the ones it found. To delete the ones an Auto Mode deploy made, remove
+`mode3-iso` again with `--nitro-compute auto-mode`. On an Auto Mode cluster
+with `auto-mode` it does not read the RuntimeClass, which is Auto Mode's own
+there.
 
 On a cluster you connect, `NITRO_COMPUTE=node-group` needs nodes labeled
 `ate.dev/pool=nitro` and `eks.amazonaws.com/nitro-sandbox=true`, of a Nitro
