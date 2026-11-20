@@ -293,8 +293,9 @@ func renderPolicy(account, region string) (string, error) {
 }
 
 // nodeArch is the one CPU architecture of the system and gvisor nodes, where
-// the provider and the probe actors run: the nodes', and for a pool with no
-// node yet, the one its Karpenter NodePool requires (o.PoolArchs).
+// the provider and the probe actors run: the nodes', and for a pool that is
+// a Karpenter NodePool, the one the NodePool requires (o.PoolArchs), which
+// holds also when the pool has no node at the moment.
 func nodeArch(ctx context.Context, w io.Writer, o plugin.Options) (string, error) {
 	var out bytes.Buffer
 	sel := poolLabel + " in (system,gvisor)"

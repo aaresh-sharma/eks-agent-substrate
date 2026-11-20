@@ -324,6 +324,9 @@ func CheckTags(tags string, karpenter bool) error {
 		k, _, _ := strings.Cut(kv, "=")
 		reserved := k == KarpenterTagKey
 		if karpenter {
+			// The EC2NodeClass CRD refuses any tag key that starts with
+			// kubernetes.io/cluster, with or without a slash
+			// (!k.startsWith('kubernetes.io/cluster')), so the check here has none.
 			reserved = reserved || k == ownerTagKey || k == createdByTagKey || k == "eks:eks-cluster-name" ||
 				strings.HasPrefix(k, "kubernetes.io/cluster") || strings.HasPrefix(k, "karpenter.sh/") || strings.HasPrefix(k, "karpenter.k8s.aws/")
 		}

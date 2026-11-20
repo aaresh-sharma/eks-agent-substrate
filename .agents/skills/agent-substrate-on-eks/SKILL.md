@@ -190,9 +190,9 @@ this deployment's owner tag, and ends with the inventory. A rerun resumes.
 
 With `KARPENTER=on`, teardown deletes the NodePools first and waits
 up to 20 minutes for Karpenter to remove its nodes. If nodes are left, or
-the Kubernetes API fails, it removes the controller's IAM policy, then
-terminates every Karpenter instance with the owner tag, and any that
-appears while it waits. Then it deletes the launch templates, the
+the Kubernetes API fails, it removes the controller's IAM policy (also
+with no instance left at that moment), then terminates every Karpenter
+instance with the owner tag, and any that appears while it waits. Then it deletes the launch templates, the
 NodeOverlays (`KARPENTER_NODE_OVERLAY=on`), the EC2NodeClasses, the
 EventBridge rules, the queue, the Pod Identity association and the
 controller role. It never strips a finalizer: an

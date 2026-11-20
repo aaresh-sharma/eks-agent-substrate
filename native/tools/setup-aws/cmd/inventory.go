@@ -207,6 +207,10 @@ type tdEnv struct {
 	// kubeDown is how the Kubernetes API of the marked cluster failed in
 	// this teardown, after retries; nil while it answers.
 	kubeDown error
+	// karpenterDrained: Karpenter removed the nodes of the deleted NodePools
+	// in this teardown (waitDrained), so its controller has no NodePool to
+	// launch for and need not be cut off.
+	karpenterDrained bool
 }
 
 func newTDEnv(ctx context.Context, out io.Writer) (*tdEnv, error) {

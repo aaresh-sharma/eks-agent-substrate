@@ -33,6 +33,9 @@ func karpenterOnTeardownCalls(t *testing.T) map[string][]string {
 			kd.f.kube = unreachableKube(t)
 		}
 		e, _, _ := tdTestEnv(t, kd.f, r.plan, r.keep)
+		// No settle window: the number of late-instance scans would depend
+		// on timing (TestTeardownKarpenterCutsOffWithNoInstance covers it).
+		karpenterSettle = 0
 		log := &callLog{}
 		e.c = recordTD(e.c, log)
 		var err error

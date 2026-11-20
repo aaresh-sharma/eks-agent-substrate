@@ -152,23 +152,6 @@ func (inv Inventory) Pools() []string {
 	return slices.Compact(out)
 }
 
-// Nodeless are the CPU architectures of the pools that have a NodePool and
-// no node yet, by pool: what Karpenter will launch for them
-// (Options.PoolArchs). A pool with a node has its architecture on the node.
-func (inv Inventory) Nodeless() map[string][]string {
-	var out map[string][]string
-	for pool, archs := range inv.NodePools {
-		if slices.Contains(inv.Nodes, pool) {
-			continue
-		}
-		if out == nil {
-			out = map[string][]string{}
-		}
-		out[pool] = archs
-	}
-	return out
-}
-
 // NodePoolNames are the pools that have a NodePool, sorted.
 func (inv Inventory) NodePoolNames() []string {
 	return slices.Sorted(maps.Keys(inv.NodePools))
@@ -177,13 +160,13 @@ func (inv Inventory) NodePoolNames() []string {
 // WithInventory is o with the pools of inv: Pools, PoolArchs,
 // NodePoolArchs and KarpenterPools.
 func (o Options) WithInventory(inv Inventory) Options {
-	o.Pools, o.PoolArchs, o.NodePoolArchs, o.KarpenterPools = inv.Pools(), inv.Nodeless(), inv.NodePools, inv.NodePoolNames()
+	o.Pools, o.PoolArchs, o.NodePoolArchs, o.KarpenterPools = inv.Pools(), inv.NodePools, inv.NodePools, inv.NodePoolNames()
 	return o
 }
 
 // ArchsOf are the CPU architectures archs (Options.PoolArchs) gives pools,
 // sorted, once each: what a caller that reads its nodes' architecture adds
-// for the pools that have no node yet.
+// for the pools that have a Karpenter NodePool.
 func ArchsOf(archs map[string][]string, pools ...string) []string {
 	var out []string
 	for _, p := range pools {

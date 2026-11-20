@@ -239,10 +239,12 @@ type Options struct {
 	// read by the caller: the node groups a plugin's Nodes are checked
 	// against. A NodePool's pool can have no node yet.
 	Pools []string
-	// PoolArchs are, by pool, the CPU architectures of the pools that have a
-	// NodePool and no node yet (Inventory.Nodeless): a step that builds an
-	// image for a pool's nodes adds them to the architectures it reads off
-	// the nodes (ArchsOf).
+	// PoolArchs are, by pool, the CPU architectures each Karpenter NodePool
+	// this installer made requires (Inventory.NodePools), whether its pool
+	// has a node yet or not: a step that builds an image for a pool's nodes
+	// adds them to the architectures it reads off the nodes (ArchsOf), so a
+	// node Karpenter removed between the inventory and that read cannot
+	// leave it with none.
 	PoolArchs map[string][]string
 	// NodePoolArchs are, by pool, the CPU architectures each Karpenter
 	// NodePool this installer made requires (Inventory.NodePools), whether

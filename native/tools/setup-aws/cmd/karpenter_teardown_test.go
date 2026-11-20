@@ -255,6 +255,49 @@ func TestTeardownKarpenterTerminatesLateInstances(t *testing.T) {
 	}
 }
 
+// With the Kubernetes API down and no Karpenter instance at that moment,
+// teardown still cuts the controller off: it may still run, and an
+// instance it launches just before the cut is terminated while teardown
+// waits. When Karpenter confirmed the drain, there is no cut-off.
+func TestTeardownKarpenterCutsOffWithNoInstance(t *testing.T) {
+	kd := karpenterDeployment(t)
+	f := kd.f
+	delete(f.objs, kInstance+"|i-gvisor")
+	f.kube = unreachableKube(t)
+	launched := false
+	f.onDeleteRolePolicy = func() {
+		// Only the controller's own policy: the Substrate roles go first.
+		if !launched && f.calls[len(f.calls)-1] == "DeleteRolePolicy demo-us-west-2-karpenter" {
+			launched = true
+			f.put(&tdObj{kind: kInstance, id: "i-late", vpc: "vpc-1", state: "pending", tags: own(karpenterPoolTag, "gvisor", karpenterClassTag, "gvisor")})
+		}
+	}
+	e, _, logs := tdTestEnv(t, f, false, false)
+	if err := e.teardown(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, logs)
+	}
+	// The cut-off and the late instance's end come in the instance step,
+	// before the launch templates, not with the role at the end.
+	before(t, f.calls, "DeleteRolePolicy demo-us-west-2-karpenter", "TerminateInstances i-late")
+	before(t, f.calls, "TerminateInstances i-late", "DeleteLaunchTemplate lt-k")
+	if o := f.objs[kInstance+"|i-late"]; o == nil || o.state != "terminated" {
+		t.Errorf("i-late %+v\n%s", o, logs)
+	}
+	if !strings.Contains(logs.String(), "inline policy access of IAM role demo-us-west-2-karpenter (Karpenter's controller)") {
+		t.Errorf("no cut-off in the log:\n%s", logs)
+	}
+
+	// A drain Karpenter confirmed needs no cut-off.
+	kd = karpenterDeployment(t)
+	e, _, logs = tdTestEnv(t, kd.f, false, false)
+	if err := e.teardown(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, logs)
+	}
+	if !strings.Contains(logs.String(), "Karpenter removed the nodes") || strings.Contains(logs.String(), "(Karpenter's controller)") {
+		t.Errorf("a confirmed drain:\n%s", logs)
+	}
+}
+
 // When Karpenter does not remove its nodes in time, teardown terminates
 // them, and leaves the EC2NodeClasses that still have NodeClaims to the
 // cluster: it never strips a finalizer.

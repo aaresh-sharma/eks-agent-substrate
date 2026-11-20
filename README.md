@@ -680,9 +680,10 @@ controller runs on `system`). It deletes the `gvisor` NodePool and waits up
 to 20 minutes for Karpenter to remove its nodes. It leaves alone every other
 NodePool, Auto Mode's among them. When nodes stay, or the Kubernetes API
 does not answer or refuses (it is tried again for a moment first), teardown
-cuts the controller off by deleting its role's inline policy, then
-terminates each instance with the owner tag and a `karpenter.sh/nodepool`
-tag, and any that appears while it waits. It never strips a finalizer, and
+cuts the controller off by deleting its role's inline policy, also when no
+instance is left at that moment. Then it terminates each instance with the
+owner tag and a `karpenter.sh/nodepool` tag, and any that appears while it
+waits. It never strips a finalizer, and
 leaves EKS Auto Mode's instances to EKS. Then it deletes the launch
 templates with the owner tag and a `karpenter.k8s.aws/ec2nodeclass` tag, the
 NodeOverlays (NodeOverlay mode only), the EC2NodeClass once no NodeClaim

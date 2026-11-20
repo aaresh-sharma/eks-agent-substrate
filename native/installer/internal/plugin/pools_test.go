@@ -66,7 +66,7 @@ func TestReadInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(inv, Inventory{Nodes: []string{"gvisor", "system"}}) || len(f.log) != 2 || inv.Nodeless() != nil {
+	if !reflect.DeepEqual(inv, Inventory{Nodes: []string{"gvisor", "system"}}) || len(f.log) != 2 {
 		t.Errorf("node-only: %+v, reads %q", inv, f.log)
 	}
 
@@ -88,9 +88,6 @@ func TestReadInventory(t *testing.T) {
 	}
 	if got := inv.Pools(); !slices.Equal(got, []string{"gvisor", "microvm", "system"}) {
 		t.Errorf("Pools %q", got)
-	}
-	if got := inv.Nodeless(); !reflect.DeepEqual(got, map[string][]string{"gvisor": {"amd64"}}) {
-		t.Errorf("Nodeless %v", got)
 	}
 	if got := inv.NodePoolNames(); !slices.Equal(got, []string{"gvisor", "microvm"}) {
 		t.Errorf("NodePoolNames %q", got)
@@ -195,14 +192,14 @@ func TestNodePoolsFailedReads(t *testing.T) {
 	}
 }
 
-// WithInventory hands every pool field to the steps. NodePoolArchs has
-// each NodePool's architectures, a pool with a node too; PoolArchs only the
-// pools with no node.
+// WithInventory hands every pool field to the steps. PoolArchs and
+// NodePoolArchs have each NodePool's architectures, a pool with a node too:
+// Karpenter can remove that node before a step reads the nodes.
 func TestWithInventory(t *testing.T) {
 	inv := Inventory{Nodes: []string{"nitro", "system"}, NodePools: map[string][]string{"gvisor": {"amd64"}, "nitro": {"arm64"}}, Karpenter: true}
 	o := Options{Cluster: "demo"}.WithInventory(inv)
 	if o.Cluster != "demo" || !slices.Equal(o.Pools, []string{"gvisor", "nitro", "system"}) || !slices.Equal(o.KarpenterPools, []string{"gvisor", "nitro"}) ||
-		!reflect.DeepEqual(o.PoolArchs, map[string][]string{"gvisor": {"amd64"}}) || !reflect.DeepEqual(o.NodePoolArchs, inv.NodePools) {
+		!reflect.DeepEqual(o.PoolArchs, inv.NodePools) || !reflect.DeepEqual(o.NodePoolArchs, inv.NodePools) {
 		t.Errorf("%+v", o)
 	}
 	if o := (Options{}).WithInventory(Inventory{Nodes: []string{"system"}}); !slices.Equal(o.Pools, []string{"system"}) || o.PoolArchs != nil || o.NodePoolArchs != nil || o.KarpenterPools != nil {

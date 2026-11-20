@@ -69,6 +69,10 @@ var (
 	// (tdEnv.kubeDown), so an API that does not answer costs one series.
 	karpenterKubeTries = 3
 	karpenterKubeRetry = 2 * time.Second
+	// karpenterSettle is how long after the controller is cut off teardown
+	// still looks for an instance it launched just before: IAM takes a
+	// moment to stop a session that holds the policy.
+	karpenterSettle = 45 * time.Second
 )
 
 // The tags Karpenter puts on what it launches, which teardown finds them by,
@@ -313,6 +317,7 @@ func (e *tdEnv) waitDrained(ctx context.Context, kube kubeObjects, pools []strin
 		}
 		if err == nil && len(claims) == 0 && len(insts) == 0 {
 			e.say("Karpenter removed the nodes of NodePools %s", strings.Join(pools, ", "))
+			e.karpenterDrained = true
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -339,7 +344,7 @@ func (e *tdEnv) stepKarpenterInstances(ctx context.Context) ([]tdTarget, []strin
 		return nil, nil, nil
 	}
 	insts, err := e.karpenterInstances(ctx)
-	if err != nil || len(insts) == 0 {
+	if err != nil {
 		return nil, nil, err
 	}
 	var rs, all, ids []string
@@ -353,50 +358,77 @@ func (e *tdEnv) stepKarpenterInstances(ctx context.Context) ([]tdTarget, []strin
 			ids = append(ids, it.id)
 		}
 	}
-	if len(all) == 0 {
+	// With no instance now, the controller still needs cutting off when
+	// Karpenter did not confirm the drain (the Kubernetes API failed, a
+	// NodePool delete failed, or the drain timed out): it may still run, and
+	// launch one after this look.
+	late := len(all) == 0 && e.karpenterAWS() && !e.karpenterDrained
+	if len(all) == 0 && !late {
 		return nil, rs, nil
 	}
 	ts, err := e.karpenterCutOff(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	if late && len(ts) == 0 {
+		// No controller policy to cut off: the role or its policy is gone.
+		return nil, rs, nil
+	}
+	var cutAt time.Time
+	for i := range ts {
+		del := ts[i].del
+		ts[i].del = func(ctx context.Context) error {
+			err := del(ctx)
+			cutAt = time.Now()
+			return err
+		}
+	}
 	terminate := func(ctx context.Context, ids []string) error {
 		_, err := e.c.EC2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids})
 		return err
 	}
-	t := tdTarget{kind: "Karpenter instances", id: strings.Join(all, ", "), wait: func(ctx context.Context) error {
+	id := strings.Join(all, ", ")
+	if late {
+		id = "launched after the controller is cut off, if any"
+	}
+	t := tdTarget{kind: "Karpenter instances", id: id, wait: func(ctx context.Context) error {
 		return poll(ctx, "the Karpenter instances to be terminated", func(ctx context.Context) (bool, error) {
 			left, err := e.karpenterInstances(ctx)
 			if err != nil {
 				return false, err
 			}
-			var late []string
+			var lateIDs []string
 			for _, it := range left {
 				if it.state != "shutting-down" && e.refuse(kInstance, it.id, it.tags) == "" {
-					late = append(late, it.id)
+					lateIDs = append(lateIDs, it.id)
 				}
 			}
-			if len(late) > 0 {
-				e.say("terminate Karpenter instances %s, launched while teardown ran", strings.Join(late, ", "))
-				if err := terminate(ctx, late); err != nil && !tdGone(err) {
-					return false, fmt.Errorf("terminate %s: %w", strings.Join(late, ", "), err)
+			if len(lateIDs) > 0 {
+				e.say("terminate Karpenter instances %s, launched while teardown ran", strings.Join(lateIDs, ", "))
+				if err := terminate(ctx, lateIDs); err != nil && !tdGone(err) {
+					return false, fmt.Errorf("terminate %s: %w", strings.Join(lateIDs, ", "), err)
 				}
 			}
-			return len(left) == 0, nil
+			settled := cutAt.IsZero() || time.Since(cutAt) >= karpenterSettle
+			return len(left) == 0 && settled, nil
 		})
 	}}
-	if len(ids) > 0 {
+	switch {
+	case len(ids) > 0:
 		t.del = func(ctx context.Context) error { return terminate(ctx, ids) }
+	case late:
+		// Nothing to terminate yet: the wait looks for late ones.
+		t.del = func(context.Context) error { return nil }
 	}
-	ts = append(ts, t)
-	if e.plan {
+	if e.plan && !late {
 		// --plan deletes no NodePool, so the instances are still there. A
 		// real run drains them first, and does this only for those left.
 		for i := range ts {
 			ts[i].id += ", only if instances are left after the NodePools drain"
 		}
+		t.id += ", only if instances are left after the NodePools drain"
 	}
-	return ts, rs, nil
+	return append(ts, t), rs, nil
 }
 
 // karpenterCutOff is the delete of the controller role's inline policy

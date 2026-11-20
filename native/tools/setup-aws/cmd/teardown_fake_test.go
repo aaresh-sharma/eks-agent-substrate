@@ -76,6 +76,10 @@ type tdFake struct {
 	// onTerminate runs after TerminateInstances, with the fake locked: a
 	// test's stand-in for a controller that launches one more.
 	onTerminate func()
+	// onDeleteRolePolicy runs after DeleteRolePolicy, with the fake locked:
+	// a stand-in for a controller whose launch was on its way when its
+	// policy went.
+	onDeleteRolePolicy func()
 }
 
 func newTDFake() *tdFake {
@@ -392,6 +396,9 @@ func (t *tfIAM) DeleteRolePolicy(_ context.Context, in *iam.DeleteRolePolicyInpu
 		return nil, err
 	}
 	o.inline = without(o.inline, aws.ToString(in.PolicyName))
+	if t.f().onDeleteRolePolicy != nil {
+		t.f().onDeleteRolePolicy()
+	}
 	return &iam.DeleteRolePolicyOutput{}, nil
 }
 func (t *tfIAM) ListAttachedRolePolicies(_ context.Context, in *iam.ListAttachedRolePoliciesInput, _ ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error) {
