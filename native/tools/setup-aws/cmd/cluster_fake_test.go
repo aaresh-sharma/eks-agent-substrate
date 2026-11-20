@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"slices"
@@ -37,6 +38,9 @@ type clusterFake struct {
 	failBefore, failAfter string
 	deny                  map[string]string // read operation -> error code
 	reads                 []string          // read operations, in order
+	// inputs are the requests of the reads whose payload the node group
+	// settings decide (readIn), "<op> <request as JSON>", in order.
+	inputs []string
 
 	vpcs      map[string]*ec2types.Vpc
 	dnsHosts  map[string]bool
@@ -92,6 +96,14 @@ type clusterFake struct {
 	// counts them down by group.
 	asgLag    int
 	asgHidden map[string]int
+	// nitroAlloc is the allocatable eks.amazonaws.com/nitro-sandbox of each
+	// node of the nitro group ("" for none advertised), and nitroNotReady
+	// keeps those nodes NotReady: a node of a Nitro Sandbox AMI, or of
+	// another AMI, as the Kubernetes API lists it.
+	nitroAlloc    string
+	nitroNotReady bool
+	// nitroMissing nodes of the nitro group never join.
+	nitroMissing int
 }
 
 type fakeProfile struct {
@@ -126,7 +138,7 @@ func nestedVirtType(name string, nested bool) ec2types.InstanceTypeInfo {
 		p.SupportedFeatures = []ec2types.SupportedAdditionalProcessorFeature{ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization}
 	}
 	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name), ProcessorInfo: p,
-		NetworkInfo: &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}
+		NetworkInfo: &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}, NitroEnclavesSupport: ec2types.NitroEnclavesSupportSupported}
 }
 
 func newClusterFake() *clusterFake {
@@ -138,7 +150,11 @@ func newClusterFake() *clusterFake {
 		images: map[string]ec2types.Image{},
 		types: map[string]ec2types.InstanceTypeInfo{
 			"m8i.xlarge": nestedVirtType("m8i.xlarge", true), "m8i.2xlarge": nestedVirtType("m8i.2xlarge", true),
-			"m7i.2xlarge": nestedVirtType("m7i.2xlarge", false), "m8g.2xlarge": armType("m8g.2xlarge")},
+			"m7i.2xlarge": nestedVirtType("m7i.2xlarge", false), "m8g.2xlarge": armType("m8g.2xlarge"),
+			// No Nitro Enclaves (and not offered in any zone).
+			"t3.xlarge": {InstanceType: "t3.xlarge", NitroEnclavesSupport: ec2types.NitroEnclavesSupportUnsupported,
+				ProcessorInfo: &ec2types.ProcessorInfo{SupportedArchitectures: []ec2types.ArchitectureType{ec2types.ArchitectureTypeX8664}},
+				NetworkInfo:   &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}},
 		offerings: map[string][]string{
 			"us-west-2a": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"}, "us-west-2b": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"},
 			"us-west-2c": {"m8i.xlarge", "m8i.2xlarge", "m7i.2xlarge", "m8g.2xlarge"}, "us-west-2d": {"m7i.2xlarge"}},
@@ -156,6 +172,7 @@ func newClusterFake() *clusterFake {
 			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/x86_64/standard/recommended/image_id": eksAMIx86,
 			"/aws/service/eks/optimized-ami/1.37/amazon-linux-2023/arm64/standard/recommended/image_id":  eksAMIarm,
 		},
+		nitroAlloc: "2",
 	}
 	for id, arch := range map[string]ec2types.ArchitectureValues{eksAMIx86: ec2types.ArchitectureValuesX8664, eksAMIarm: ec2types.ArchitectureValuesArm64} {
 		im := testImage(arch, "/dev/xvda", 20)
@@ -174,7 +191,7 @@ func newClusterFake() *clusterFake {
 func armType(name string) ec2types.InstanceTypeInfo {
 	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name),
 		ProcessorInfo: &ec2types.ProcessorInfo{SupportedArchitectures: []ec2types.ArchitectureType{ec2types.ArchitectureTypeArm64}},
-		NetworkInfo:   &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}
+		NetworkInfo:   &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}, NitroEnclavesSupport: ec2types.NitroEnclavesSupportSupported}
 }
 
 func (f *clusterFake) clients() *ClusterClients {
@@ -207,6 +224,16 @@ func (f *clusterFake) read(op string) error {
 		return apiErr(code)
 	}
 	return nil
+}
+
+// readIn is read that records the request too (inputs).
+func (f *clusterFake) readIn(op string, in any) error {
+	b, err := json.Marshal(in)
+	if err != nil {
+		panic(err)
+	}
+	f.inputs = append(f.inputs, op+" "+string(b))
+	return f.read(op)
 }
 
 // --- EC2 ----------------------------------------------------------------------
@@ -276,7 +303,7 @@ func (e *fcEC2) DescribeAvailabilityZones(_ context.Context, in *ec2.DescribeAva
 }
 
 func (e *fcEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanceTypesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error) {
-	if err := e.f().read("DescribeInstanceTypes"); err != nil {
+	if err := e.f().readIn("DescribeInstanceTypes", in); err != nil {
 		return nil, err
 	}
 	out := &ec2.DescribeInstanceTypesOutput{}
@@ -291,7 +318,7 @@ func (e *fcEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanc
 }
 
 func (e *fcEC2) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
-	if err := e.f().read("DescribeImages"); err != nil {
+	if err := e.f().readIn("DescribeImages", in); err != nil {
 		return nil, err
 	}
 	if len(in.Filters) > 0 || len(in.Owners) > 0 {
@@ -712,7 +739,7 @@ func (e *fcEC2) CreateTags(_ context.Context, in *ec2.CreateTagsInput, _ ...func
 }
 
 func (e *fcEC2) DescribeLaunchTemplates(_ context.Context, in *ec2.DescribeLaunchTemplatesInput, _ ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplatesOutput, error) {
-	if err := e.f().read("DescribeLaunchTemplates"); err != nil {
+	if err := e.f().readIn("DescribeLaunchTemplates", in); err != nil {
 		return nil, err
 	}
 	out := &ec2.DescribeLaunchTemplatesOutput{}
@@ -735,6 +762,9 @@ func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunc
 	if d.CpuOptions != nil {
 		out.CpuOptions = &ec2types.LaunchTemplateCpuOptions{NestedVirtualization: d.CpuOptions.NestedVirtualization}
 	}
+	if d.EnclaveOptions != nil {
+		out.EnclaveOptions = &ec2types.LaunchTemplateEnclaveOptions{Enabled: d.EnclaveOptions.Enabled}
+	}
 	if m := d.MetadataOptions; m != nil {
 		out.MetadataOptions = &ec2types.LaunchTemplateInstanceMetadataOptions{HttpTokens: m.HttpTokens,
 			HttpPutResponseHopLimit: m.HttpPutResponseHopLimit, HttpEndpoint: m.HttpEndpoint}
@@ -751,7 +781,7 @@ func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunc
 }
 
 func (e *fcEC2) DescribeLaunchTemplateVersions(_ context.Context, in *ec2.DescribeLaunchTemplateVersionsInput, _ ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error) {
-	if err := e.f().read("DescribeLaunchTemplateVersions"); err != nil {
+	if err := e.f().readIn("DescribeLaunchTemplateVersions", in); err != nil {
 		return nil, err
 	}
 	lt := e.lts[aws.ToString(in.LaunchTemplateId)]
@@ -1005,7 +1035,7 @@ func (e *fcEKS) UpdateAddon(_ context.Context, in *eks.UpdateAddonInput, _ ...fu
 
 func (e *fcEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroupInput, _ ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error) {
 	// Recorded by node group, so a test can deny one and count them.
-	if err := e.f().read("DescribeNodegroup " + aws.ToString(in.NodegroupName)); err != nil {
+	if err := e.f().readIn("DescribeNodegroup "+aws.ToString(in.NodegroupName), in); err != nil {
 		return nil, err
 	}
 	ng := e.ngs[aws.ToString(in.NodegroupName)]
@@ -1023,7 +1053,7 @@ func (e *fcEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroupIn
 // ListNodegroups lists the managed node groups by name, two to a page, so
 // a caller that reads only the first page misses some.
 func (e *fcEKS) ListNodegroups(_ context.Context, in *eks.ListNodegroupsInput, _ ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error) {
-	if err := e.f().read("ListNodegroups"); err != nil {
+	if err := e.f().readIn("ListNodegroups", in); err != nil {
 		return nil, err
 	}
 	if !e.clusterExists(in.ClusterName) {
@@ -1302,7 +1332,7 @@ func (e *fcIAM) AddRoleToInstanceProfile(_ context.Context, in *iam.AddRoleToIns
 // launches its instances, InService, between two reads (unless asgStuck).
 func (e *fcASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
 	f := (*clusterFake)(e)
-	if err := f.read("DescribeAutoScalingGroups"); err != nil {
+	if err := f.readIn("DescribeAutoScalingGroups", in); err != nil {
 		return nil, err
 	}
 	if len(in.AutoScalingGroupNames) == 0 && len(in.Filters) == 0 {
@@ -1400,7 +1430,7 @@ type fcSSM clusterFake
 
 func (e *fcSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
 	f := (*clusterFake)(e)
-	if err := f.read("GetParameter"); err != nil {
+	if err := f.readIn("GetParameter", in); err != nil {
 		return nil, err
 	}
 	v, ok := f.params[aws.ToString(in.Name)]
@@ -1411,7 +1441,9 @@ func (e *fcSSM) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...
 }
 
 // kube is the cluster's Kubernetes API: a node per instance in service of
-// each Auto Scaling group, labeled with the pool of its group.
+// each Auto Scaling group, and DesiredSize nodes per ACTIVE managed node
+// group, labeled with the pool of its group; the nitro group's nodes
+// advertise nitroAlloc.
 func (f *clusterFake) kube(_ context.Context, c *ekstypes.Cluster) (nodeLister, error) {
 	f.kubeCalls++
 	if c == nil || c.Status != ekstypes.ClusterStatusActive {
@@ -1438,13 +1470,37 @@ func (n fakeNodes) Nodes(_ context.Context, sel string) ([]kubeNode, error) {
 	if !ok {
 		panic("fake: label selector " + sel)
 	}
+	node := func(name, pool string) kubeNode {
+		kn := kubeNode{Name: name, Labels: map[string]string{"ate.dev/pool": pool}, Ready: !n.f.notReady}
+		if pool == "nitro" {
+			kn.Ready = kn.Ready && !n.f.nitroNotReady
+			if n.f.nitroAlloc != "" {
+				kn.Allocatable = map[string]string{"cpu": "3920m", "eks.amazonaws.com/nitro-sandbox": n.f.nitroAlloc}
+			}
+		}
+		return kn
+	}
 	var out []kubeNode
 	for _, name := range sortedKeysOf(n.f.asgs) {
 		pool := strings.TrimPrefix(name, "demo-")
 		for _, i := range n.f.asgs[name].Instances {
-			labels := map[string]string{"ate.dev/pool": pool}
-			if labels[k] == v {
-				out = append(out, kubeNode{Name: aws.ToString(i.InstanceId), Labels: labels, Ready: !n.f.notReady})
+			if kn := node(aws.ToString(i.InstanceId), pool); kn.Labels[k] == v {
+				out = append(out, kn)
+			}
+		}
+	}
+	for _, name := range sortedKeysOf(n.f.ngs) {
+		in := n.f.ngIn[name]
+		if n.f.ngs[name].Status != ekstypes.NodegroupStatusActive || in == nil {
+			continue
+		}
+		count := aws.ToInt32(in.ScalingConfig.DesiredSize)
+		if name == "nitro" {
+			count -= int32(n.f.nitroMissing)
+		}
+		for i := range count {
+			if kn := node(fmt.Sprintf("ip-%s-%d", name, i), in.Labels["ate.dev/pool"]); kn.Labels[k] == v {
+				out = append(out, kn)
 			}
 		}
 	}

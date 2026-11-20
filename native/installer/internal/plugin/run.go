@@ -270,8 +270,8 @@ func Run(ctx context.Context, w io.Writer, action string, ids []string, o Option
 			return err
 		}
 		for _, p := range ps {
-			if p.NeedsAutoMode != "" && !o.AutoMode {
-				return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
+			if why := p.AutoModeProblem(o); why != "" {
+				return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, why, o.Cluster)
 			}
 			// Before its AWS half, which would otherwise be made for an
 			// install it cannot work on, or for none.

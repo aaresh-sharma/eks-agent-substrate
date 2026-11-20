@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
+
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 )
 
 // nodeGroupSpec is one node group of the cluster, managed or self-managed.
@@ -24,8 +26,19 @@ type nodeGroupSpec struct {
 	Min, Desired, Max int32
 	VolumeGB          int32
 	NestedVirt        bool
-	Labels            map[string]string
-	Taints            []ekstypes.Taint
+	// Enclave turns Nitro Enclaves on in the launch template (the nitro
+	// group: the Nitro Sandbox AMI needs them).
+	Enclave bool
+	Labels  map[string]string
+	// NodeLabels are labels the nodes register with through the NodeConfig
+	// only, never the EKS API's node group labels: eks.amazonaws.com/ keys,
+	// which are EKS's own (the nitro group's NitroSandboxLabel, which its AMI
+	// sets too).
+	NodeLabels map[string]string
+	Taints     []ekstypes.Taint
+	// Image is the AMI the group's launch template names (groupImage), or
+	// nil when EKS picks it (a managed group without NODE_AMI_ID).
+	Image *nodeImage
 }
 
 // groupExists reports whether node group name exists as a group of the
@@ -38,9 +51,9 @@ func (r *clusterRun) groupExists(name string) bool {
 	return r.nodegroups[name] != nil
 }
 
-// groups are the node groups NODE_GROUPS names, of the system, gvisor and
-// microvm ones (allGroups), in that order: on an Auto Mode cluster any of
-// them, or none (nodegroups.Check is the rule).
+// groups are the node groups NODE_GROUPS names, of the system, gvisor,
+// microvm and nitro ones (allGroups), in that order: on an Auto Mode cluster
+// any of them, or none (nodegroups.Check is the rule).
 func (r *clusterRun) groups() []nodeGroupSpec {
 	var out []nodeGroupSpec
 	for _, g := range r.allGroups() {
@@ -51,12 +64,15 @@ func (r *clusterRun) groups() []nodeGroupSpec {
 	return out
 }
 
-// allGroups are the system, gvisor and microvm node groups. The gvisor and
-// microvm groups are tainted ate.dev/sandboxClass, so only the worker pods
-// that tolerate it land there. ate.dev/workloadType=ate-system-infra is the
-// label ate-setup pins the control plane to under
-// --cordon-system-infra-components; with Auto Mode the system group is also
-// tainted with it, so any other pod runs on a node Auto Mode launches.
+// allGroups are the system, gvisor, microvm and nitro node groups, each with
+// its image (groupImage). The sandbox groups are tainted
+// ate.dev/sandboxClass, so only the worker pods that tolerate it land there.
+// ate.dev/workloadType=ate-system-infra is the label ate-setup pins the
+// control plane to under --cordon-system-infra-components; with Auto Mode
+// the system group is also tainted with it, so any other pod runs on a node
+// Auto Mode launches. The nitro group's nodes also carry
+// eks.amazonaws.com/nitro-sandbox=true, which RuntimeClass isolated-sandbox
+// selects (its AMI sets it too).
 //
 //	https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
 func (r *clusterRun) allGroups() []nodeGroupSpec {
@@ -69,7 +85,7 @@ func (r *clusterRun) allGroups() []nodeGroupSpec {
 	if r.auto {
 		system.Taints = []ekstypes.Taint{{Key: aws.String("ate.dev/workloadType"), Value: aws.String("ate-system-infra"), Effect: ekstypes.TaintEffectNoSchedule}}
 	}
-	return []nodeGroupSpec{
+	gs := []nodeGroupSpec{
 		system,
 		{Name: "gvisor", InstanceType: r.cfg.GvisorInstanceType, VolumeGB: 200,
 			Min: 1, Desired: int32(r.cfg.GvisorNodes), Max: int32(r.cfg.GvisorNodes) + 2,
@@ -77,7 +93,15 @@ func (r *clusterRun) allGroups() []nodeGroupSpec {
 		{Name: "microvm", InstanceType: r.cfg.MicrovmInstanceType, VolumeGB: 200, NestedVirt: true,
 			Min: 1, Desired: int32(r.cfg.MicrovmNodes), Max: int32(r.cfg.MicrovmNodes) + 2,
 			Labels: map[string]string{"ate.dev/pool": "microvm"}, Taints: sandbox("microvm")},
+		{Name: nodegroups.Nitro, InstanceType: r.cfg.NitroInstanceType, VolumeGB: 100, Enclave: true,
+			Min: 1, Desired: int32(r.cfg.NitroNodes), Max: int32(r.cfg.NitroNodes) + 2,
+			Labels:     map[string]string{"ate.dev/pool": nodegroups.Nitro},
+			NodeLabels: map[string]string{nodegroups.NitroSandboxLabel: "true"}, Taints: sandbox(nodegroups.Nitro)},
 	}
+	for i := range gs {
+		gs[i].Image = r.groupImage(gs[i])
+	}
+	return gs
 }
 
 func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupInput {
@@ -98,7 +122,7 @@ func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupI
 		Tags:   r.tags,
 	}
 	// A group whose launch template names an AMI takes no AMI type.
-	if r.image != nil {
+	if g.Image != nil {
 		in.AmiType = ""
 	}
 	return in
@@ -113,7 +137,7 @@ func (r *clusterRun) ensureNodegroups(ctx context.Context) error {
 				return err
 			}
 			slog.Info("node group exists", "nodegroup", g.Name, "status", ng.Status)
-			if err := r.checkGroupImage(ctx, ng); err != nil {
+			if err := r.checkGroupImage(ctx, g, ng); err != nil {
 				return err
 			}
 			continue
@@ -132,16 +156,17 @@ func (r *clusterRun) ensureNodegroups(ctx context.Context) error {
 }
 
 // checkGroupImage warns when an existing node group runs another AMI than
-// NODE_AMI_ID names: it keeps its nodes, since moving it to another
-// template version replaces them, which is a decision for a person. It reads
-// the group's template only when a custom AMI is involved, on either side.
-func (r *clusterRun) checkGroupImage(ctx context.Context, ng *ekstypes.Nodegroup) error {
-	if r.image == nil && ng.AmiType != ekstypes.AMITypesCustom {
+// its setting (NODE_AMI_ID, or NITRO_AMI_ID for the nitro group) names: it
+// keeps its nodes, since moving it to another template version replaces
+// them, which is a decision for a person. It reads the group's template only
+// when a custom AMI is involved, on either side.
+func (r *clusterRun) checkGroupImage(ctx context.Context, g nodeGroupSpec, ng *ekstypes.Nodegroup) error {
+	if g.Image == nil && ng.AmiType != ekstypes.AMITypesCustom {
 		return nil
 	}
 	want, have := "", ""
-	if r.image != nil {
-		want = r.image.ID
+	if g.Image != nil {
+		want = g.Image.ID
 	}
 	if lt := ng.LaunchTemplate; lt != nil && aws.ToString(lt.Id) != "" {
 		out, err := r.c.EC2.DescribeLaunchTemplateVersions(ctx, &ec2.DescribeLaunchTemplateVersionsInput{
@@ -155,8 +180,9 @@ func (r *clusterRun) checkGroupImage(ctx context.Context, ng *ekstypes.Nodegroup
 		}
 	}
 	if have != want {
-		slog.Warn("the node group runs another AMI than NODE_AMI_ID and keeps its nodes; to change it, tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again",
-			"nodegroup", aws.ToString(ng.NodegroupName), "runs", orDefault(have), "NODE_AMI_ID", orDefault(want))
+		setting := imageSetting(g)
+		slog.Warn("the node group runs another AMI than "+setting+" and keeps its nodes; to change it, tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again",
+			"nodegroup", aws.ToString(ng.NodegroupName), "runs", orDefault(have), setting, orDefault(want))
 	}
 	return nil
 }
@@ -216,6 +242,19 @@ func (r *clusterRun) waitReady(ctx context.Context) error {
 				if err := r.tagASG(ctx, aws.ToString(a.Name), ng.Tags[CreatedByTagKey] == CreatedByTagValue); err != nil {
 					return err
 				}
+			}
+		}
+		if g.Name == nodegroups.Nitro {
+			desired := g.Desired
+			if sc := ng.ScalingConfig; sc != nil && sc.DesiredSize != nil {
+				desired = aws.ToInt32(sc.DesiredSize)
+			}
+			kube, err := r.c.Kube(ctx, r.cluster)
+			if err != nil {
+				return err
+			}
+			if err := r.waitNitroCapacity(ctx, kube, desired); err != nil {
+				return err
 			}
 		}
 	}

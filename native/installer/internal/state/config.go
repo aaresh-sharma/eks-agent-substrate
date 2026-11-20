@@ -19,6 +19,7 @@ import (
 	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
+	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/plugin"
 )
 
 // ConfigEntry is one KEY=VALUE line and the comment block right above it.
@@ -290,7 +291,8 @@ func (c Config) LocalPath() string {
 var ManagedKeys = []string{
 	"CLUSTER_NAME", "AWS_REGION", "AWS_PROFILE", "KUBERNETES_VERSION", "AUTO_MODE",
 	"SYSTEM_INSTANCE_TYPE", "SYSTEM_NODES", "GVISOR_INSTANCE_TYPE", "GVISOR_NODES",
-	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "NODE_AMI_ID", "NODE_GROUP_TYPE", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
+	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "NODE_AMI_ID", "NODE_GROUP_TYPE",
+	"NITRO_COMPUTE", "NITRO_AMI_ID", "NITRO_INSTANCE_TYPE", "NITRO_NODES", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
 	"SUBSTRATE_TAG", "SUBSTRATE_IMAGE_REPO", "SANDBOX_CLASSES",
 }
 
@@ -418,13 +420,17 @@ func ValidateConfig(values map[string]string) map[string]string {
 	check("KUBERNETES_VERSION", minor >= awsx.MinMinor,
 		fmt.Sprintf("an EKS version 1.%d or newer, such as 1.%d", awsx.MinMinor, awsx.MinMinor))
 	check("AUTO_MODE", values["AUTO_MODE"] == "on" || values["AUTO_MODE"] == "", "on, or empty for off")
-	for _, g := range []string{"SYSTEM", "GVISOR", "MICROVM"} {
+	for _, g := range []string{"SYSTEM", "GVISOR", "MICROVM", "NITRO"} {
 		check(g+"_INSTANCE_TYPE", typeRe.MatchString(values[g+"_INSTANCE_TYPE"]), "an EC2 instance type such as m8i.2xlarge")
 		check(g+"_NODES", nodesRe.MatchString(values[g+"_NODES"]), "a node count from 1 to 99")
 	}
 	check("NODE_AMI_ID", values["NODE_AMI_ID"] == "" || amiRe.MatchString(values["NODE_AMI_ID"]),
 		"an AMI ID (ami-...), or empty")
 	check("NODE_GROUP_TYPE", nodegroups.CheckType(values["NODE_GROUP_TYPE"]) == nil, "managed or self-managed")
+	check("NITRO_COMPUTE", plugin.CheckNitroCompute(values["NITRO_COMPUTE"]) == nil,
+		"auto-mode (EKS Auto Mode's nodes) or node-group (the nitro node group)")
+	check("NITRO_AMI_ID", values["NITRO_AMI_ID"] == "" || amiRe.MatchString(values["NITRO_AMI_ID"]),
+		"the ID of a Nitro Sandbox AMI (ami-...), or empty")
 	for _, kv := range strings.Fields(values["TAGS"]) {
 		check("TAGS", tagRe.MatchString(kv), "space-separated key=value pairs (letters, digits and _ . : / + @ -)")
 	}

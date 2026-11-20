@@ -221,10 +221,14 @@ func (e *tdEnv) mask(s string) string {
 // Derived names, matching the create commands.
 func (e *tdEnv) dbID() string { return e.n.Cluster + "-pg" }
 
-// ltNames are the node groups' launch templates create cluster makes.
+// ltNames are the node groups' launch templates create cluster makes, one
+// per node group name it knows (nodeTemplateName).
 func (e *tdEnv) ltNames() []string {
-	c := e.n.Cluster
-	return []string{c + "-microvm-nested-virt", c + "-system-nodes", c + "-gvisor-nodes"}
+	var out []string
+	for _, g := range nodegroups.All {
+		out = append(out, nodeTemplateName(e.n.Cluster, g))
+	}
+	return out
 }
 
 // asgNames are the Auto Scaling groups of self-managed node groups, one per

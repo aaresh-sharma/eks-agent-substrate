@@ -226,7 +226,7 @@ Three sandbox classes, chosen on Settings or with `--sandbox-classes`
 |---|---|
 | `gvisor` | gVisor workers on the `gvisor` node group. |
 | `microvm` | Kata microVM workers on the `microvm` node group, whose instances have nested virtualization. |
-| `nitro` (AWS Nitro sandbox) | Each worker Pod is an EKS Auto Mode isolated sandbox (RuntimeClass `isolated-sandbox`) on nodes Auto Mode launches for it (NodePool `ate-isolated`). Auto Mode only; no node group. |
+| `nitro` (AWS Nitro sandbox) | Each worker Pod is an EKS Auto Mode isolated sandbox (RuntimeClass `isolated-sandbox`) on nodes Auto Mode launches for it (NodePool `ate-isolated`). Auto Mode only; no node group. With `NITRO_COMPUTE=node-group`, each worker Pod is a Nitro sandbox on the `nitro` node group instead, from a Nitro Sandbox AMI you build, with or without Auto Mode: see [Nitro sandbox on node groups](#nitro-sandbox-on-node-groups). |
 
 A cluster the installer creates gets the node groups its selection needs,
 and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
@@ -238,13 +238,14 @@ and no others (`setup-aws create cluster` takes them as `NODE_GROUPS`):
 | `microvm` class | `microvm` (nested virtualization) |
 | `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
 | `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
+| `nitro` class with `NITRO_COMPUTE=node-group` | `nitro` (Nitro Enclaves on, the Nitro Sandbox AMI `NITRO_AMI_ID`) |
 | `system`, without Auto Mode | always (required) |
-| `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created: the control plane is pinned to it |
+| `system`, Auto Mode with RDS | when a `gvisor`, `microvm` or `nitro` group is created: the control plane is pinned to it |
 | `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it: the control plane and PostgreSQL run on Auto Mode nodes |
 | A plugin that runs on `system` (the LLM gateway, EFS, login rotation, the credential provider) | `system`, whatever the classes and database it is offered with |
 | Auto Mode, the bundled PostgreSQL, `gvisor`, no such plugin | `gvisor` alone |
 | Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one that runs on `system`): the minimal profile | none at all: the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
-| No Auto Mode | `system` and at least one of `gvisor` and `microvm`; `nitro` is refused |
+| No Auto Mode | `system` and at least one of `gvisor`, `microvm` and `nitro`; `nitro` on Auto Mode's nodes (`NITRO_COMPUTE=auto-mode`) is refused |
 
 What else follows from the classes:
 - `ate-setup` gets `--sandbox-classes gvisor` always (it applies the
@@ -289,6 +290,127 @@ go -C installer run . --deploy-control-plane --cluster $C --region $R --profile 
   --sandbox-classes nitro --snap-bucket $C-snap-<account>-$R --asset-bucket $C-assets-<account>-$R
 go -C installer run . --plugin-action deploy --plugins mode3-iso --cluster $C --region $R --profile $P
 ```
+
+### Nitro sandbox on node groups
+
+By default the `nitro` class runs on nodes EKS Auto Mode launches, so it
+needs Auto Mode. With `NITRO_COMPUTE=node-group` it runs on a node group
+instead, on a cluster with or without Auto Mode. The EKS optimized AMI has
+no Nitro sandbox runtime, so that node group runs a Nitro Sandbox AMI that
+you build with [awslabs/amazon-eks-ami](https://github.com/awslabs/amazon-eks-ami),
+for the cluster's Kubernetes version. For 1.37:
+
+```bash
+git clone https://github.com/awslabs/amazon-eks-ami
+cd amazon-eks-ami
+make k8s=1.37 os_distro=al2023 enable_pod_isolation=true
+```
+
+See [Create and update a Nitro Sandbox AMI](https://docs.aws.amazon.com/eks/latest/userguide/sandboxing-ami-create-update.html).
+Then set it on Settings, or in `config.local.env`. On Settings with Auto
+Mode, turn on the AWS Nitro sandbox, switch Nitro sandbox on to
+`node-group`, then fill in the Nitro AMI. Without Auto Mode the class is
+refused while Nitro sandbox on is `auto-mode`, so switch that row (shown
+when Auto Mode is off) to `node-group` first, then turn on the AWS Nitro
+sandbox, then fill in the Nitro AMI. In `config.local.env`:
+
+```bash
+SANDBOX_CLASSES=gvisor,microvm,nitro
+NITRO_COMPUTE=node-group
+NITRO_AMI_ID=ami-0123456789abcdef0
+NITRO_INSTANCE_TYPE=m8i.xlarge   # the default; it needs Nitro Enclaves
+NITRO_NODES=1                    # the default
+```
+
+A cluster the installer creates then gets the `nitro` node group, of
+`NODE_GROUP_TYPE` (managed or self-managed), next to the others. Its launch
+template `<cluster>-nitro-nodes` names `NITRO_AMI_ID`, turns Nitro Enclaves
+on (`EnclaveOptions.Enabled`), keeps IMDSv2 with a hop limit of 1 and the
+encrypted gp3 root volume (100 GB), and carries the nodeadm `NodeConfig`.
+Its nodes are labeled `ate.dev/pool=nitro` and
+`eks.amazonaws.com/nitro-sandbox=true` and tainted
+`ate.dev/sandboxClass=nitro:NoSchedule`; it has `NITRO_NODES` nodes and room
+for two more. Like the `gvisor` and `microvm` groups, it is a sandbox group:
+with Auto Mode and RDS the `system` group comes with it, and without Auto
+Mode the `system` group is required.
+
+`setup-aws create cluster` checks before it creates anything: `NITRO_AMI_ID`
+is set (else it stops and shows the build command), the AMI fits the
+instance type as `NODE_AMI_ID` must (architecture, ENA, HVM, EBS root that
+fits 100 GB), and `NITRO_INSTANCE_TYPE` supports Nitro Enclaves. Once the
+group's nodes have joined, it waits up to 10 minutes until every node
+labeled `ate.dev/pool=nitro` is Ready and advertises an allocatable
+`eks.amazonaws.com/nitro-sandbox` of 1 or more. A node of another AMI never
+does, so the run stops and says that `NITRO_AMI_ID` must be a Nitro Sandbox
+AMI.
+
+`mode3-iso` then makes no NodePool and no NodeClass. It uses RuntimeClass
+`isolated-sandbox` when the cluster has the one Auto Mode defines (handler
+`isolated-sandbox`, node selector `eks.amazonaws.com/nitro-sandbox: "true"`,
+overhead of 256Mi and one `eks.amazonaws.com/nitro-sandbox`), creates it
+with the labels `app.kubernetes.io/managed-by: substrate-eks` and
+`agent-substrate-on-eks/deployment: <cluster>.<region>` when there is none,
+and stops, naming the difference, when one with another spec exists: it
+never changes an object it does not own. It creates the RuntimeClass with
+`kubectl create`, never `kubectl apply`, so one that someone makes between
+the read and the create is not changed: it reads that one and uses it or
+stops, as it would have. It requires nodes labeled
+`ate.dev/pool=nitro` with enough Nitro sandbox capacity for `counter-iso`'s
+two worker Pods, counting only the nodes labeled
+`eks.amazonaws.com/nitro-sandbox=true` (the RuntimeClass's node selector),
+runs `atelet-iso` there with atelet's own AL2023 credential provider paths,
+builds the counter image for those nodes' architecture and puts
+`counter-iso` on them. It reads the RuntimeClass and the nodes before it
+creates or applies anything, so a refusal leaves the cluster as it was.
+
+Removing `mode3-iso` follows the run's `NITRO_COMPUTE`, which the cluster
+does not record. Whichever value the run has, it deletes the pool and its counter
+image tag, `atelet-iso`, the `atelet-iso-credential-provider` ConfigMap, and
+the RuntimeClass only when it carries those labels and no Pod uses it. Only
+a run with `auto-mode` deletes NodePool and NodeClass `ate-isolated`. With
+`node-group` the installer never makes them, and objects of those names may
+belong to someone else, so a run with `node-group` leaves them and prints
+the ones it found. To delete the ones an Auto Mode deploy made, remove
+`mode3-iso` again with `--plugin-action remove --plugins mode3-iso
+--nitro-compute auto-mode`: name the plugin, since the first removal took it
+out of the cluster's record. On an Auto Mode cluster
+with `auto-mode` it does not read the RuntimeClass, which is Auto Mode's own
+there.
+
+On a cluster you connect, `NITRO_COMPUTE=node-group` needs nodes labeled
+`ate.dev/pool=nitro` and `eks.amazonaws.com/nitro-sandbox=true`, of a Nitro
+Sandbox AMI. Step by step, from `native/` with `C`, `R` and `P` as in
+[Run each step yourself](#run-each-step-yourself), name the group and pass
+the setting to each installer step. The control plane step carries
+`mode3-iso` for the `nitro` class; without it the plugin step is refused.
+Add `AUTO_MODE=` to `create cluster` for a cluster without Auto Mode, where
+the control plane step also needs `--nitro-compute node-group`:
+
+```bash
+NODE_GROUPS=system,gvisor,microvm,nitro NITRO_AMI_ID=ami-0123456789abcdef0 CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . create cluster
+CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . bootstrap
+CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . create rds
+go -C installer run . --deploy-control-plane --cluster $C --region $R --profile $P \
+  --sandbox-classes gvisor,microvm,nitro --nitro-compute node-group \
+  --snap-bucket $C-snap-<account>-$R --asset-bucket $C-assets-<account>-$R
+go -C installer run . --plugin-action deploy --plugins mode3-iso --nitro-compute node-group --cluster $C --region $R --profile $P
+```
+
+`--deploy-demo`, `--verify` and `--remove-control-plane` take
+`--nitro-compute` too; each reads `NITRO_COMPUTE` from the environment and
+the config files when it is not given. The nitro group needs no AWS
+permission beyond the node groups' own. With managed node groups,
+`create cluster` then also reads the nitro nodes from the Kubernetes API, as
+it reads self-managed nodes.
+
+`setup-aws teardown` and `setup-aws inventory` look for the nitro group
+whatever `NITRO_COMPUTE` is, since they do not know how the deployment was
+made: they ask for the Auto Scaling group `<cluster>-nitro` and the launch
+template `<cluster>-nitro-nodes` next to the other groups' names. So does
+`create cluster` when it adds a group to an existing cluster, as it checks
+the node group type. A launch template `<cluster>-nitro-nodes` of another
+owner stops the teardown before it deletes anything, as one named for the
+other groups does.
 
 ## Node AMIs
 
@@ -426,7 +548,7 @@ keeps them.
 | `db-rotation` | Secrets Manager login rotation | Rotates the two RDS logins with alternating users; External Secrets syncs them and the ESO Reloader rolls ate-api-server. Needs the RDS database. |
 | `openclaw` | OpenClaw always-on agent | An always-on OpenClaw gateway with its state on EFS; each conversation's agent is an actor that suspends when idle. Needs `efs`; its public images are pinned by digest. |
 | `mode3` | Mode 3 on Kata | Worker Pods are Kata microVMs on the microvm nodes, with gVisor actors inside. |
-| `mode3-iso` | AWS Nitro sandbox | The `nitro` sandbox class: each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode. Chosen as the class (Settings, `--sandbox-classes nitro`), not on the Plugins screen. |
+| `mode3-iso` | AWS Nitro sandbox | The `nitro` sandbox class: each worker Pod is an EKS Auto Mode isolated sandbox. Needs Auto Mode, or with `NITRO_COMPUTE=node-group` the `nitro` node group. Chosen as the class (Settings, `--sandbox-classes nitro`), not on the Plugins screen. |
 
 Each one also runs on its own, on an installed cluster. A plugin that
 changes the control plane (`efs`, `s3files`, `credprovider-aws`, `openclaw`,
@@ -552,6 +674,18 @@ Auto Mode launches for it. It needs Auto Mode, no node group and no Kata.
 | atelet-iso | A copy of the atelet DaemonSet for those nodes, with the ECR credential provider of their Bottlerocket image. |
 | WorkerPool | `counter-iso` in `ate-demo-counter-iso`, with `networkTransport.runtimeClassName: isolated-sandbox` and 2 GiB per worker. It turns off the sandbox's default network and disk throttles with `sandbox.amazonaws.com/*` annotations, since resume times out with them on. |
 | Check | Every worker Pod runs under `isolated-sandbox`, and a counter suspends, resumes and is deleted on it. |
+
+With `NITRO_COMPUTE=node-group` it runs on the `nitro` node group instead
+([Nitro sandbox on node groups](#nitro-sandbox-on-node-groups)), and needs
+no Auto Mode:
+
+| Piece | What it does |
+|---|---|
+| RuntimeClass | `isolated-sandbox`, the one Auto Mode defines: used when it is there, made with the installer's labels when it is not, and refused when it differs. |
+| Nodes | Those labeled `ate.dev/pool=nitro`, Ready, with enough allocatable `eks.amazonaws.com/nitro-sandbox` for the pool's worker Pods. No NodePool or NodeClass. |
+| atelet-iso | A copy of the atelet DaemonSet for those nodes, with atelet's own AL2023 credential provider paths. |
+| WorkerPool | `counter-iso` with the node selector `ate.dev/pool=nitro` and a toleration for the `nitro` taint. |
+| Check | The same, with every worker Pod on a node labeled `ate.dev/pool=nitro`. |
 
 [`slides/demo.md`](slides/demo.md) has copy-paste commands for the actor
 demos on isolated sandboxes.

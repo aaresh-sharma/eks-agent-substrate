@@ -318,8 +318,9 @@ func Deploy(ctx context.Context, w io.Writer, o Options) error {
 	// Mode) would install its release for nothing. Only a deploy refuses:
 	// Delete shares resolvePlugins, and a removal is always the way out.
 	for _, id := range ids {
-		if p, _ := plugin.Get(id); p.NeedsAutoMode != "" && !o.AutoMode {
-			return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, p.NeedsAutoMode, o.Cluster)
+		p, _ := plugin.Get(id)
+		if why := p.AutoModeProblem(po); why != "" {
+			return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, why, o.Cluster)
 		}
 	}
 	// Before anything changes: an installed control plane keeps its release.

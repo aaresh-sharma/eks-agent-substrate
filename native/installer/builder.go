@@ -158,6 +158,10 @@ func (b builder) createCluster(s *state.Setup) execx.Spec {
 	if t := s.NewClusterConfig.NodeGroupType; t != "" && t != nodegroups.Managed {
 		settings = append(settings, "NODE_GROUP_TYPE="+t)
 	}
+	// And the nitro group's AMI, which it cannot be made without.
+	if slices.Contains(s.NodeGroups(), nodegroups.Nitro) {
+		settings = append(settings, "NITRO_AMI_ID="+s.NewClusterConfig.NitroAMIID)
+	}
 	return b.setupAWSSpec(s, "setup-aws create cluster", settings, s.NewClusterConfig.Env(),
 		simPhases(phases.ClusterFor(s.NewClusterConfig.NodeGroupType), simStart(s, "Creating the cluster..."),
 			`level=INFO msg="Cluster ready." cluster=`+s.ClusterName+` created=27 changed=0 took=19m40s`),
@@ -253,6 +257,25 @@ func classFlags(s *state.Setup) []string {
 	return []string{"--sandbox-classes", s.SandboxClasses}
 }
 
+// nitroFlags are --nitro-compute for the children that deploy, check or
+// remove the AWS Nitro sandbox class's plugin, when the run's NITRO_COMPUTE
+// is not the default, or when the child would read another one from the
+// environment it inherits (Settings may have changed it). The default
+// passes nothing, so the default commands stay as they were; a child reads
+// config.local.env, which the install writes with the run's answers. An
+// empty NITRO_COMPUTE in the environment is unset to the child, as to this
+// run (conf, NewSetupFrom).
+func nitroFlags(s *state.Setup) []string {
+	v := s.NewClusterConfig.NitroCompute
+	if v == "" {
+		v = plugin.NitroAutoMode
+	}
+	if env, ok := os.LookupEnv("NITRO_COMPUTE"); v == plugin.NitroAutoMode && (!ok || env == "" || env == v) {
+		return nil
+	}
+	return []string{"--nitro-compute", v}
+}
+
 // release is the release s's steps install and use (releaseFlags).
 func release(s *state.Setup) plugin.Release {
 	return plugin.ChosenRelease(s.InstallPlugins(), s.SubstrateTag, s.ImageRepo)
@@ -298,7 +321,7 @@ func (b builder) controlPlane(s *state.Setup) execx.Spec {
 	)
 	flags := []string{"--deploy-control-plane", "--database", s.Database,
 		"--snap-bucket", s.SnapBucket(), "--asset-bucket", s.AssetBucket()}
-	flags = append(append(flags, releaseFlags(s, ids)...), classFlags(s)...)
+	flags = append(append(append(flags, releaseFlags(s, ids)...), classFlags(s)...), nitroFlags(s)...)
 	spec := b.selfSpec(s, s.ClusterName, "ate-setup deploy ate-system", sim, flags...)
 	spec.Display = "go run ./cmd/ate-setup deploy ate-system  (substrate " + rel.Tag + " + deploy/eks, " + ateClasses + ", database " + s.Database + ")"
 	spec.DisplayIsSummary = true
@@ -342,7 +365,7 @@ func (b builder) pluginStep(s *state.Setup, label string, ids []string) execx.Sp
 	// No plugin settings (state.PluginKeys) in its Env: --plugin-action
 	// reads them from the config files itself (loadPluginSettings), so the
 	// log, which prints each Spec's Env, never holds WHATSAPP_PEER.
-	return b.selfSpec(s, s.ClusterName, label, sim, append([]string{"--plugin-action", plugin.ActionDeploy}, releaseFlags(s, ids)...)...)
+	return b.selfSpec(s, s.ClusterName, label, sim, append(append([]string{"--plugin-action", plugin.ActionDeploy}, releaseFlags(s, ids)...), nitroFlags(s)...)...)
 }
 
 // demoStep re-executes the installer with --deploy-demo --verify: the counter
@@ -364,7 +387,7 @@ func (b builder) demoStep(s *state.Setup) execx.Spec {
 		sim = append(sim, demo.VerifyLine+c, "suspended counter-"+c+"; snapshot in s3://"+s.SnapBucket()+"/",
 			demo.VerifyPassLine+c+": memory, file and rootfs counters continued after resume")
 	}
-	flags := append(append([]string{"--deploy-demo", "--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...)
+	flags := append(append(append([]string{"--deploy-demo", "--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...), nitroFlags(s)...)
 	return b.selfSpec(s, s.ClusterName, "counter demo", sim, flags...)
 }
 
@@ -373,7 +396,7 @@ func (b builder) demoStep(s *state.Setup) execx.Spec {
 func (b builder) verify(s *state.Setup) execx.Spec {
 	// The release flags, as demoStep passes them: verify reads the tree of
 	// the release that was installed (review F11).
-	return b.selfSpec(s, s.ClusterName, "verify", nil, append(append([]string{"--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...)...)
+	return b.selfSpec(s, s.ClusterName, "verify", nil, append(append(append([]string{"--verify"}, releaseFlags(s, s.InstallPlugins())...), classFlags(s)...), nitroFlags(s)...)...)
 }
 
 // removeControlPlane re-executes the installer with --remove-control-plane
@@ -397,7 +420,7 @@ func (b builder) removeControlPlane(s *state.Setup) execx.Spec {
 		`namespace "ate-system" deleted`,
 		controlplane.RemovedLine,
 	)
-	return b.selfSpec(s, s.ClusterName, "ate-setup delete ate-system", sim, "--remove-control-plane", "--tag", s.SubstrateTag)
+	return b.selfSpec(s, s.ClusterName, "ate-setup delete ate-system", sim, append([]string{"--remove-control-plane", "--tag", s.SubstrateTag}, nitroFlags(s)...)...)
 }
 
 // simRecord is the plugin record of s's cluster in the dry run's story: the

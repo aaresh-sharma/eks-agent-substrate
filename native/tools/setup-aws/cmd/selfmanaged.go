@@ -457,8 +457,9 @@ var nodeWaitTimeout = 30 * time.Minute
 
 // waitSelfManaged waits, group by group, until the Auto Scaling group has
 // its desired instances InService and as many nodes of the group
-// (ate.dev/pool=<group>) are Ready in the Kubernetes API, then for the
-// add-ons, which need the nodes.
+// (ate.dev/pool=<group>) are Ready in the Kubernetes API (and for the nitro
+// group until they advertise Nitro sandbox capacity, waitNitroCapacity),
+// then for the add-ons, which need the nodes.
 func (r *clusterRun) waitSelfManaged(ctx context.Context) error {
 	if r.plan() {
 		slog.Info("plan: would wait for the self-managed nodes to be Ready and the add-ons to be ACTIVE")
@@ -548,6 +549,11 @@ func (r *clusterRun) waitSelfManaged(ctx context.Context) error {
 			return err
 		}
 		slog.Info("nodes Ready", "nodegroup", g.Name, "ready", ready)
+		if g.Name == nodegroups.Nitro {
+			if err := r.waitNitroCapacity(ctx, kube, desired); err != nil {
+				return err
+			}
+		}
 	}
 	return r.waitAddons(ctx)
 }

@@ -23,11 +23,11 @@ rerun the failed step.
 
 | Step | Command | What it creates |
 |---|---|---|
-| Cluster | `setup-aws create cluster` | A VPC with public and private subnets across two or more Availability Zones and a NAT gateway. The cluster and node IAM roles. An EKS cluster (Auto Mode by default, standard optional) whose public endpoint accepts only `EKS_PUBLIC_ACCESS_CIDRS` (default `auto`: this machine's public address as a /32 on a new cluster, refused when the network reaches the internet from several addresses; then set the variable to your egress ranges, or to `0.0.0.0/0`, since IAM still authenticates every call; an existing cluster keeps its ranges unless the variable is set), checked by connecting to the endpoint once the cluster is active, with an access entry for you and the add-ons. The managed node groups `NODE_GROUPS` names (the wizard derives it from the sandbox classes and plugins: see [Sandbox classes and node groups](#sandbox-classes-and-node-groups); by default `system`, `gvisor` and `microvm`), labeled `ate.dev/pool` and tainted for their sandbox class, each with a launch template (IMDSv2, hop limit 1, encrypted gp3, nested virtualization on `microvm`; with `NODE_AMI_ID`, that AMI and a nodeadm `NodeConfig` that joins the node with its labels and taints). With `NODE_GROUP_TYPE=self-managed`, each group is an Auto Scaling group `<cluster>-<group>` instead, whose template also names the AMI (`NODE_AMI_ID`, or the recommended EKS optimized AL2023 AMI from SSM), the instance profile `<cluster>-<region>-eks-node` and the cluster security group and always carries the `NodeConfig`, with an `EC2_LINUX` access entry for the node role; the run waits for the nodes to be Ready. `NODE_GROUPS=none` on Auto Mode makes no node group, no launch template and no node IAM role. |
+| Cluster | `setup-aws create cluster` | A VPC with public and private subnets across two or more Availability Zones and a NAT gateway. The cluster and node IAM roles. An EKS cluster (Auto Mode by default, standard optional) whose public endpoint accepts only `EKS_PUBLIC_ACCESS_CIDRS` (default `auto`: this machine's public address as a /32 on a new cluster, refused when the network reaches the internet from several addresses; then set the variable to your egress ranges, or to `0.0.0.0/0`, since IAM still authenticates every call; an existing cluster keeps its ranges unless the variable is set), checked by connecting to the endpoint once the cluster is active, with an access entry for you and the add-ons. The managed node groups `NODE_GROUPS` names (the wizard derives it from the sandbox classes and plugins: see [Sandbox classes and node groups](#sandbox-classes-and-node-groups); by default `system`, `gvisor` and `microvm`), labeled `ate.dev/pool` and tainted for their sandbox class, each with a launch template (IMDSv2, hop limit 1, encrypted gp3, nested virtualization on `microvm`; with `NODE_AMI_ID`, that AMI and a nodeadm `NodeConfig` that joins the node with its labels and taints). With `NODE_GROUP_TYPE=self-managed`, each group is an Auto Scaling group `<cluster>-<group>` instead, whose template also names the AMI (`NODE_AMI_ID`, or the recommended EKS optimized AL2023 AMI from SSM), the instance profile `<cluster>-<region>-eks-node` and the cluster security group and always carries the `NodeConfig`, with an `EC2_LINUX` access entry for the node role; the run waits for the nodes to be Ready. The `nitro` group (the `nitro` class with `NITRO_COMPUTE=node-group`) runs the Nitro Sandbox AMI `NITRO_AMI_ID` with Nitro Enclaves on, and the run waits until its nodes advertise `eks.amazonaws.com/nitro-sandbox`. `NODE_GROUPS=none` on Auto Mode makes no node group, no launch template and no node IAM role. |
 | Provision | `setup-aws bootstrap` | S3 buckets for snapshots and microVM assets. EKS Pod Identity roles for ate-api-server and atelet. Private ECR repositories. |
 | Database | `setup-aws create rds` | A private RDS for PostgreSQL instance in the private subnets. Port 5432 is open only to the cluster security group. RDS manages the admin password, and the owner and read-write logins are in Secrets Manager. The schema is created from inside the cluster. With `--database=bundled`, Substrate's bundled PostgreSQL runs in the cluster instead, on an encrypted gp3 EBS volume from the installer's StorageClass. |
 | Control plane | `ate-setup deploy ate-system` | A StorageClass for encrypted gp3 EBS volumes that carry the owner tag and `TAGS` (`substrate-eks-auto-ebs` on Auto Mode, `substrate-eks-ebs` on a standard cluster), the default class on a cluster the installer created. The pinned Substrate release with its published images (the fork's with the `nitro` class or `mode3`), ate-setup's gVisor sandbox class and, with the `microvm` class, its microVM class with the assets staged in S3, and the EKS changes in `deploy/eks`. |
-| Nitro sandboxes (`nitro` class) | `substrate-eks --plugin-action deploy --plugins mode3-iso` | NodePool `ate-isolated` on EKS Auto Mode, atelet-iso, and the counter pool `counter-iso` on RuntimeClass `isolated-sandbox`, checked across a suspend and resume. |
+| Nitro sandboxes (`nitro` class) | `substrate-eks --plugin-action deploy --plugins mode3-iso` | NodePool `ate-isolated` on EKS Auto Mode, atelet-iso, and the counter pool `counter-iso` on RuntimeClass `isolated-sandbox`, checked across a suspend and resume. With `NITRO_COMPUTE=node-group` (`--nitro-compute`), no NodePool: RuntimeClass `isolated-sandbox` when the cluster has none, and atelet-iso and `counter-iso` on the `nitro` node group's nodes. |
 | Demo (`--demo`) | the counter image build, `kubectl apply`, `kubectl ate create` | The counter image, built from the release source and pushed to the private ECR repository `<cluster>/counter`. The counter demo on the `gvisor` and `microvm` classes, each pinned to its node group; with `nitro`, its check runs `counter-iso`'s too. |
 | Plugins (`--plugins`) | `substrate-eks --plugin-action deploy`, then `verify` | Each chosen plugin's AWS resources (`setup-aws plugin <id>`) and Kubernetes objects, then its check. See [Plugins](#plugins). |
 
@@ -199,8 +199,9 @@ the notes printed on exit.
 | `--region`, `--profile` | `AWS_REGION`, `AWS_PROFILE` | The AWS Region and shared config profile. |
 | `--tag` | `SUBSTRATE_TAG` (`v1.0.0`) | The Substrate release to install. |
 | `--image-repo` | `SUBSTRATE_IMAGE_REPO` (`ghcr.io/agent-substrate/substrate`) | Where the release's images come from. |
-| `--sandbox-classes` | `SANDBOX_CLASSES` (`gvisor,microvm`) | The sandbox classes, in any combination of `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox, Auto Mode only). They decide a new cluster's node groups. |
+| `--sandbox-classes` | `SANDBOX_CLASSES` (`gvisor,microvm`) | The sandbox classes, in any combination of `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox: Auto Mode, or the `nitro` node group with `--nitro-compute node-group`). They decide a new cluster's node groups. |
 | `--database` | `rds` | `rds` (Amazon RDS for PostgreSQL) or `bundled` (in-cluster PostgreSQL). |
+| `--nitro-compute` | `NITRO_COMPUTE` (`auto-mode`) | Where the `nitro` class runs: `auto-mode` (nodes EKS Auto Mode launches) or `node-group` (the `nitro` node group, from the Nitro Sandbox AMI `NITRO_AMI_ID`). The wizard passes it to the steps that deploy, check or remove `mode3-iso` when it is not the default. |
 | `--demo` | off | End the install with the counter demo, and check it. |
 | `--plugins` | none (the wizard preselects `llm-gateway` where the cluster gets the `system` group anyway) | Comma-separated plugin IDs to preselect. |
 | `--dry-run` | off | Walk every screen with simulated commands; nothing touches AWS. |
@@ -219,8 +220,10 @@ macOS are under `~/Library/Caches/substrate-eks/` instead.
 ## Sandbox classes and node groups
 
 The classes are `gvisor`, `microvm` and `nitro` (the AWS Nitro sandbox: each
-worker Pod an EKS Auto Mode isolated sandbox, Auto Mode only), in any
-combination. A cluster the run creates gets these node groups, which the
+worker Pod an EKS Auto Mode isolated sandbox, Auto Mode only; with
+`NITRO_COMPUTE=node-group`, a Nitro sandbox on the `nitro` node group, with
+or without Auto Mode), in any combination. A cluster the run creates gets
+these node groups, which the
 wizard passes `setup-aws create cluster` as `NODE_GROUPS`
 (`tools/setup-aws/nodegroups` holds the rule, and setup-aws refuses a list
 outside it):
@@ -232,15 +235,21 @@ outside it):
 | `microvm` class | `microvm` (nested virtualization) |
 | `mode3` plugin (Kata, kata-clh) | `microvm`, even without the `microvm` class |
 | `nitro` class | none: its `ate-isolated` NodePool is Auto Mode's |
+| `nitro` class with `NITRO_COMPUTE=node-group` | `nitro` (`NODE_GROUPS` with `nitro`; Nitro Enclaves on, `NITRO_AMI_ID`) |
 | `system`, without Auto Mode | always (required) |
-| `system`, Auto Mode with RDS | when a `gvisor` or `microvm` group is created, which the control plane is cordoned onto |
+| `system`, Auto Mode with RDS | when a `gvisor`, `microvm` or `nitro` group is created, which the control plane is cordoned onto |
 | `system`, Auto Mode with the bundled PostgreSQL | only for a plugin that runs on it (`NODE_GROUPS=gvisor` for the `gvisor` class alone) |
 | A plugin on `system` (`llm-gateway`, `efs`, `db-rotation`, `credprovider-aws`) | `system`, whatever the classes and database it is offered with |
 | Auto Mode and only `nitro`, with no plugin that adds a group (`mode3`, or one on `system`) | none (`NODE_GROUPS=none`): no launch template, no node IAM role; the control plane, the bundled PostgreSQL and every installer controller run on Auto Mode nodes |
-| No Auto Mode with nothing to run sandboxes on (`nitro` alone) | refused |
+| No Auto Mode with nothing to run sandboxes on (`nitro` alone on Auto Mode's nodes) | refused |
 
-`setup-aws create cluster` accepts any of the three groups, or none, on Auto
-Mode; without it, the `system` group and a `gvisor` or `microvm` group.
+`setup-aws create cluster` accepts any of the four groups, or none, on Auto
+Mode; without it, the `system` group and a `gvisor`, `microvm` or `nitro`
+group. `NODE_GROUPS` never names `nitro` by default: it stays
+`system,gvisor,microvm`, and the wizard adds `nitro` only for the `nitro`
+class with `NITRO_COMPUTE=node-group`. The `nitro` group needs
+`NITRO_AMI_ID`, a Nitro Sandbox AMI; see [Nitro sandbox on node
+groups](../README.md#nitro-sandbox-on-node-groups).
 
 `ate-setup` gets `--sandbox-classes gvisor`, plus `microvm` with the
 `microvm` class: in v1.0.0 its `gvisor` class is the `gvisor-default`
@@ -295,7 +304,7 @@ control plane deploy keeps their needs.
 | `db-rotation` | the RDS database | Secrets Manager rotation of the two RDS logins, synced by External Secrets, with the ESO Reloader rolling ate-api-server |
 | `openclaw` | `efs` | an always-on OpenClaw gateway; each conversation's agent is an actor. Its public images are pinned by digest; `OPENCLAW_GATEWAY_IMAGE`, `OPENCLAW_ACTOR_IMAGE` and `OPENCLAW_DASHBOARD_IMAGE` replace them, pinned by digest too. The gateway UI asks for the gateway token, key `gateway-token` of Secret `openclaw/openclaw-secrets`; the deploy prints the command that reads it. With `llm-gateway` installed, it adds NetworkPolicy `llm-gateway/llm-gateway-from-openclaw`, which admits the gateway's pods (no other openclaw pod) to the LLM gateway, so the gateway's own agent (the gateway UI's chat) gets a model; deploy openclaw again after adding llm-gateway |
 | `mode3` | the `microvm` node group (a new cluster gets it) | worker Pods as Kata microVMs with gVisor actors inside, from the mode 3 build of Substrate |
-| `mode3-iso` | EKS Auto Mode | the `nitro` sandbox class (not on the Plugins screen): worker Pods as EKS Auto Mode isolated sandboxes, no node group |
+| `mode3-iso` | EKS Auto Mode, or `NITRO_COMPUTE=node-group` and the `nitro` node group | the `nitro` sandbox class (not on the Plugins screen): worker Pods as EKS Auto Mode isolated sandboxes, no node group; or Nitro sandboxes on the `nitro` node group |
 
 A plugin pinned to a node group (`Plugin.Nodes`) needs that group's nodes:
 `llm-gateway`, `efs`, `db-rotation` and `credprovider-aws` run on `system`,

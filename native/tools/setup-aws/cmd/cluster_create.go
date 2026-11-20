@@ -59,6 +59,12 @@ type clusterConfig struct {
 	// NodeGroupType is NODE_GROUP_TYPE (nodegroups.Types): EKS managed node
 	// groups, or self-managed ones (selfmanaged.go). Empty is managed.
 	NodeGroupType string
+	// The nitro node group's (NODE_GROUPS names it for the AWS Nitro sandbox
+	// class with NITRO_COMPUTE=node-group; nitro.go): its AMI, NITRO_AMI_ID,
+	// a Nitro Sandbox AMI and never NODE_AMI_ID; its instance type, which
+	// must support Nitro Enclaves; and its nodes.
+	NitroAMIID, NitroInstanceType string
+	NitroNodes                    int
 }
 
 var ccfg clusterConfig
@@ -75,14 +81,17 @@ for a new cluster; an explicit value is applied to an existing one), and a
 check that this machine reaches it; a cluster-admin access entry
 for the caller; the add-ons; and the node groups NODE_GROUPS names (by
 default system, gvisor and microvm), each with its launch template (IMDSv2
-only, hop limit 1, encrypted gp3, nested virtualization on microvm): EKS
-managed node groups, or with NODE_GROUP_TYPE=self-managed an Auto Scaling
-group each, with an instance profile and an access entry for the node role.
-Without Auto Mode the system group and a gvisor or microvm group are
-required. With it any of the three, or none, will do: Auto Mode's nodes run
-what no group is made for, and NODE_GROUPS=none makes no node group (and no
-node IAM role). Idempotent: a rerun creates only what is missing, and
---plan changes nothing.`,
+only, hop limit 1, encrypted gp3, nested virtualization on microvm, Nitro
+Enclaves on nitro): EKS managed node groups, or with
+NODE_GROUP_TYPE=self-managed an Auto Scaling group each, with an instance
+profile and an access entry for the node role. The nitro group, for the AWS
+Nitro sandbox on node groups, runs the Nitro Sandbox AMI NITRO_AMI_ID, and
+the run waits until its nodes advertise Nitro sandbox capacity. Without Auto
+Mode the system group and a gvisor, microvm or nitro group are required.
+With it any of them, or none, will do: Auto Mode's nodes run what no group
+is made for, and NODE_GROUPS=none makes no node group (and no node IAM
+role). Idempotent: a rerun creates only what is missing, and --plan changes
+nothing.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		e, err := newEnv(cmd.Context())
 		if err != nil {
@@ -108,11 +117,15 @@ func init() {
 	f.IntVar(&ccfg.GvisorNodes, "gvisor-nodes", getEnv("GVISOR_NODES", 2), "nodes in the gvisor node group (GVISOR_NODES)")
 	f.IntVar(&ccfg.MicrovmNodes, "microvm-nodes", getEnv("MICROVM_NODES", 2), "nodes in the microvm node group (MICROVM_NODES)")
 	f.StringVar(&ccfg.NodeGroups, "node-groups", getEnv("NODE_GROUPS", nodegroups.Default),
-		`node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
+		`node groups to make, comma-separated (system, gvisor, microvm, nitro), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
 	f.StringVar(&ccfg.NodeAMIID, "node-ami-id", getEnv("NODE_AMI_ID", ""),
 		`AMI of the node groups to make, one that joins with nodeadm (Amazon Linux 2023); empty: the Amazon EKS optimized AL2023 AMI (NODE_AMI_ID)`)
 	f.StringVar(&ccfg.NodeGroupType, "node-group-type", getEnv("NODE_GROUP_TYPE", nodegroups.Managed),
 		`"managed": EKS managed node groups; "self-managed": an Auto Scaling group per node group, whose nodes join with nodeadm (NODE_GROUP_TYPE)`)
+	f.StringVar(&ccfg.NitroAMIID, "nitro-ami-id", getEnv("NITRO_AMI_ID", ""),
+		"AMI of the nitro node group: a Nitro Sandbox AMI built with awslabs/amazon-eks-ami (enable_pod_isolation=true); required when NODE_GROUPS names nitro (NITRO_AMI_ID)")
+	f.StringVar(&ccfg.NitroInstanceType, "nitro-instance-type", getEnv("NITRO_INSTANCE_TYPE", "m8i.xlarge"), "instance type of the nitro node group; needs Nitro Enclaves (NITRO_INSTANCE_TYPE)")
+	f.IntVar(&ccfg.NitroNodes, "nitro-nodes", getEnv("NITRO_NODES", 1), "nodes in the nitro node group (NITRO_NODES)")
 	createCmd.AddCommand(createClusterCmd)
 }
 
@@ -153,6 +166,8 @@ type clusterRun struct {
 	// enaRequired are the instance types that run only AMIs with ENA.
 	enaRequired map[string]bool
 	image       *nodeImage // NODE_AMI_ID, when set
+	// nitroImage is NITRO_AMI_ID, read when the nitro group is wanted.
+	nitroImage *nodeImage
 	// archImages are the AMIs of self-managed groups without NODE_AMI_ID,
 	// by architecture: the recommended EKS optimized AL2023 AMI.
 	archImages map[ec2types.ArchitectureValues]*nodeImage
@@ -271,6 +286,9 @@ func (r *clusterRun) preflight(ctx context.Context) error {
 		return err
 	}
 	if err := r.readCluster(ctx); err != nil {
+		return err
+	}
+	if err := r.requireNitroAMI(); err != nil {
 		return err
 	}
 	if err := r.checkGroupType(ctx); err != nil {
@@ -485,8 +503,9 @@ func onOff(b bool) string {
 }
 
 // checkInstanceTypes: the microvm type must support nested virtualization
-// (Kata needs /dev/kvm on a regular instance), and each type's architecture
-// picks its node group's AMI type.
+// (Kata needs /dev/kvm on a regular instance), the nitro type Nitro Enclaves
+// (the Nitro Sandbox AMI needs them on), and each type's architecture picks
+// its node group's AMI type.
 func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 	var types []ec2types.InstanceType
 	for _, g := range r.groups() {
@@ -515,6 +534,9 @@ func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 		}
 		if g.NestedVirt && !slices.Contains(it.ProcessorInfo.SupportedFeatures, ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization) {
 			return fmt.Errorf("%s does not support nested virtualization, which the microvm node group needs; list the types that do with:\n  aws ec2 describe-instance-types --filters Name=processor-info.supported-features,Values=nested-virtualization --query 'InstanceTypes[].InstanceType'", g.InstanceType)
+		}
+		if g.Enclave && it.NitroEnclavesSupport != ec2types.NitroEnclavesSupportSupported {
+			return fmt.Errorf("%s does not support Nitro Enclaves, which the nitro node group needs (NITRO_INSTANCE_TYPE); list the types that do with:\n  aws ec2 describe-instance-types --filters Name=nitro-enclaves-support,Values=supported --query 'InstanceTypes[].InstanceType'", g.InstanceType)
 		}
 		r.enaRequired[g.InstanceType] = it.NetworkInfo != nil && it.NetworkInfo.EnaSupport == ec2types.EnaSupportRequired
 		switch {

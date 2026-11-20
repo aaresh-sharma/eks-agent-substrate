@@ -78,7 +78,7 @@ func (m *Model) enterPlugins() {
 				if !p.Default {
 					continue
 				}
-				if with := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, []string{p.ID}); m.s.ClusterIsNew && !slices.Equal(with, groups) {
+				if with := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, m.s.NewClusterConfig.NitroCompute, []string{p.ID}); m.s.ClusterIsNew && !slices.Equal(with, groups) {
 					m.notice = fmt.Sprintf("not preselected: %s (adds the %s node group)", p.ID, strings.Join(added(groups, with), " and "))
 					continue
 				}
@@ -108,8 +108,9 @@ func (m Model) addedGroups(p plugin.Plugin) []string {
 	}
 	drop := append(m.requiredBy(p.ID), p.ID)
 	rest := slices.DeleteFunc(m.chosenIDs(), func(id string) bool { return slices.Contains(drop, id) })
-	without := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, rest)
-	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, append(rest, p.ID)))
+	nitro := m.s.NewClusterConfig.NitroCompute
+	without := state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, nitro, rest)
+	return added(without, state.NewNodeGroups(m.s.AutoMode, m.s.Database, m.s.SandboxClasses, nitro, append(rest, p.ID)))
 }
 
 // groupSettingsProblem is why a node group the new cluster gets with the
@@ -296,7 +297,7 @@ func (m Model) pluginsView() string {
 		}
 		note := ""
 		switch {
-		case why != "" && p.NeedsAutoMode != "" && !m.s.AutoMode:
+		case why != "" && p.AutoModeProblem(plugin.Options{AutoMode: m.s.AutoMode, NitroCompute: m.s.NewClusterConfig.NitroCompute}) != "":
 			note = "needs Auto Mode"
 		case why != "" && p.NeedsRDS != "" && m.s.Database == state.DatabaseBundled:
 			note = "needs RDS"

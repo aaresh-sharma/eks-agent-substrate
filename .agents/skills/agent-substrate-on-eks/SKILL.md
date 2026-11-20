@@ -61,7 +61,9 @@ from `native/`, in the background with a log file, and read the tail. Set
 - Plugins: `llm-gateway` (default), `efs`, `s3files` (needs `efs`),
   `credprovider-aws`, `db-rotation` (needs RDS), `openclaw` (needs `efs`;
   its public images are pinned by digest, and `OPENCLAW_*_IMAGE` replace
-  them, pinned too), `mode3`, `mode3-iso` (needs Auto Mode).
+  them, pinned too), `mode3`, `mode3-iso` (needs Auto Mode, or
+  `NITRO_COMPUTE=node-group` with the `nitro` node group of a Nitro Sandbox
+  AMI; pass `--nitro-compute node-group` to the installer steps then).
   `efs` and `s3files` build on the counter demo: deploy the demo first.
 - `--plan` on a `setup-aws` command reports what it would do and writes
   nothing.
@@ -104,6 +106,9 @@ Read the real error before changing anything. The wizard's log is under
 | Demo actors are `ACTOR_STATE_CRASHED` with "worker pod went away" | The worker pods rolled while they ran, for example on a control plane reinstall | `kubectl ate revert actor NAME -a ATESPACE`; `--verify` reverts its own |
 | `--plugin-action verify --plugins db-rotation` stops at "rotation did not finish" | The rotation function failed a step | `aws logs tail /aws/lambda/$C-db-owner` (or `-db-readwrite`); it logs createSecret, setSecret, testSecret and finishSecret |
 | A step stops with `ExpiredToken` after 30 minutes | The AWS session ended and was not refreshed | Refresh the profile's credentials and rerun the step |
+| `create cluster` stops: `NITRO_AMI_ID is empty`, or `the nodes of AMI ... advertise no Nitro sandbox capacity` | `NITRO_COMPUTE=node-group` needs a Nitro Sandbox AMI; the EKS optimized AMI, or an AMI built without `enable_pod_isolation=true`, has no Nitro sandbox | Build one with awslabs/amazon-eks-ami (`make k8s=<cluster version> os_distro=al2023 enable_pod_isolation=true`), set `NITRO_AMI_ID` and run `create cluster` again. A `nitro` node group that exists keeps its AMI: tear the deployment down (`--remove-control-plane`, then `setup-aws teardown`) and create it again |
+| `create cluster` stops: `the nitro node group's nodes have not all joined and become Ready` | The nodes are slow to join, or one is being replaced; no Ready node lacked the Nitro sandbox | Run `create cluster` again: it waits for them again |
+| `mode3-iso` stops: `RuntimeClass isolated-sandbox exists with ...` | Another RuntimeClass of that name, with another handler, node selector or overhead, is on the cluster; the installer never changes it | Delete it if it is not in use, or give it the spec the message names, and deploy again |
 
 Logs to read: `kubectl -n ate-system logs ds/atelet -c atelet`,
 `kubectl -n ate-system logs deploy/ate-api-server`, the worker pod in the
@@ -113,7 +118,9 @@ jq .status`.
 ## Change the configuration
 
 - Cluster knobs (Kubernetes version, Auto Mode, node types and counts, the
-  node AMI `NODE_AMI_ID`, the node group type `NODE_GROUP_TYPE`, API
+  node AMI `NODE_AMI_ID`, the node group type `NODE_GROUP_TYPE`, where
+  the `nitro` class runs `NITRO_COMPUTE` with the `nitro` group's
+  `NITRO_AMI_ID`, `NITRO_INSTANCE_TYPE` and `NITRO_NODES`, API
   CIDRs), `TAGS`, the release and its image repository: the wizard's
   Settings screen, which writes `config.local.env`, or edit
   `config.local.env`. Auto Mode is fixed once the cluster exists; change it

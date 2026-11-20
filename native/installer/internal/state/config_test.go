@@ -24,6 +24,10 @@ SYSTEM_NODES=2
 GVISOR_NODES=2
 MICROVM_NODES=2
 NODE_GROUP_TYPE=managed
+NITRO_COMPUTE=auto-mode
+NITRO_AMI_ID=
+NITRO_INSTANCE_TYPE=m8i.xlarge
+NITRO_NODES=1
 # Space-separated key=value tags.
 TAGS="project=agent-substrate auto-delete=no"
 EKS_PUBLIC_ACCESS_CIDRS='0.0.0.0/0'
@@ -218,7 +222,8 @@ func TestValidateConfigBothWays(t *testing.T) {
 		"KUBERNETES_VERSION": "1.36", "AUTO_MODE": "yes", "SYSTEM_INSTANCE_TYPE": "big", "GVISOR_NODES": "0",
 		"MICROVM_NODES": "100", "TAGS": "a=b c", "EKS_PUBLIC_ACCESS_CIDRS": "", "SUBSTRATE_TAG": "latest",
 		"SUBSTRATE_IMAGE_REPO": "Not A Repo", "SANDBOX_CLASSES": "kata", "NODE_AMI_ID": "ami-xyz",
-		"NODE_GROUP_TYPE": "unmanaged",
+		"NODE_GROUP_TYPE": "unmanaged", "NITRO_COMPUTE": "nodegroup", "NITRO_AMI_ID": "ami-xyz", "NITRO_INSTANCE_TYPE": "big",
+		"NITRO_NODES": "0",
 	} {
 		v := map[string]string{}
 		for k, x := range good {

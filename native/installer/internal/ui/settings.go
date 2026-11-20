@@ -39,6 +39,7 @@ const (
 	fClass         // one sandbox class, on or off
 	fDatabase      // RDS or the bundled PostgreSQL
 	fNodeGroupType // NODE_GROUP_TYPE, managed or self-managed
+	fNitroCompute  // NITRO_COMPUTE, auto-mode or node-group
 )
 
 // The values that are not edited as text: the classes (config.env's
@@ -59,8 +60,12 @@ type field struct {
 }
 
 // settingsFields are the fields for a new or connected cluster, with node
-// group rows for groups, the node groups a new cluster gets.
-func settingsFields(newCluster bool, groups []string) []field {
+// group rows for groups, the node groups a new cluster gets. A new cluster
+// gets the row that says where the nitro class runs (NITRO_COMPUTE) when
+// that class is on or Auto Mode is off (nitroRow: off Auto Mode the class
+// needs node-group), and the nitro node group's AMI row when the group is
+// made (nitroAMI).
+func settingsFields(newCluster bool, groups []string, nitroRow, nitroAMI bool) []field {
 	var f []field
 	if newCluster {
 		f = append(f,
@@ -72,6 +77,12 @@ func settingsFields(newCluster bool, groups []string) []field {
 	}
 	for _, c := range state.Classes {
 		f = append(f, field{kind: fClass, key: c, label: state.ClassTitle(c), section: "Sandbox classes"})
+	}
+	if newCluster && nitroRow {
+		f = append(f, field{kind: fNitroCompute, key: "NITRO_COMPUTE", label: "Nitro sandbox on", section: "Sandbox classes"})
+		if nitroAMI {
+			f = append(f, field{kind: fText, key: "NITRO_AMI_ID", label: "Nitro AMI", section: "Sandbox classes"})
+		}
 	}
 	if newCluster {
 		for _, g := range groups {
@@ -110,8 +121,18 @@ var help = map[string]string{
 	state.ClassGVisor:         "gVisor runs actors in a user-space kernel, on the gvisor node group." + classesHelp,
 	state.ClassMicroVM:        "microVM runs actors in Kata microVMs on the microvm node group, whose instance type needs nested virtualization." + classesHelp,
 	state.ClassNitro: "The AWS Nitro sandbox makes each worker Pod an EKS Auto Mode isolated sandbox (RuntimeClass isolated-sandbox) " +
-		"on nodes Auto Mode launches for it, so it needs Auto Mode and makes no node group. It installs the fork's release " +
-		"(one release per install), and is set up and checked in its own step after the control plane." + classesHelp,
+		"on nodes Auto Mode launches for it, so it needs Auto Mode and makes no node group. With Nitro sandbox on node-group " +
+		"(NITRO_COMPUTE) it runs on the nitro node group instead, from a Nitro Sandbox AMI you build, and needs no Auto Mode. " +
+		"It installs the fork's release (one release per install), and is set up and checked in its own step after the control plane." + classesHelp,
+	"NITRO_COMPUTE": "Where the AWS Nitro sandbox runs. auto-mode: on nodes EKS Auto Mode launches (NodePool ate-isolated), which needs Auto Mode. " +
+		"node-group: on the nitro node group, of the node group type, with Nitro Enclaves on, from a Nitro Sandbox AMI (Nitro AMI); no Auto Mode needed.",
+	// The panel adds the build command for the version Settings has
+	// (nitroAMIBuild) and shows this, not config.env's comment, whose
+	// command is for one version.
+	"NITRO_AMI_ID": "The nitro node group's AMI: a Nitro Sandbox AMI, built with awslabs/amazon-eks-ami for the cluster's Kubernetes version " +
+		"(enable_pod_isolation=true). The EKS optimized AMI cannot run the Nitro sandbox: create cluster waits until the nodes advertise " +
+		"eks.amazonaws.com/nitro-sandbox, and stops when they do not.",
+	"NITRO_INSTANCE_TYPE": "The nitro node group runs the AWS Nitro sandbox's worker Pods; its instance type needs Nitro Enclaves.",
 	dbKey: "Where the control plane keeps its state: Amazon RDS for PostgreSQL (adds the Create the database step), or the bundled PostgreSQL in the cluster. " +
 		"On a new Auto Mode cluster with a gVisor or microVM group, RDS pins the control plane to the system node group, which is made for it; " +
 		"with the bundled PostgreSQL the control plane runs on Auto Mode nodes, and the system group is made only for a plugin that runs on it.",
@@ -130,10 +151,33 @@ var classNote = map[string]string{
 	state.ClassNitro:   "on Auto Mode nodes",
 }
 
+// nitroGroupNote is the nitro class's note on the nitro node group.
+const nitroGroupNote = "nitro node group"
+
+// nitroAMIBuild is the panel's line on how to build NITRO_AMI_ID for
+// Kubernetes version, the KUBERNETES_VERSION Settings has now.
+func nitroAMIBuild(version string) string {
+	return "For Kubernetes " + version + ", build it " + nodegroups.NitroAMIBuild(version) + "."
+}
+
+// nitroSubtitle is the Set up Nitro sandboxes step's subtitle for
+// NITRO_COMPUTE (compute; empty is auto-mode).
+func nitroSubtitle(compute string) string {
+	if compute == plugin.NitroNodeGroup {
+		return "The AWS Nitro sandbox class: RuntimeClass isolated-sandbox, atelet-iso and a counter pool on the nitro node group (ate.dev/pool=nitro), checked across a suspend and resume"
+	}
+	return "The AWS Nitro sandbox class: NodePool ate-isolated on EKS Auto Mode, atelet-iso, and a counter pool on RuntimeClass isolated-sandbox, checked across a suspend and resume"
+}
+
+// nitroGroup reports NITRO_COMPUTE=node-group as Settings has it now.
+func (st *settingsScreen) nitroGroup() bool {
+	return st.values["NITRO_COMPUTE"] == plugin.NitroNodeGroup
+}
+
 // classShort is the note of a class this run cannot have; the panel beside
 // says why in full.
 func (m *Model) classShort(c string) string {
-	if c == state.ClassNitro {
+	if c == state.ClassNitro && !m.set.nitroGroup() {
 		return "needs EKS Auto Mode"
 	}
 	return "no " + c + " node group"
@@ -162,7 +206,7 @@ func (m *Model) settingsAutoMode() bool {
 // settingsGroups are the node groups of the cluster as Settings has it now.
 func (m *Model) settingsGroups() []string {
 	if m.s.ClusterIsNew {
-		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[dbKey], m.set.values[classKey], m.s.Plugins)
+		return state.NewNodeGroups(m.settingsAutoMode(), m.set.values[dbKey], m.set.values[classKey], m.set.values["NITRO_COMPUTE"], m.s.Plugins)
 	}
 	return m.s.NodeGroups()
 }
@@ -175,7 +219,8 @@ func (m *Model) refreshFields() {
 	if st.cursor >= 0 && st.cursor < len(st.fields) {
 		at = st.fields[st.cursor].key
 	}
-	st.fields = settingsFields(m.s.ClusterIsNew, m.settingsGroups())
+	nitro := st.classOn(state.ClassNitro)
+	st.fields = settingsFields(m.s.ClusterIsNew, m.settingsGroups(), nitro || !m.settingsAutoMode(), nitro && st.nitroGroup())
 	for i, f := range st.fields {
 		if f.key == at {
 			st.cursor = i
@@ -188,7 +233,7 @@ func (st *settingsScreen) classOn(c string) bool { return state.HasClass(st.valu
 
 // classProblem is why class c cannot be on for this run, or "".
 func (m *Model) classProblem(c string) string {
-	return state.ClassProblem(c, m.settingsAutoMode(), m.s.ClusterIsNew, m.s.ClusterName, m.s.ClusterPools)
+	return state.ClassProblem(c, m.settingsAutoMode(), m.s.ClusterIsNew, m.s.ClusterName, m.s.ClusterPools, m.set.values["NITRO_COMPUTE"])
 }
 
 // toggleClass turns a sandbox class on or off, keeping at least one, in
@@ -219,7 +264,8 @@ func (m *Model) minimal() string {
 	} else if !m.s.AutoMode {
 		return "The minimal profile needs EKS Auto Mode, and " + m.s.ClusterName + " has it off."
 	}
-	st.values[classKey], st.values[dbKey] = state.ClassNitro, state.DatabaseBundled
+	// The minimal profile runs the Nitro sandbox on Auto Mode's nodes.
+	st.values[classKey], st.values[dbKey], st.values["NITRO_COMPUTE"] = state.ClassNitro, state.DatabaseBundled, plugin.NitroAutoMode
 	if !m.s.ClusterIsNew {
 		return "Minimal profile: the AWS Nitro sandbox only and the bundled PostgreSQL."
 	}
@@ -242,7 +288,7 @@ func (m *Model) clearGroupPlugins() []string {
 	}
 	var cleared []string
 	for _, id := range ids {
-		if len(state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, []string{id})) > 0 {
+		if len(state.NewNodeGroups(true, state.DatabaseBundled, state.ClassNitro, plugin.NitroAutoMode, []string{id})) > 0 {
 			cleared = append(cleared, id)
 		}
 	}
@@ -277,6 +323,11 @@ func (m *Model) checkSettings() {
 		if !shown[k] {
 			delete(st.errs, k)
 		}
+	}
+	// The nitro node group has no AMI to fall back to: setup-aws refuses it
+	// without one, so Settings does first.
+	if _, bad := st.errs["NITRO_AMI_ID"]; shown["NITRO_AMI_ID"] && !bad && strings.TrimSpace(st.values["NITRO_AMI_ID"]) == "" {
+		st.errs["NITRO_AMI_ID"] = "a Nitro Sandbox AMI is needed: build one with awslabs/amazon-eks-ami (enable_pod_isolation=true)"
 	}
 	if _, bad := st.errs[classKey]; bad {
 		return
@@ -325,6 +376,8 @@ func (m *Model) applySettings() {
 		{"SYSTEM_INSTANCE_TYPE", &c.SystemInstanceType}, {"GVISOR_INSTANCE_TYPE", &c.GVisorInstanceType}, {"MICROVM_INSTANCE_TYPE", &c.MicroVMInstanceType},
 		{"SYSTEM_NODES", &c.SystemNodes}, {"GVISOR_NODES", &c.GVisorNodes}, {"MICROVM_NODES", &c.MicroVMNodes},
 		{"NODE_AMI_ID", &c.NodeAMIID}, {"NODE_GROUP_TYPE", &c.NodeGroupType},
+		{"NITRO_COMPUTE", &c.NitroCompute}, {"NITRO_AMI_ID", &c.NitroAMIID},
+		{"NITRO_INSTANCE_TYPE", &c.NitroInstanceType}, {"NITRO_NODES", &c.NitroNodes},
 		{"TAGS", &m.s.Tags}, {"SUBSTRATE_TAG", &m.s.SubstrateTag}, {"SUBSTRATE_IMAGE_REPO", &m.s.ImageRepo},
 		{classKey, &m.s.SandboxClasses}, {dbKey, &m.s.Database},
 	} {
@@ -393,6 +446,12 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 				st.values[f.key] = nodegroups.Managed
 			} else {
 				st.values[f.key] = nodegroups.SelfManaged
+			}
+		case fNitroCompute:
+			if st.nitroGroup() {
+				st.values[f.key] = plugin.NitroAutoMode
+			} else {
+				st.values[f.key] = plugin.NitroNodeGroup
 			}
 		default:
 			if rel, by := m.settingsRelease(); f.key == "SUBSTRATE_TAG" && by != "" {
@@ -486,6 +545,9 @@ func (m Model) settingsView() string {
 		if f.key == "NODE_AMI_ID" && shown == "" {
 			shown = "EKS optimized AL2023"
 		}
+		if f.key == "NITRO_AMI_ID" && shown == "" {
+			shown = "none"
+		}
 		if st.editing && i == st.cursor {
 			in := []rune(st.input)
 			if len(in) > w-3 {
@@ -527,14 +589,20 @@ func (m Model) settingsView() string {
 		switch {
 		case f.kind == fClass:
 			note := classNote[f.key]
+			if f.key == state.ClassNitro && st.nitroGroup() {
+				note = nitroGroupNote
+			}
 			if m.classProblem(f.key) != "" {
 				note = m.classShort(f.key)
 			}
 			left = append(left, " "+cell(i, 24)+" "+theme.Fainted.Render(truncate(note, leftW-27)))
 		case f.group != "":
 			note := ""
-			if f.group == nodegroups.MicroVM {
+			switch f.group {
+			case nodegroups.MicroVM:
 				note = theme.Fainted.Render(" nested virt")
+			case nodegroups.Nitro:
+				note = theme.Fainted.Render(" Nitro Enclaves")
 			}
 			left = append(left, "  "+pad(f.group, 8)+cell(i, 18)+" "+cell(i+1, 5)+note)
 			i++
@@ -557,13 +625,16 @@ func (m Model) settingsView() string {
 	if doc := m.d.Config.Defaults.Doc(f.key); doc != "" {
 		text = doc
 	}
+	if f.key == "NITRO_AMI_ID" {
+		text = help[f.key] + "\n" + nitroAMIBuild(st.values["KUBERNETES_VERSION"])
+	}
 	if f.key == "SUBSTRATE_TAG" && relBy != "" {
 		text = "The install runs " + rel.Tag + " from " + rel.Repo + ": " + relBy + " installs that fork's release, one release per install. " +
 			"SUBSTRATE_TAG (" + st.values["SUBSTRATE_TAG"] + ") is kept for a run without it."
 	}
 	para := lipgloss.NewStyle().Width(rightW)
 	right = append(right, theme.Subtle.Render(para.Render(joinParagraphs(text))))
-	if f.kind == fText || f.kind == fToggle || f.kind == fNodeGroupType {
+	if f.kind == fText || f.kind == fToggle || f.kind == fNodeGroupType || f.kind == fNitroCompute {
 		right = append(right, "", theme.Fainted.Render(para.Render("Now: "+f.key+"="+st.values[f.key])))
 		if def, ok := m.d.Config.Defaults.Get(f.key); ok {
 			right = append(right, theme.Fainted.Render(para.Render("config.env: "+f.key+"="+def)))

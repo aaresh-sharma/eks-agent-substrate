@@ -556,7 +556,7 @@ func TestCreateClusterRefusesNodeGroupsOutsideTheRule(t *testing.T) {
 	for _, c := range []struct {
 		auto, groups, want string
 	}{
-		{"", "none", "needs the gvisor or microvm node group"},
+		{"", "none", "needs the gvisor, microvm or nitro node group"},
 		{"", "gvisor", "needs the system node group"},
 		{"on", "system,kata", `unknown node group "kata"`},
 	} {
