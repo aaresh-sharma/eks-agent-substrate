@@ -112,11 +112,13 @@ jq .status`.
 
 ## Change the configuration
 
-- Cluster knobs (Kubernetes version, Auto Mode, node types and counts, API
-  CIDRs), `TAGS`, the release and its image repository: the wizard's
+- Cluster knobs (Kubernetes version, Auto Mode, node types and counts, the
+  node AMI `NODE_AMI_ID`, API CIDRs), `TAGS`, the release and its image repository: the wizard's
   Settings screen, which writes `config.local.env`, or edit
-  `config.local.env`. Node groups and Auto Mode are fixed once the cluster
-  exists; change them with a new cluster.
+  `config.local.env`. Auto Mode is fixed once the cluster exists; change it
+  with a new cluster. A node group keeps its instance type and AMI: to change
+  them, tear the deployment down and create it again (never delete a node
+  group by hand).
 - A new Substrate release (for example v1.0.1): remove Substrate with
   `--remove-control-plane` (it removes the plugins too), then run the
   Control plane, Demo and Plugins steps again with `--tag v1.0.1` (or set

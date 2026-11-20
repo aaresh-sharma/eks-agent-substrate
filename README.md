@@ -290,6 +290,42 @@ go -C installer run . --deploy-control-plane --cluster $C --region $R --profile 
 go -C installer run . --plugin-action deploy --plugins mode3-iso --cluster $C --region $R --profile $P
 ```
 
+## Node AMIs
+
+By default, every node group runs the Amazon EKS optimized Amazon Linux 2023
+AMI that EKS picks for the cluster's version. To run your own AMI, set
+`NODE_AMI_ID` before the node groups are made: on Settings (Node AMI), or in
+`config.local.env`:
+
+```bash
+NODE_AMI_ID=ami-0123456789abcdef0
+```
+
+For a step you run yourself, export it or put it before the command:
+`NODE_AMI_ID=ami-0123456789abcdef0 CLUSTER_NAME=$C ... go -C tools/setup-aws run . create cluster`.
+
+The AMI must join the cluster with nodeadm, as the EKS optimized AL2023 AMI
+and AMIs built from it or with
+[awslabs/amazon-eks-ami](https://github.com/awslabs/amazon-eks-ami) do. EKS
+gives such a node group no bootstrap, so each launch template carries a
+nodeadm `NodeConfig`: the cluster's name, API endpoint, certificate
+authority and service CIDR, and the group's labels and taints (the taints in
+`registerWithTaints`, so a node registers with them). The templates keep
+IMDSv2 with a hop limit of 1, the encrypted gp3 root volume on the AMI's own
+root device, and nested virtualization on `microvm`.
+
+`setup-aws create cluster` checks the AMI before it creates anything: it
+must be available in the Region to this account, EBS-backed, of the
+architecture of every group's instance type, and its root snapshot must fit
+the group's root volume. It must be an HVM AMI with ENA support, which the
+m8i instance types need, and the cluster must be IPv4 (a new cluster is).
+The AMI is yours: the installer neither tags nor deletes it. A node group
+keeps the AMI it was made with, and `create cluster` warns when it runs
+another one. To move to another AMI, tear the deployment down
+([Tear down](#tear-down)) and create it again, or create a cluster with
+another `CLUSTER_NAME`: deleting AWS resources by hand bypasses the
+installer's ownership checks.
+
 ## Try it
 
 ```bash
@@ -564,7 +600,7 @@ tag and fails if there is. A rerun resumes and finds nothing to delete.
 | Area | Choice |
 |---|---|
 | Installer | A Bubble Tea wizard over Go provisioning code, package for package like substrate-gke's. `setup-aws` calls AWS through the AWS SDK for Go v2; the control plane is upstream's `ate-setup` with a kustomize Component for EKS (`native/deploy/eks`). Every child process starts from an argv. |
-| Nodes | Amazon Linux 2023 EKS-optimized AMI, IMDSv2 only with a hop limit of 1, so pods in their own network namespace cannot read node credentials from IMDS. Host-network pods (CNI, kube-proxy, CSI) still can, so keep host networking to trusted system DaemonSets. AWS access is only through Pod Identity. |
+| Nodes | Amazon Linux 2023 EKS-optimized AMI (or your own, `NODE_AMI_ID`), IMDSv2 only with a hop limit of 1, so pods in their own network namespace cannot read node credentials from IMDS. Host-network pods (CNI, kube-proxy, CSI) still can, so keep host networking to trusted system DaemonSets. AWS access is only through Pod Identity. |
 | microVM nodes | Nested virtualization through the launch template's `CpuOptions`, on Intel 7th and 8th generation families (m8i here; `setup-aws create cluster` checks the type). No bare metal needed. |
 | Network | VPC CNI with NetworkPolicy enforcement on: Substrate ships default-deny policies. Actors have no external egress except what their EgressPolicy allows. |
 | Identity | One IAM role per ServiceAccount through EKS Pod Identity, scoped to its buckets, repositories or model. Actors get no AWS identity. |

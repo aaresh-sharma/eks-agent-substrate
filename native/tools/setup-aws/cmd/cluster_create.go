@@ -52,6 +52,9 @@ type clusterConfig struct {
 	// NodeGroups is NODE_GROUPS: the node groups to make, comma-separated,
 	// or "none" (nodegroups.Parse); nodegroups.Check is the rule.
 	NodeGroups string
+	// NodeAMIID is NODE_AMI_ID: the AMI of the node groups to make, or ""
+	// for the Amazon EKS optimized Amazon Linux 2023 AMI EKS picks.
+	NodeAMIID string
 }
 
 var ccfg clusterConfig
@@ -100,6 +103,8 @@ func init() {
 	f.IntVar(&ccfg.MicrovmNodes, "microvm-nodes", getEnv("MICROVM_NODES", 2), "nodes in the microvm node group (MICROVM_NODES)")
 	f.StringVar(&ccfg.NodeGroups, "node-groups", getEnv("NODE_GROUPS", nodegroups.Default),
 		`managed node groups to make, comma-separated (system, gvisor, microvm), or "none" on an Auto Mode cluster (NODE_GROUPS)`)
+	f.StringVar(&ccfg.NodeAMIID, "node-ami-id", getEnv("NODE_AMI_ID", ""),
+		`AMI of the node groups to make, one that joins with nodeadm (Amazon Linux 2023); empty: the Amazon EKS optimized AL2023 AMI (NODE_AMI_ID)`)
 	createCmd.AddCommand(createClusterCmd)
 }
 
@@ -137,11 +142,14 @@ type clusterRun struct {
 	addons     map[string]*ekstypes.Addon
 	azs        []string
 	amiTypes   map[string]ekstypes.AMITypes // by instance type
-	vpcID      string
-	eipID      string
-	public     []string // subnet IDs
-	private    []string
-	templates  map[string]ltRef // by node group
+	// enaRequired are the instance types that run only AMIs with ENA.
+	enaRequired map[string]bool
+	image       *nodeImage // NODE_AMI_ID, when set
+	vpcID       string
+	eipID       string
+	public      []string // subnet IDs
+	private     []string
+	templates   map[string]ltRef // by node group
 }
 
 func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
@@ -152,7 +160,7 @@ func newClusterRun(e *env, c *ClusterClients, cfg clusterConfig) *clusterRun {
 	r := &clusterRun{e: e, c: c, cfg: cfg, auto: cfg.AutoMode == "on", tags: tags,
 		autoCIDRs:  strings.TrimSpace(cfg.PublicAccessCIDRs) == publicAccessAuto,
 		nodegroups: map[string]*ekstypes.Nodegroup{}, addons: map[string]*ekstypes.Addon{},
-		amiTypes: map[string]ekstypes.AMITypes{}, templates: map[string]ltRef{}}
+		amiTypes: map[string]ekstypes.AMITypes{}, enaRequired: map[string]bool{}, templates: map[string]ltRef{}}
 	// Empty is unset, as getEnv reads NODE_GROUPS: the default three.
 	ng := cfg.NodeGroups
 	if strings.TrimSpace(ng) == "" {
@@ -244,6 +252,9 @@ func (r *clusterRun) preflight(ctx context.Context) error {
 		return err
 	}
 	if err := r.checkInstanceTypes(ctx); err != nil {
+		return err
+	}
+	if err := r.checkImage(ctx); err != nil {
 		return err
 	}
 	if r.cluster == nil {
@@ -477,6 +488,7 @@ func (r *clusterRun) checkInstanceTypes(ctx context.Context) error {
 		if g.NestedVirt && !slices.Contains(it.ProcessorInfo.SupportedFeatures, ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization) {
 			return fmt.Errorf("%s does not support nested virtualization, which the microvm node group needs; list the types that do with:\n  aws ec2 describe-instance-types --filters Name=processor-info.supported-features,Values=nested-virtualization --query 'InstanceTypes[].InstanceType'", g.InstanceType)
 		}
+		r.enaRequired[g.InstanceType] = it.NetworkInfo != nil && it.NetworkInfo.EnaSupport == ec2types.EnaSupportRequired
 		switch {
 		case slices.Contains(it.ProcessorInfo.SupportedArchitectures, ec2types.ArchitectureTypeX8664):
 			r.amiTypes[g.InstanceType] = ekstypes.AMITypesAl2023X8664Standard

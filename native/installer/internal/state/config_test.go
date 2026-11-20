@@ -216,7 +216,7 @@ func TestValidateConfigBothWays(t *testing.T) {
 	for key, value := range map[string]string{
 		"KUBERNETES_VERSION": "1.36", "AUTO_MODE": "yes", "SYSTEM_INSTANCE_TYPE": "big", "GVISOR_NODES": "0",
 		"MICROVM_NODES": "100", "TAGS": "a=b c", "EKS_PUBLIC_ACCESS_CIDRS": "", "SUBSTRATE_TAG": "latest",
-		"SUBSTRATE_IMAGE_REPO": "Not A Repo", "SANDBOX_CLASSES": "kata",
+		"SUBSTRATE_IMAGE_REPO": "Not A Repo", "SANDBOX_CLASSES": "kata", "NODE_AMI_ID": "ami-xyz",
 	} {
 		v := map[string]string{}
 		for k, x := range good {
@@ -230,6 +230,18 @@ func TestValidateConfigBothWays(t *testing.T) {
 	good["KUBERNETES_VERSION"], good["AUTO_MODE"], good["EKS_PUBLIC_ACCESS_CIDRS"] = "1.38", "", "203.0.113.0/24 198.51.100.0/24"
 	if bad := ValidateConfig(good); len(bad) != 0 {
 		t.Errorf("valid edits refused: %v", bad)
+	}
+	// NODE_AMI_ID: empty (EKS's AMI) or an 8- or 17-digit AMI ID.
+	for value, ok := range map[string]bool{"": true, "ami-0123abcd": true, "ami-0123456789abcdef0": true,
+		"ami-0123456789ABCDEF0": false, "ami-0123456789abcdef": false, "0123456789abcdef0": false, " ami-0123abcd": false} {
+		v := map[string]string{}
+		for k, x := range good {
+			v[k] = x
+		}
+		v["NODE_AMI_ID"] = value
+		if _, bad := ValidateConfig(v)["NODE_AMI_ID"]; bad == ok {
+			t.Errorf("NODE_AMI_ID=%q: refused=%v, want %v", value, bad, !ok)
+		}
 	}
 	// Both ways for setup-aws's default: "auto" alone is accepted; "auto"
 	// mixed with a range, or another word, is refused.

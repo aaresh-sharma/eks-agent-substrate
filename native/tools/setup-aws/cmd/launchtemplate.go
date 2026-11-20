@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 )
 
 // Each node group gets its own launch template with the EC2 settings that
@@ -39,7 +41,16 @@ func (r *clusterRun) launchTemplateName(g nodeGroupSpec) string {
 // rootDevice is the root volume of the Amazon Linux 2023 EKS AMIs.
 const rootDevice = "/dev/xvda"
 
-func (r *clusterRun) launchTemplateData(g nodeGroupSpec) *ec2types.RequestLaunchTemplateData {
+// groupRootDevice is the root device of the groups' AMI: a custom AMI's
+// own, else the EKS AL2023 AMIs'.
+func (r *clusterRun) groupRootDevice() string {
+	if r.image != nil {
+		return r.image.RootDevice
+	}
+	return rootDevice
+}
+
+func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunchTemplateData, error) {
 	d := &ec2types.RequestLaunchTemplateData{
 		MetadataOptions: &ec2types.LaunchTemplateInstanceMetadataOptionsRequest{
 			HttpTokens:              ec2types.LaunchTemplateHttpTokensStateRequired,
@@ -47,13 +58,22 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) *ec2types.RequestLaunch
 			HttpEndpoint:            ec2types.LaunchTemplateInstanceMetadataEndpointStateEnabled,
 		},
 		BlockDeviceMappings: []ec2types.LaunchTemplateBlockDeviceMappingRequest{{
-			DeviceName: aws.String(rootDevice),
+			DeviceName: aws.String(r.groupRootDevice()),
 			Ebs: &ec2types.LaunchTemplateEbsBlockDeviceRequest{VolumeSize: aws.Int32(g.VolumeGB), VolumeType: ec2types.VolumeTypeGp3,
 				DeleteOnTermination: aws.Bool(true), Encrypted: aws.Bool(true)},
 		}},
 	}
 	if g.NestedVirt {
 		d.CpuOptions = &ec2types.LaunchTemplateCpuOptionsRequest{NestedVirtualization: ec2types.NestedVirtualizationSpecificationEnabled}
+	}
+	// With a custom AMI, EKS adds no bootstrap: the node joins from the
+	// NodeConfig in the template's user data.
+	if r.image != nil {
+		ud, err := r.groupUserData(g)
+		if err != nil {
+			return nil, err
+		}
+		d.ImageId, d.UserData = aws.String(r.image.ID), aws.String(ud)
 	}
 	// The node group's instances, their volumes and network interfaces get
 	// the deployment's tags at launch.
@@ -62,19 +82,49 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) *ec2types.RequestLaunch
 		d.TagSpecifications = append(d.TagSpecifications, ec2types.LaunchTemplateTagSpecificationRequest{
 			ResourceType: t, Tags: r.ec2Tags(map[string]string{"Name": name})})
 	}
-	return d
+	return d, nil
+}
+
+// groupUserData is the NodeConfig of a node of group g from a custom AMI:
+// the cluster's join data, and the group's labels and taints, plus the
+// labels EKS gives the nodes of a managed node group from its own AMI (EKS
+// applies a group's API labels to a node from a custom AMI only after it
+// joins). Under --plan before the cluster exists, the join data is a
+// placeholder: no template is written then.
+func (r *clusterRun) groupUserData(g nodeGroupSpec) (string, error) {
+	var j nodeJoin
+	var err error
+	switch {
+	case r.cluster != nil && aws.ToString(r.cluster.Endpoint) != "":
+		j, err = nodeJoinFor(r.cluster)
+	case r.plan():
+		j = nodeJoin{Cluster: r.e.names.Cluster, Endpoint: "https://planned", CA: "planned", ServiceCIDR: "planned"}
+	default:
+		err = fmt.Errorf("cluster %s does not exist yet", r.e.names.Cluster)
+	}
+	if err != nil {
+		return "", fmt.Errorf("node group %s: %w", g.Name, err)
+	}
+	labels := map[string]string{
+		"eks.amazonaws.com/nodegroup":       g.Name,
+		"eks.amazonaws.com/nodegroup-image": r.image.ID,
+		"eks.amazonaws.com/capacityType":    string(ekstypes.CapacityTypesOnDemand),
+	}
+	maps.Copy(labels, g.Labels)
+	return nodeUserData(j, labels, g.Taints)
 }
 
 // ltSettings are the settings of a template version that matter for
-// isolation, as one comparable value.
+// isolation and for how the node joins, as one comparable value.
 type ltSettings struct {
 	NestedVirt, Tokens, Endpoint, VolumeType string
 	HopLimit, VolumeSize                     int32
 	Encrypted, DeleteOnTermination           bool
+	RootDevice, ImageID, UserData            string
 }
 
 func requestSettings(d *ec2types.RequestLaunchTemplateData) ltSettings {
-	s := ltSettings{}
+	s := ltSettings{ImageID: aws.ToString(d.ImageId), UserData: aws.ToString(d.UserData)}
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
@@ -82,7 +132,8 @@ func requestSettings(d *ec2types.RequestLaunchTemplateData) ltSettings {
 		s.Tokens, s.Endpoint, s.HopLimit = string(m.HttpTokens), string(m.HttpEndpoint), aws.ToInt32(m.HttpPutResponseHopLimit)
 	}
 	for _, b := range d.BlockDeviceMappings {
-		if aws.ToString(b.DeviceName) == rootDevice && b.Ebs != nil {
+		if b.Ebs != nil {
+			s.RootDevice = aws.ToString(b.DeviceName)
 			s.VolumeType, s.VolumeSize = string(b.Ebs.VolumeType), aws.ToInt32(b.Ebs.VolumeSize)
 			s.Encrypted, s.DeleteOnTermination = aws.ToBool(b.Ebs.Encrypted), aws.ToBool(b.Ebs.DeleteOnTermination)
 		}
@@ -95,6 +146,7 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 	if d == nil {
 		return s
 	}
+	s.ImageID, s.UserData = aws.ToString(d.ImageId), aws.ToString(d.UserData)
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
@@ -102,7 +154,8 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 		s.Tokens, s.Endpoint, s.HopLimit = string(m.HttpTokens), string(m.HttpEndpoint), aws.ToInt32(m.HttpPutResponseHopLimit)
 	}
 	for _, b := range d.BlockDeviceMappings {
-		if aws.ToString(b.DeviceName) == rootDevice && b.Ebs != nil {
+		if b.Ebs != nil {
+			s.RootDevice = aws.ToString(b.DeviceName)
 			s.VolumeType, s.VolumeSize = string(b.Ebs.VolumeType), aws.ToInt32(b.Ebs.VolumeSize)
 			s.Encrypted, s.DeleteOnTermination = aws.ToBool(b.Ebs.Encrypted), aws.ToBool(b.Ebs.DeleteOnTermination)
 		}
@@ -134,7 +187,10 @@ func (r *clusterRun) ensureLaunchTemplates(ctx context.Context) error {
 // owner tag is never used or changed.
 func (r *clusterRun) ensureLaunchTemplate(ctx context.Context, g nodeGroupSpec) (ltRef, error) {
 	name := r.launchTemplateName(g)
-	data := r.launchTemplateData(g)
+	data, err := r.launchTemplateData(g)
+	if err != nil {
+		return ltRef{}, err
+	}
 	out, err := r.c.EC2.DescribeLaunchTemplates(ctx, &ec2.DescribeLaunchTemplatesInput{Filters: []ec2types.Filter{filter("launch-template-name", name)}})
 	if err != nil {
 		return ltRef{}, fmt.Errorf("describe: %w", err)

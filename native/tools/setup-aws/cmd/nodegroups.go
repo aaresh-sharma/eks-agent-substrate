@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 )
@@ -71,7 +72,7 @@ func (r *clusterRun) allGroups() []nodeGroupSpec {
 
 func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupInput {
 	lt := r.templates[g.Name]
-	return &eks.CreateNodegroupInput{
+	in := &eks.CreateNodegroupInput{
 		ClusterName:   aws.String(r.e.names.Cluster),
 		NodegroupName: aws.String(g.Name),
 		NodeRole:      aws.String(r.roleARN(r.nodeRoleName())),
@@ -86,6 +87,11 @@ func (r *clusterRun) createNodegroupInput(g nodeGroupSpec) *eks.CreateNodegroupI
 		Taints: g.Taints,
 		Tags:   r.tags,
 	}
+	// A group whose launch template names an AMI takes no AMI type.
+	if r.image != nil {
+		in.AmiType = ""
+	}
+	return in
 }
 
 // ensureNodegroups creates the node groups that do not exist. It does not
@@ -97,6 +103,9 @@ func (r *clusterRun) ensureNodegroups(ctx context.Context) error {
 				return err
 			}
 			slog.Info("node group exists", "nodegroup", g.Name, "status", ng.Status)
+			if err := r.checkGroupImage(ctx, ng); err != nil {
+				return err
+			}
 			continue
 		}
 		in := r.createNodegroupInput(g)
@@ -110,6 +119,44 @@ func (r *clusterRun) ensureNodegroups(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// checkGroupImage warns when an existing node group runs another AMI than
+// NODE_AMI_ID names: it keeps its nodes, since moving it to another
+// template version replaces them, which is a decision for a person. It reads
+// the group's template only when a custom AMI is involved, on either side.
+func (r *clusterRun) checkGroupImage(ctx context.Context, ng *ekstypes.Nodegroup) error {
+	if r.image == nil && ng.AmiType != ekstypes.AMITypesCustom {
+		return nil
+	}
+	want, have := "", ""
+	if r.image != nil {
+		want = r.image.ID
+	}
+	if lt := ng.LaunchTemplate; lt != nil && aws.ToString(lt.Id) != "" {
+		out, err := r.c.EC2.DescribeLaunchTemplateVersions(ctx, &ec2.DescribeLaunchTemplateVersionsInput{
+			LaunchTemplateId: lt.Id, Versions: []string{aws.ToString(lt.Version)}})
+		switch {
+		case hasCode(err, "InvalidLaunchTemplateId.NotFound"), hasCode(err, "InvalidLaunchTemplateId.VersionNotFound"):
+		case err != nil:
+			return fmt.Errorf("read the launch template of node group %s: %w", aws.ToString(ng.NodegroupName), err)
+		case len(out.LaunchTemplateVersions) == 1 && out.LaunchTemplateVersions[0].LaunchTemplateData != nil:
+			have = aws.ToString(out.LaunchTemplateVersions[0].LaunchTemplateData.ImageId)
+		}
+	}
+	if have != want {
+		slog.Warn("the node group runs another AMI than NODE_AMI_ID and keeps its nodes; to change it, tear the deployment down (--remove-control-plane, then setup-aws teardown) and create it again",
+			"nodegroup", aws.ToString(ng.NodegroupName), "runs", orDefault(have), "NODE_AMI_ID", orDefault(want))
+	}
+	return nil
+}
+
+// orDefault names an empty AMI ID: EKS's own AMI.
+func orDefault(ami string) string {
+	if ami == "" {
+		return "the EKS optimized AMI"
+	}
+	return ami
 }
 
 // nodegroupFailed is an error, with the way out, for a node group that

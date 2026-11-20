@@ -198,8 +198,35 @@ func TestSettingsEditsTheNewClusterAndValidates(t *testing.T) {
 func TestSettingsForAConnectedClusterHasNoClusterKnobs(t *testing.T) {
 	m := toStep(t, New(testDeps(&recorder{}), newSetup("new")), state.Settings)
 	v := m.View()
-	if strings.Contains(v, "Node groups") || !strings.Contains(v, "connected, not created") || !strings.Contains(v, "EKS 1.37") {
+	if strings.Contains(v, "Node groups") || strings.Contains(v, "Node AMI") || !strings.Contains(v, "connected, not created") || !strings.Contains(v, "EKS 1.37") {
 		t.Errorf("connected cluster settings:\n%s", v)
+	}
+}
+
+// A new cluster's node AMI: EKS's by default; a bad ID is refused and stops
+// n; a good one reaches the Setup and the cluster summary.
+func TestSettingsNodeAMI(t *testing.T) {
+	s := newSetup("fresh")
+	m := toSettings(t, testDeps(&recorder{}), s)
+	if v := m.View(); !strings.Contains(v, "Node AMI") || !strings.Contains(v, "EKS optimized AL2023") {
+		t.Fatalf("no Node AMI row:\n%s", v)
+	}
+	m = cursorTo(t, m, "NODE_AMI_ID")
+	m = setText(m, "ami-nope")
+	if !strings.Contains(m.View(), "an AMI ID (ami-...), or empty") {
+		t.Errorf("no finding shown:\n%s", m.View())
+	}
+	m = press(m, "n")
+	if m.m.Current() != state.Settings {
+		t.Fatalf("n went past a bad AMI to %s", m.m.Current().Title())
+	}
+	m = setText(m, "ami-0123456789abcdef0")
+	m = press(m, "n")
+	if m.m.Current() != state.Plugins || s.NewClusterConfig.NodeAMIID != "ami-0123456789abcdef0" {
+		t.Fatalf("at %s, NodeAMIID %q", m.m.Current().Title(), s.NewClusterConfig.NodeAMIID)
+	}
+	if got := s.NewClusterConfig.Summary(s.NodeGroups()); !strings.HasSuffix(got, " · node AMI ami-0123456789abcdef0") {
+		t.Errorf("summary %q", got)
 	}
 }
 

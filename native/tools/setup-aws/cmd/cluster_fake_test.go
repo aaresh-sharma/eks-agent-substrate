@@ -33,6 +33,7 @@ type clusterFake struct {
 	// failAfter applies it, then fails (the run died before the reply).
 	failBefore, failAfter string
 	deny                  map[string]string // read operation -> error code
+	reads                 []string          // read operations, in order
 
 	vpcs      map[string]*ec2types.Vpc
 	dnsHosts  map[string]bool
@@ -46,6 +47,7 @@ type clusterFake struct {
 	enis      map[string]*ec2types.NetworkInterface
 	lts       map[string]*fakeLT // by id
 	types     map[string]ec2types.InstanceTypeInfo
+	images    map[string]ec2types.Image // AMIs this account may launch, by ID
 	zones     []ec2types.AvailabilityZone
 	offerings map[string][]string // zone -> instance types
 	quotas    map[string]float64  // applied quota values; others are the default 5
@@ -80,7 +82,8 @@ func nestedVirtType(name string, nested bool) ec2types.InstanceTypeInfo {
 	if nested {
 		p.SupportedFeatures = []ec2types.SupportedAdditionalProcessorFeature{ec2types.SupportedAdditionalProcessorFeatureNestedVirtualization}
 	}
-	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name), ProcessorInfo: p}
+	return ec2types.InstanceTypeInfo{InstanceType: ec2types.InstanceType(name), ProcessorInfo: p,
+		NetworkInfo: &ec2types.NetworkInfo{EnaSupport: ec2types.EnaSupportRequired}}
 }
 
 func newClusterFake() *clusterFake {
@@ -89,6 +92,7 @@ func newClusterFake() *clusterFake {
 		igws: map[string]*ec2types.InternetGateway{}, eips: map[string]*ec2types.Address{}, nats: map[string]*ec2types.NatGateway{},
 		rts: map[string]*ec2types.RouteTable{}, sgs: map[string]*ec2types.SecurityGroup{}, acls: map[string]*ec2types.NetworkAcl{},
 		enis: map[string]*ec2types.NetworkInterface{}, lts: map[string]*fakeLT{}, quotas: map[string]float64{},
+		images: map[string]ec2types.Image{},
 		types: map[string]ec2types.InstanceTypeInfo{
 			"m8i.xlarge": nestedVirtType("m8i.xlarge", true), "m8i.2xlarge": nestedVirtType("m8i.2xlarge", true),
 			"m7i.2xlarge": nestedVirtType("m7i.2xlarge", false)},
@@ -136,6 +140,7 @@ func (f *clusterFake) end(w string) error {
 }
 
 func (f *clusterFake) read(op string) error {
+	f.reads = append(f.reads, op)
 	if code, ok := f.deny[op]; ok {
 		return apiErr(code)
 	}
@@ -219,6 +224,24 @@ func (e *fcEC2) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanc
 			return nil, apiErr("InvalidInstanceType")
 		}
 		out.InstanceTypes = append(out.InstanceTypes, it)
+	}
+	return out, nil
+}
+
+func (e *fcEC2) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
+	if err := e.f().read("DescribeImages"); err != nil {
+		return nil, err
+	}
+	if len(in.Filters) > 0 || len(in.Owners) > 0 {
+		panic("fake: DescribeImages takes image IDs only")
+	}
+	out := &ec2.DescribeImagesOutput{}
+	for _, id := range in.ImageIds {
+		im, ok := e.images[id]
+		if !ok {
+			return nil, apiErr("InvalidAMIID.NotFound")
+		}
+		out.Images = append(out.Images, im)
 	}
 	return out, nil
 }
@@ -643,7 +666,7 @@ func (e *fcEC2) DescribeLaunchTemplates(_ context.Context, in *ec2.DescribeLaunc
 // responseData is what DescribeLaunchTemplateVersions returns for the
 // fields the tool compares.
 func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunchTemplateData {
-	out := &ec2types.ResponseLaunchTemplateData{}
+	out := &ec2types.ResponseLaunchTemplateData{ImageId: d.ImageId, UserData: d.UserData}
 	if d.CpuOptions != nil {
 		out.CpuOptions = &ec2types.LaunchTemplateCpuOptions{NestedVirtualization: d.CpuOptions.NestedVirtualization}
 	}
@@ -663,6 +686,9 @@ func responseData(d *ec2types.RequestLaunchTemplateData) *ec2types.ResponseLaunc
 }
 
 func (e *fcEC2) DescribeLaunchTemplateVersions(_ context.Context, in *ec2.DescribeLaunchTemplateVersionsInput, _ ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error) {
+	if err := e.f().read("DescribeLaunchTemplateVersions"); err != nil {
+		return nil, err
+	}
 	lt := e.lts[aws.ToString(in.LaunchTemplateId)]
 	if lt == nil {
 		return nil, apiErr("InvalidLaunchTemplateId.NotFound")
@@ -733,9 +759,13 @@ func (e *fcEKS) DescribeCluster(_ context.Context, in *eks.DescribeClusterInput,
 		return nil, apiErr("ResourceNotFoundException")
 	}
 	c := *e.cluster
-	// The cluster becomes ACTIVE between two reads.
+	// The cluster becomes ACTIVE between two reads, with what a node needs
+	// to join it.
 	if e.cluster.Status == ekstypes.ClusterStatusCreating {
 		e.cluster.Status = ekstypes.ClusterStatusActive
+		e.cluster.Endpoint = aws.String("https://FAKE.gr7.us-west-2.eks.amazonaws.com")
+		e.cluster.CertificateAuthority = &ekstypes.Certificate{Data: aws.String("RkFLRS1DQQ==")}
+		e.cluster.KubernetesNetworkConfig = &ekstypes.KubernetesNetworkConfigResponse{ServiceIpv4Cidr: aws.String("10.100.0.0/16")}
 	}
 	return &eks.DescribeClusterOutput{Cluster: &c}, nil
 }
@@ -916,7 +946,11 @@ func (e *fcEKS) CreateNodegroup(_ context.Context, in *eks.CreateNodegroupInput,
 		return nil, err
 	}
 	f.ngIn[name] = in
-	f.ngs[name] = &ekstypes.Nodegroup{NodegroupName: in.NodegroupName, Status: ekstypes.NodegroupStatusCreating, Tags: in.Tags}
+	f.ngs[name] = &ekstypes.Nodegroup{NodegroupName: in.NodegroupName, Status: ekstypes.NodegroupStatusCreating, Tags: in.Tags,
+		AmiType: in.AmiType, LaunchTemplate: &ekstypes.LaunchTemplateSpecification{Id: in.LaunchTemplate.Id, Version: in.LaunchTemplate.Version}}
+	if in.AmiType == "" {
+		f.ngs[name].AmiType = ekstypes.AMITypesCustom
+	}
 	return &eks.CreateNodegroupOutput{}, f.end(w)
 }
 

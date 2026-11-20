@@ -590,7 +590,10 @@ func TestCreateClusterLaunchTemplateDriftAddsVersion(t *testing.T) {
 	f := newClusterFake()
 	r := clusterTestRun(t, f, false)
 	g := r.groups()[2]
-	d := r.launchTemplateData(g)
+	d, err := r.launchTemplateData(g)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.MetadataOptions.HttpPutResponseHopLimit = aws.Int32(2)
 	f.lts["lt-mine"] = &fakeLT{lt: ec2types.LaunchTemplate{LaunchTemplateId: aws.String("lt-mine"),
 		LaunchTemplateName: aws.String("demo-microvm-nested-virt"), LatestVersionNumber: aws.Int64(1),

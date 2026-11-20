@@ -228,6 +228,9 @@ type ClusterConfig struct {
 	SystemInstanceType, GVisorInstanceType, MicroVMInstanceType string
 	SystemNodes, GVisorNodes, MicroVMNodes                      string
 	PublicAccessCIDRs                                           string
+	// NodeAMIID is config.env's NODE_AMI_ID: the node groups' AMI, or empty
+	// for the Amazon EKS optimized Amazon Linux 2023 AMI.
+	NodeAMIID string
 }
 
 // clusterKnobs are the environment variables of ClusterConfig with
@@ -245,6 +248,7 @@ var clusterKnobs = []struct {
 	{"GVISOR_NODES", "2", func(c *ClusterConfig) *string { return &c.GVisorNodes }},
 	{"MICROVM_NODES", "2", func(c *ClusterConfig) *string { return &c.MicroVMNodes }},
 	{"EKS_PUBLIC_ACCESS_CIDRS", "auto", func(c *ClusterConfig) *string { return &c.PublicAccessCIDRs }}, // auto: setup-aws allows this machine's address, a /32
+	{"NODE_AMI_ID", "", func(c *ClusterConfig) *string { return &c.NodeAMIID }},
 }
 
 // ClusterConfigFromEnv reads the knobs with lookup (os.LookupEnv), falling
@@ -278,7 +282,11 @@ func (c ClusterConfig) Summary(groups []string) string {
 	if c.AutoMode == "on" {
 		auto = "Auto Mode on"
 	}
-	return fmt.Sprintf("EKS %s · %s · %s · API from %s", c.KubernetesVersion, auto, c.GroupsLine(groups), c.PublicAccessCIDRs)
+	line := fmt.Sprintf("EKS %s · %s · %s · API from %s", c.KubernetesVersion, auto, c.GroupsLine(groups), c.PublicAccessCIDRs)
+	if c.NodeAMIID != "" && len(groups) > 0 {
+		line += " · node AMI " + c.NodeAMIID
+	}
+	return line
 }
 
 // GroupsLine is groups with their nodes and instance types, such as
