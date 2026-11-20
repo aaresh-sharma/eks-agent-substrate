@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -41,11 +42,24 @@ func (r *clusterRun) launchTemplateName(g nodeGroupSpec) string {
 // rootDevice is the root volume of the Amazon Linux 2023 EKS AMIs.
 const rootDevice = "/dev/xvda"
 
-// groupRootDevice is the root device of the groups' AMI: a custom AMI's
-// own, else the EKS AL2023 AMIs'.
-func (r *clusterRun) groupRootDevice() string {
+// groupImage is the AMI group g's template names: NODE_AMI_ID, or for a
+// self-managed group the recommended EKS optimized AL2023 AMI of its
+// architecture; nil when EKS picks it (a managed group without NODE_AMI_ID).
+func (r *clusterRun) groupImage(g nodeGroupSpec) *nodeImage {
 	if r.image != nil {
-		return r.image.RootDevice
+		return r.image
+	}
+	if r.selfManaged() {
+		return r.archImages[archOf(r.amiTypes[g.InstanceType])]
+	}
+	return nil
+}
+
+// groupRootDevice is the root device of group g's AMI: the named AMI's
+// own, else the EKS AL2023 AMIs'.
+func (r *clusterRun) groupRootDevice(g nodeGroupSpec) string {
+	if im := r.groupImage(g); im != nil {
+		return im.RootDevice
 	}
 	return rootDevice
 }
@@ -58,7 +72,7 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 			HttpEndpoint:            ec2types.LaunchTemplateInstanceMetadataEndpointStateEnabled,
 		},
 		BlockDeviceMappings: []ec2types.LaunchTemplateBlockDeviceMappingRequest{{
-			DeviceName: aws.String(r.groupRootDevice()),
+			DeviceName: aws.String(r.groupRootDevice(g)),
 			Ebs: &ec2types.LaunchTemplateEbsBlockDeviceRequest{VolumeSize: aws.Int32(g.VolumeGB), VolumeType: ec2types.VolumeTypeGp3,
 				DeleteOnTermination: aws.Bool(true), Encrypted: aws.Bool(true)},
 		}},
@@ -67,13 +81,31 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 		d.CpuOptions = &ec2types.LaunchTemplateCpuOptionsRequest{NestedVirtualization: ec2types.NestedVirtualizationSpecificationEnabled}
 	}
 	// With a custom AMI, EKS adds no bootstrap: the node joins from the
-	// NodeConfig in the template's user data.
-	if r.image != nil {
-		ud, err := r.groupUserData(g)
+	// NodeConfig in the template's user data. A self-managed node always
+	// does, and also names its instance profile and security group, which
+	// EKS sets for a managed group's nodes.
+	im := r.groupImage(g)
+	if r.selfManaged() && im == nil {
+		return nil, fmt.Errorf("internal: node group %s has no AMI", g.Name)
+	}
+	if im != nil {
+		ud, err := r.groupUserData(g, im)
 		if err != nil {
 			return nil, err
 		}
-		d.ImageId, d.UserData = aws.String(r.image.ID), aws.String(ud)
+		d.ImageId, d.UserData = aws.String(im.ID), aws.String(ud)
+	}
+	if r.selfManaged() {
+		sg, err := r.clusterSecurityGroup()
+		if err != nil {
+			return nil, fmt.Errorf("node group %s: %w", g.Name, err)
+		}
+		d.IamInstanceProfile = &ec2types.LaunchTemplateIamInstanceProfileSpecificationRequest{Name: aws.String(r.instanceProfileName())}
+		d.SecurityGroupIds = []string{sg}
+		// An Auto Scaling group without a mixed instances policy takes its
+		// instance type from the template; a managed node group takes it
+		// in CreateNodegroup instead.
+		d.InstanceType = ec2types.InstanceType(g.InstanceType)
 	}
 	// The node group's instances, their volumes and network interfaces get
 	// the deployment's tags at launch.
@@ -85,13 +117,13 @@ func (r *clusterRun) launchTemplateData(g nodeGroupSpec) (*ec2types.RequestLaunc
 	return d, nil
 }
 
-// groupUserData is the NodeConfig of a node of group g from a custom AMI:
-// the cluster's join data, and the group's labels and taints, plus the
-// labels EKS gives the nodes of a managed node group from its own AMI (EKS
-// applies a group's API labels to a node from a custom AMI only after it
-// joins). Under --plan before the cluster exists, the join data is a
-// placeholder: no template is written then.
-func (r *clusterRun) groupUserData(g nodeGroupSpec) (string, error) {
+// groupUserData is the NodeConfig of a node of group g from AMI im: the
+// cluster's join data, and the group's labels and taints, plus, on a managed
+// group, the labels EKS gives the nodes of a managed node group from its own
+// AMI (EKS applies a group's API labels to a node from a custom AMI only
+// after it joins). Under --plan before the cluster exists, the join data is
+// a placeholder: no template is written then.
+func (r *clusterRun) groupUserData(g nodeGroupSpec, im *nodeImage) (string, error) {
 	var j nodeJoin
 	var err error
 	switch {
@@ -105,10 +137,13 @@ func (r *clusterRun) groupUserData(g nodeGroupSpec) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("node group %s: %w", g.Name, err)
 	}
-	labels := map[string]string{
-		"eks.amazonaws.com/nodegroup":       g.Name,
-		"eks.amazonaws.com/nodegroup-image": r.image.ID,
-		"eks.amazonaws.com/capacityType":    string(ekstypes.CapacityTypesOnDemand),
+	labels := map[string]string{}
+	if !r.selfManaged() {
+		labels = map[string]string{
+			"eks.amazonaws.com/nodegroup":       g.Name,
+			"eks.amazonaws.com/nodegroup-image": im.ID,
+			"eks.amazonaws.com/capacityType":    string(ekstypes.CapacityTypesOnDemand),
+		}
 	}
 	maps.Copy(labels, g.Labels)
 	return nodeUserData(j, labels, g.Taints)
@@ -121,10 +156,18 @@ type ltSettings struct {
 	HopLimit, VolumeSize                     int32
 	Encrypted, DeleteOnTermination           bool
 	RootDevice, ImageID, UserData            string
+	// A self-managed node's instance profile and security groups (sorted,
+	// comma-separated).
+	InstanceProfile, SecurityGroups string
+	InstanceType                    string
 }
 
 func requestSettings(d *ec2types.RequestLaunchTemplateData) ltSettings {
-	s := ltSettings{ImageID: aws.ToString(d.ImageId), UserData: aws.ToString(d.UserData)}
+	s := ltSettings{ImageID: aws.ToString(d.ImageId), UserData: aws.ToString(d.UserData), InstanceType: string(d.InstanceType),
+		SecurityGroups: strings.Join(sortedCopy(d.SecurityGroupIds), ",")}
+	if d.IamInstanceProfile != nil {
+		s.InstanceProfile = aws.ToString(d.IamInstanceProfile.Name)
+	}
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
@@ -146,7 +189,11 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 	if d == nil {
 		return s
 	}
-	s.ImageID, s.UserData = aws.ToString(d.ImageId), aws.ToString(d.UserData)
+	s.ImageID, s.UserData, s.InstanceType = aws.ToString(d.ImageId), aws.ToString(d.UserData), string(d.InstanceType)
+	s.SecurityGroups = strings.Join(sortedCopy(d.SecurityGroupIds), ",")
+	if d.IamInstanceProfile != nil {
+		s.InstanceProfile = aws.ToString(d.IamInstanceProfile.Name)
+	}
 	if d.CpuOptions != nil {
 		s.NestedVirt = string(d.CpuOptions.NestedVirtualization)
 	}
@@ -168,7 +215,7 @@ func responseSettings(d *ec2types.ResponseLaunchTemplateData) ltSettings {
 // it to a new version replaces its nodes, which is a decision for a person.
 func (r *clusterRun) ensureLaunchTemplates(ctx context.Context) error {
 	for _, g := range r.groups() {
-		if r.nodegroups[g.Name] != nil {
+		if r.groupExists(g.Name) {
 			slog.Info("node group exists; its launch template is left as it is", "nodegroup", g.Name)
 			continue
 		}

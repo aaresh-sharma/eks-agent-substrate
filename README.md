@@ -326,6 +326,65 @@ another one. To move to another AMI, tear the deployment down
 another `CLUSTER_NAME`: deleting AWS resources by hand bypasses the
 installer's ownership checks.
 
+## Self-managed node groups
+
+By default, every node group is an EKS managed node group. When your policy
+says you must own the Auto Scaling group and the bootstrap of each node, set
+`NODE_GROUP_TYPE=self-managed` before the cluster's node groups are made: on
+Settings (Node group type), or in `config.local.env`:
+
+```bash
+NODE_GROUP_TYPE=self-managed
+```
+
+Then `setup-aws create cluster` makes, for each node group, an Auto Scaling
+group `<cluster>-<group>` in the private subnets, of the same size a managed
+group would have. Its launch template names the AMI, the instance profile and
+the cluster security group, keeps IMDSv2 with a hop limit of 1, the encrypted
+gp3 root volume and nested virtualization on `microvm`, and carries the
+nodeadm `NodeConfig` with the group's labels and taints. The AMI is
+`NODE_AMI_ID`, or else the recommended EKS optimized AL2023 AMI of the
+cluster's version, read once per architecture from the public SSM parameter
+`/aws/service/eks/optimized-ami/<version>/amazon-linux-2023/<arch>/standard/recommended/image_id`.
+For the whole cluster it makes the instance profile
+`<cluster>-<region>-eks-node` with the node role in it, and an `EC2_LINUX`
+access entry for the node role, so the nodes can join. It then waits until
+each group's instances are `InService` and as many nodes labeled
+`ate.dev/pool=<group>` are `Ready`.
+
+A cluster has one node group type. `create cluster` stops when the cluster
+has node groups of the other type: on a cluster that exists, a self-managed
+run lists every managed node group, whatever its name. Then set
+`NODE_GROUP_TYPE` to match the cluster, or tear the deployment down
+([Tear down](#tear-down)) and create it again, or use another
+`CLUSTER_NAME`. An Auto Scaling group or the instance profile is reused or
+deleted only with this deployment's owner tag. An `EC2_LINUX` access entry
+that EKS made for the node role is used as it is, and only an entry with the
+owner tag is deleted. They are cluster resources: a full teardown deletes
+them, `--keep-cluster` keeps them, and `setup-aws inventory` lists them.
+Like a managed group, a self-managed group keeps its launch template version
+and AMI. To change them, tear the deployment down and create it again, or
+use another `CLUSTER_NAME`: deleting AWS resources by hand bypasses the
+installer's ownership checks.
+
+Self-managed groups need more permissions than managed ones. `create
+cluster` calls `iam:GetInstanceProfile`, `iam:ListInstanceProfileTags`,
+`iam:CreateInstanceProfile` with `iam:TagInstanceProfile`,
+`iam:AddRoleToInstanceProfile`, `iam:PassRole` on the node role (the
+instance profile hands it to each node), `eks:CreateAccessEntry`,
+`eks:ListNodegroups` (on a cluster that exists), `ssm:GetParameter`,
+`autoscaling:DescribeAutoScalingGroups`,
+`autoscaling:CreateAutoScalingGroup` with `autoscaling:CreateOrUpdateTags`,
+and `autoscaling:DescribeScalingActivities`. Auto Scaling launches the
+instances from the launch template as the caller, so the caller also needs
+`ec2:RunInstances` and `ec2:CreateTags` (the template tags what it launches),
+and `iam:CreateServiceLinkedRole` once in an account that has no
+`AWSServiceRoleForAutoScaling` yet. Teardown also calls
+`autoscaling:DeleteAutoScalingGroup`, `eks:DeleteAccessEntry`,
+`iam:RemoveRoleFromInstanceProfile` and `iam:DeleteInstanceProfile`. A
+managed run reads `autoscaling:DescribeAutoScalingGroups` too when it adds a
+node group to a cluster that exists, to find self-managed groups there.
+
 ## Try it
 
 ```bash
@@ -582,7 +641,9 @@ released. Then `setup-aws teardown` deletes, in reverse order, everything
 the installer created that carries this deployment's owner tag: Pod Identity
 associations and roles, the RDS instance (without a final snapshot) and its
 logins, both S3 buckets with every object version, the ECR repositories, the
-node groups, the cluster, the launch template and the VPC.
+node groups (with self-managed ones, their Auto Scaling groups, the node
+role's access entry and its instance profile), the cluster, the launch
+template and the VPC.
 Every network interface in a VPC the installer created is tagged and treated
 as the deployment's own (the install tags each one there that has no owner
 tag), so teardown deletes an available one, even one you added to that VPC
@@ -595,12 +656,21 @@ to go with what it belongs to.
 It ends with `setup-aws inventory`, which lists anything left with the owner
 tag and fails if there is. A rerun resumes and finds nothing to delete.
 
+Teardown and `setup-aws inventory` look for self-managed node groups on
+every deployment, managed ones too. So they need
+`autoscaling:DescribeAutoScalingGroups`, `eks:DescribeAccessEntry`,
+`iam:GetInstanceProfile` and `iam:ListInstanceProfileTags`, and stop when
+one of these reads is denied, as
+they do on any denied read. What self-managed groups need besides is in
+[Self-managed node groups](#self-managed-node-groups).
+
 ## How it is built, and why
 
 | Area | Choice |
 |---|---|
 | Installer | A Bubble Tea wizard over Go provisioning code, package for package like substrate-gke's. `setup-aws` calls AWS through the AWS SDK for Go v2; the control plane is upstream's `ate-setup` with a kustomize Component for EKS (`native/deploy/eks`). Every child process starts from an argv. |
 | Nodes | Amazon Linux 2023 EKS-optimized AMI (or your own, `NODE_AMI_ID`), IMDSv2 only with a hop limit of 1, so pods in their own network namespace cannot read node credentials from IMDS. Host-network pods (CNI, kube-proxy, CSI) still can, so keep host networking to trusted system DaemonSets. AWS access is only through Pod Identity. |
+| Node groups | EKS managed node groups, or with `NODE_GROUP_TYPE=self-managed` an Auto Scaling group each that you own, whose nodes join with the nodeadm `NodeConfig` in their launch template. Both kinds get the same launch template settings, labels and taints. |
 | microVM nodes | Nested virtualization through the launch template's `CpuOptions`, on Intel 7th and 8th generation families (m8i here; `setup-aws create cluster` checks the type). No bare metal needed. |
 | Network | VPC CNI with NetworkPolicy enforcement on: Substrate ships default-deny policies. Actors have no external egress except what their EgressPolicy allows. |
 | Identity | One IAM role per ServiceAccount through EKS Pod Identity, scoped to its buckets, repositories or model. Actors get no AWS identity. |

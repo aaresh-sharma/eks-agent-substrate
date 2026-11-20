@@ -96,7 +96,10 @@ func fullDeployment() *tdFake {
 		"arn:aws:secretsmanager:us-west-2:111122223333:secret:demo/ate-owner-AbCdEf",
 		"arn:aws:ecr:us-west-2:111122223333:repository/demo/counter", "arn:aws:ec2:us-west-2:111122223333:natgateway/nat-1",
 		"arn:aws:ec2:us-west-2:111122223333:network-acl/acl-default", "arn:aws:eks:us-west-2:111122223333:addon/demo/vpc-cni/x",
-		"arn:aws:secretsmanager:us-west-2:111122223333:secret:rds!db-0001-QwErTy"} {
+		"arn:aws:secretsmanager:us-west-2:111122223333:secret:rds!db-0001-QwErTy",
+		// The Auto Scaling group of a managed node group, which create
+		// cluster tags; it goes with its node group.
+		"arn:aws:autoscaling:us-west-2:111122223333:autoScalingGroup:0001:autoScalingGroupName/eks-system-0001"} {
 		f.tagged = append(f.tagged, rgttypes.ResourceTagMapping{ResourceARN: aws.String(arn),
 			Tags: []rgttypes.Tag{{Key: aws.String(OwnerTagKey), Value: aws.String(tdOwner)}}})
 	}

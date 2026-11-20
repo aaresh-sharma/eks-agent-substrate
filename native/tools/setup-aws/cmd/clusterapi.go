@@ -6,8 +6,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
+	ekstypes "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // The AWS API surfaces `create cluster` uses, beyond the shared Clients.
@@ -61,6 +64,9 @@ type (
 		UpdateAddon(context.Context, *eks.UpdateAddonInput, ...func(*eks.Options)) (*eks.UpdateAddonOutput, error)
 		DescribeNodegroup(context.Context, *eks.DescribeNodegroupInput, ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error)
 		CreateNodegroup(context.Context, *eks.CreateNodegroupInput, ...func(*eks.Options)) (*eks.CreateNodegroupOutput, error)
+		// ListNodegroups finds every managed node group of a cluster that
+		// a self-managed run would add groups to.
+		ListNodegroups(context.Context, *eks.ListNodegroupsInput, ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error)
 	}
 	// clusterIAMAPI extends the shared IAMAPI, so ownedRole (iam.go) checks
 	// the cluster's roles the same way it checks the Pod Identity roles.
@@ -69,10 +75,24 @@ type (
 		GetRolePolicy(context.Context, *iam.GetRolePolicyInput, ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error)
 		ListAttachedRolePolicies(context.Context, *iam.ListAttachedRolePoliciesInput, ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
 		AttachRolePolicy(context.Context, *iam.AttachRolePolicyInput, ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error)
+
+		GetInstanceProfile(context.Context, *iam.GetInstanceProfileInput, ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error)
+		ListInstanceProfileTags(context.Context, *iam.ListInstanceProfileTagsInput, ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error)
+		CreateInstanceProfile(context.Context, *iam.CreateInstanceProfileInput, ...func(*iam.Options)) (*iam.CreateInstanceProfileOutput, error)
+		AddRoleToInstanceProfile(context.Context, *iam.AddRoleToInstanceProfileInput, ...func(*iam.Options)) (*iam.AddRoleToInstanceProfileOutput, error)
 	}
 	clusterASGAPI interface {
 		DescribeTags(context.Context, *autoscaling.DescribeTagsInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeTagsOutput, error)
 		CreateOrUpdateTags(context.Context, *autoscaling.CreateOrUpdateTagsInput, ...func(*autoscaling.Options)) (*autoscaling.CreateOrUpdateTagsOutput, error)
+
+		DescribeAutoScalingGroups(context.Context, *autoscaling.DescribeAutoScalingGroupsInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error)
+		CreateAutoScalingGroup(context.Context, *autoscaling.CreateAutoScalingGroupInput, ...func(*autoscaling.Options)) (*autoscaling.CreateAutoScalingGroupOutput, error)
+		DescribeScalingActivities(context.Context, *autoscaling.DescribeScalingActivitiesInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error)
+	}
+	// clusterSSMAPI reads the recommended EKS optimized AMI of
+	// self-managed node groups.
+	clusterSSMAPI interface {
+		GetParameter(context.Context, *ssm.GetParameterInput, ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 	}
 	quotasAPI interface {
 		GetServiceQuota(context.Context, *servicequotas.GetServiceQuotaInput, ...func(*servicequotas.Options)) (*servicequotas.GetServiceQuotaOutput, error)
@@ -88,6 +108,10 @@ type ClusterClients struct {
 	IAM    clusterIAMAPI
 	ASG    clusterASGAPI
 	Quotas quotasAPI
+	SSM    clusterSSMAPI
+	// Kube is the Kubernetes API of an ACTIVE cluster, which the wait for
+	// self-managed nodes reads (kubeapi.go).
+	Kube func(context.Context, *ekstypes.Cluster) (nodeLister, error)
 }
 
 var newClusterClients = func(ctx context.Context, c Config) (*ClusterClients, error) {
@@ -101,5 +125,9 @@ var newClusterClients = func(ctx context.Context, c Config) (*ClusterClients, er
 		IAM:    iam.NewFromConfig(ac),
 		ASG:    autoscaling.NewFromConfig(ac),
 		Quotas: servicequotas.NewFromConfig(ac),
+		SSM:    ssm.NewFromConfig(ac),
+		Kube: func(_ context.Context, c *ekstypes.Cluster) (nodeLister, error) {
+			return newKubeClient(c, sts.NewPresignClient(sts.NewFromConfig(ac)))
+		},
 	}, nil
 }

@@ -20,7 +20,7 @@ import (
 // line setup-aws logs for that phase (slog's text handler quotes msg).
 func TestEveryPhaseListLightsEachRowInOrder(t *testing.T) {
 	for name, list := range map[string][]string{
-		"bootstrap": phases.Bootstrap, "cluster": phases.Cluster,
+		"bootstrap": phases.Bootstrap, "cluster": phases.Cluster, "cluster self-managed": phases.ClusterSelfManaged,
 		"rds": phases.RDS, "teardown": phases.Teardown,
 	} {
 		items, active := FromPhases(list), -1
@@ -31,6 +31,19 @@ func TestEveryPhaseListLightsEachRowInOrder(t *testing.T) {
 				t.Errorf("%s: phase %d lit row %d", name, i, active)
 			}
 		}
+	}
+}
+
+// The create cluster checklist names the run's node group type in its node
+// group rows, and the others are the same.
+func TestClusterChecklistFollowsTheNodeGroupType(t *testing.T) {
+	m, sm := labels(Cluster("managed")), labels(Cluster("self-managed"))
+	if !slices.Equal(m, labels(Cluster(""))) || !slices.Equal(m[:7], sm[:7]) || len(m) != len(sm) {
+		t.Fatalf("managed %q, self-managed %q", m, sm)
+	}
+	if m[7] != "Creating the managed node groups" || sm[7] != "Creating the self-managed node groups" ||
+		sm[8] != "Waiting for the self-managed nodes to be Ready" {
+		t.Errorf("rows 8 and 9: managed %q, self-managed %q", m[7:], sm[7:])
 	}
 }
 

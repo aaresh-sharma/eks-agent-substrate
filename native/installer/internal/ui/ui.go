@@ -225,7 +225,7 @@ func (m *Model) stopTask(t *task) tea.Cmd {
 func (m *Model) longStep(st state.Step) (func(*state.Setup) execx.Spec, []steps.ChecklistItem, bool) {
 	switch st {
 	case state.CreateCluster:
-		return m.d.CreateCluster, steps.Cluster(), true
+		return m.d.CreateCluster, steps.Cluster(m.s.NewClusterConfig.NodeGroupType), true
 	case state.Provision:
 		return m.d.Bootstrap, steps.Bootstrap(), true
 	case state.RDS:

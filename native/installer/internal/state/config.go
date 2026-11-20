@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
+
 	"github.com/csantanapr/eks-agent-substrate/native/installer/internal/awsx"
 )
 
@@ -288,7 +290,7 @@ func (c Config) LocalPath() string {
 var ManagedKeys = []string{
 	"CLUSTER_NAME", "AWS_REGION", "AWS_PROFILE", "KUBERNETES_VERSION", "AUTO_MODE",
 	"SYSTEM_INSTANCE_TYPE", "SYSTEM_NODES", "GVISOR_INSTANCE_TYPE", "GVISOR_NODES",
-	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "NODE_AMI_ID", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
+	"MICROVM_INSTANCE_TYPE", "MICROVM_NODES", "NODE_AMI_ID", "NODE_GROUP_TYPE", "TAGS", "EKS_PUBLIC_ACCESS_CIDRS",
 	"SUBSTRATE_TAG", "SUBSTRATE_IMAGE_REPO", "SANDBOX_CLASSES",
 }
 
@@ -422,6 +424,7 @@ func ValidateConfig(values map[string]string) map[string]string {
 	}
 	check("NODE_AMI_ID", values["NODE_AMI_ID"] == "" || amiRe.MatchString(values["NODE_AMI_ID"]),
 		"an AMI ID (ami-...), or empty")
+	check("NODE_GROUP_TYPE", nodegroups.CheckType(values["NODE_GROUP_TYPE"]) == nil, "managed or self-managed")
 	for _, kv := range strings.Fields(values["TAGS"]) {
 		check("TAGS", tagRe.MatchString(kv), "space-separated key=value pairs (letters, digits and _ . : / + @ -)")
 	}

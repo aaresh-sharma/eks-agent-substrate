@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -33,7 +34,9 @@ var teardownCmd = &cobra.Command{
 cluster made: the Pod Identity associations and roles, the RDS instance, its
 subnet and security groups and the database logins, both S3 buckets with every
 object version, the ECR repositories, then (unless --keep-cluster) the node
-groups, the cluster and its IAM roles, the launch template and the VPC.
+groups (self-managed ones: their Auto Scaling groups, the node role's access
+entry and instance profile), the cluster and its IAM roles, the launch
+template and the VPC.
 
 Only resources with this deployment's owner tag are deleted. A resource with
 one of its names but another owner, or one that belongs to a CloudFormation
@@ -99,8 +102,8 @@ func (e *tdEnv) teardownPhases() []tdPhase {
 		{steps: []tdStep{e.stepDBInstance, e.stepDBNetwork, e.stepSecrets}},
 		{steps: []tdStep{e.stepBuckets}},
 		{steps: []tdStep{e.stepRepositories}},
-		{cluster: true, steps: []tdStep{e.stepNodegroups}},
-		{cluster: true, steps: []tdStep{e.stepCluster, e.stepClusterRoles}},
+		{cluster: true, steps: []tdStep{e.stepNodegroups, e.stepAutoScalingGroups, e.stepNodeAccessEntry}},
+		{cluster: true, steps: []tdStep{e.stepCluster, e.stepClusterRoles, e.stepInstanceProfile}},
 		// An available network interface holds its subnet and security
 		// groups, so it goes before both; the VPC goes last.
 		{cluster: true, steps: []tdStep{e.stepLaunchTemplates, e.stepVolumes, e.stepNATs, e.stepEIPs,
@@ -389,8 +392,12 @@ func (e *tdEnv) deleteRole(ctx context.Context, role string) error {
 			}
 		}
 	}
-	_, err := e.c.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: r})
-	return err
+	// IAM can still see the role in a profile, or a policy on it, for a
+	// moment after it was taken off.
+	return retryOn(ctx, "IAM role "+role+" to be free", func() error {
+		_, err := e.c.IAM.DeleteRole(ctx, &iam.DeleteRoleInput{RoleName: r})
+		return err
+	}, "DeleteConflict")
 }
 
 // ---- phase 2: RDS and its logins ---------------------------------------------
@@ -676,6 +683,68 @@ func (e *tdEnv) stepNodegroups(ctx context.Context) ([]tdTarget, []string, error
 	return ts, rs, nil
 }
 
+// stepAutoScalingGroups deletes the Auto Scaling groups of self-managed
+// node groups with their instances: those with the derived names (one of
+// another owner is a refusal) and every other one with the owner tag. They
+// do not need the cluster.
+func (e *tdEnv) stepAutoScalingGroups(ctx context.Context) ([]tdTarget, []string, error) {
+	as, err := e.autoScalingGroups(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ts []tdTarget
+	var rs []string
+	for _, a := range as {
+		if r := e.refuse(kASG, a.name, a.tags); r != "" {
+			rs = append(rs, r)
+			continue
+		}
+		name := a.name
+		t := tdTarget{kind: kASG, id: name + " (and its instances)", wait: gone(func(ctx context.Context) (bool, error) {
+			a, err := e.autoScalingGroup(ctx, name)
+			return a != nil, err
+		})}
+		if a.status == "" {
+			t.del = func(ctx context.Context) error {
+				// A scaling activity in progress refuses the delete for a while.
+				err := retryOn(ctx, "Auto Scaling group "+name+" to accept the delete", func() error {
+					_, err := e.c.ASG.DeleteAutoScalingGroup(ctx, &autoscaling.DeleteAutoScalingGroupInput{
+						AutoScalingGroupName: aws.String(name), ForceDelete: aws.Bool(true)})
+					return err
+				}, "ScalingActivityInProgress", "ResourceInUse")
+				if asgNotFound(err) {
+					return nil
+				}
+				return err
+			}
+		}
+		ts = append(ts, t)
+	}
+	return ts, rs, nil
+}
+
+// stepNodeAccessEntry deletes the node role's access entry when it carries
+// this deployment's owner tag: create cluster made it for self-managed
+// nodes. EKS's own, for a managed node group's role, goes with the cluster.
+func (e *tdEnv) stepNodeAccessEntry(ctx context.Context) ([]tdTarget, []string, error) {
+	cl, err := e.cluster(ctx)
+	if err != nil || cl == nil {
+		return nil, nil, err
+	}
+	tags, err := e.nodeAccessEntry(ctx, cl)
+	if err != nil || !e.owned(tags) {
+		return nil, nil, err
+	}
+	arn := e.nodeRoleARN()
+	if r := e.refuse(kAccessEntry, arn, tags); r != "" {
+		return nil, []string{r}, nil
+	}
+	return []tdTarget{{kind: kAccessEntry, id: arn, del: func(ctx context.Context) error {
+		_, err := e.c.EKS.DeleteAccessEntry(ctx, &eks.DeleteAccessEntryInput{ClusterName: aws.String(e.n.Cluster), PrincipalArn: aws.String(arn)})
+		return err
+	}}}, nil, nil
+}
+
 func (e *tdEnv) stepCluster(ctx context.Context) ([]tdTarget, []string, error) {
 	cl, err := e.cluster(ctx)
 	if err != nil || cl == nil {
@@ -716,6 +785,39 @@ func (e *tdEnv) stepClusterRoles(ctx context.Context) ([]tdTarget, []string, err
 		}
 	}
 	return e.roleTargets(ctx, names, false)
+}
+
+// stepInstanceProfile deletes the node role's instance profile, which create
+// cluster makes for self-managed nodes, when it carries this deployment's
+// owner tag. stepClusterRoles took the role out of it when it deleted the
+// role; a role it kept is taken out here.
+func (e *tdEnv) stepInstanceProfile(ctx context.Context) ([]tdTarget, []string, error) {
+	name := e.nodeRole()
+	ip, tags, err := readInstanceProfile(ctx, e.c.IAM, name)
+	if err != nil || ip == nil || !e.owned(tags) {
+		return nil, nil, err
+	}
+	if r := e.refuse(kProfile, name, tags); r != "" {
+		return nil, []string{r}, nil
+	}
+	var roles []string
+	for _, r := range ip.Roles {
+		roles = append(roles, aws.ToString(r.RoleName))
+	}
+	return []tdTarget{{kind: kProfile, id: name, del: func(ctx context.Context) error {
+		for _, r := range roles {
+			_, err := e.c.IAM.RemoveRoleFromInstanceProfile(ctx, &iam.RemoveRoleFromInstanceProfileInput{InstanceProfileName: aws.String(name), RoleName: aws.String(r)})
+			if err != nil && !tdGone(err) {
+				return err
+			}
+		}
+		// IAM can still see the role in the profile for a moment after it
+		// was taken out (here, or by deleteRole).
+		return retryOn(ctx, "IAM instance profile "+name+" to be empty", func() error {
+			_, err := e.c.IAM.DeleteInstanceProfile(ctx, &iam.DeleteInstanceProfileInput{InstanceProfileName: aws.String(name)})
+			return err
+		}, "DeleteConflict")
+	}}}, nil, nil
 }
 
 // ---- phase 7: launch template, volumes, network --------------------------------

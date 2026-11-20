@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -25,6 +27,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
+	"github.com/aws/smithy-go"
 )
 
 // tdObj is one resource of the fake account. Fields are used by the kinds
@@ -33,11 +36,13 @@ type tdObj struct {
 	kind, id, name             string
 	vpc, subnet, alloc, role   string
 	autoRole                   string // a cluster's Auto Mode node role
+	authMode                   string // a cluster's authentication mode, when not API
 	ns, sa                     string
 	state                      string
 	main, isDefault, protect   bool
 	deleting                   bool
 	pending                    int // reads left before a deleting resource is gone
+	conflicts                  int // a role's or profile's DeleteConflict answers left once it is free (IAM's lag)
 	inline, attached, profiles []string
 	objects                    int
 	tags                       map[string]string
@@ -57,7 +62,7 @@ type tdFake struct {
 	mu     sync.Mutex
 	objs   map[string]*tdObj
 	calls  []string
-	deny   map[string]bool // write op -> AccessDenied
+	deny   map[string]bool // write op, or one of the reads that check it -> AccessDenied
 	vanish map[string]bool // write op -> the resource was deleted behind our back
 	tagged []rgttypes.ResourceTagMapping
 }
@@ -68,7 +73,7 @@ func newTDFake() *tdFake {
 
 func (f *tdFake) clients() *tdClients {
 	return &tdClients{STS: fsts{}, Tag: (*tfTag)(f), EC2: (*tfEC2)(f), EKS: (*tfEKS)(f), IAM: (*tfIAM)(f),
-		RDS: (*tfRDS)(f), SM: (*tfSM)(f), S3: (*tfS3)(f), ECR: (*tfECR)(f)}
+		RDS: (*tfRDS)(f), SM: (*tfSM)(f), S3: (*tfS3)(f), ECR: (*tfECR)(f), ASG: (*tfASG)(f)}
 }
 
 func (f *tdFake) put(o *tdObj) { f.objs[o.kind+"|"+o.id] = o }
@@ -105,9 +110,16 @@ func (f *tdFake) remove(o *tdObj) {
 				delete(f.objs, x.kind+"|"+x.id)
 			}
 		}
+	case "asg":
+		// A force-deleted Auto Scaling group is gone once its instances are.
+		for _, x := range f.objs {
+			if x.parent == "asg|"+o.id {
+				delete(f.objs, x.kind+"|"+x.id)
+			}
+		}
 	case "cluster":
 		for _, x := range f.objs {
-			if x.kind == "assoc" || (x.kind == kSG && x.tags["aws:eks:cluster-name"] == o.id) {
+			if x.kind == "assoc" || x.kind == "access entry" || (x.kind == kSG && x.tags["aws:eks:cluster-name"] == o.id) {
 				delete(f.objs, x.kind+"|"+x.id)
 			}
 		}
@@ -204,8 +216,13 @@ func (t *tfEKS) DescribeCluster(_ context.Context, in *eks.DescribeClusterInput,
 	if o.deleting {
 		st = ekstypes.ClusterStatusDeleting
 	}
+	mode := ekstypes.AuthenticationModeApi
+	if o.authMode != "" {
+		mode = ekstypes.AuthenticationMode(o.authMode)
+	}
 	return &eks.DescribeClusterOutput{Cluster: &ekstypes.Cluster{Name: aws.String(o.id), Status: st, Tags: o.tags,
-		RoleArn: aws.String(o.role), ResourcesVpcConfig: &ekstypes.VpcConfigResponse{VpcId: aws.String(o.vpc)},
+		AccessConfig: &ekstypes.AccessConfigResponse{AuthenticationMode: mode},
+		RoleArn:      aws.String(o.role), ResourcesVpcConfig: &ekstypes.VpcConfigResponse{VpcId: aws.String(o.vpc)},
 		ComputeConfig: &ekstypes.ComputeConfigResponse{Enabled: aws.Bool(o.autoRole != ""), NodeRoleArn: aws.String(o.autoRole)}}}, nil
 }
 func (t *tfEKS) ListNodegroups(_ context.Context, in *eks.ListNodegroupsInput, _ ...func(*eks.Options)) (*eks.ListNodegroupsOutput, error) {
@@ -428,6 +445,10 @@ func (t *tfIAM) DeleteRole(_ context.Context, in *iam.DeleteRoleInput, _ ...func
 		return nil, err
 	}
 	if len(o.inline)+len(o.attached)+len(o.profiles) > 0 {
+		return nil, apiErr("DeleteConflict")
+	}
+	if o.conflicts > 0 {
+		o.conflicts--
 		return nil, apiErr("DeleteConflict")
 	}
 	t.f().remove(o)
@@ -1042,8 +1063,8 @@ func (t *tfEC2) DeleteRouteTable(_ context.Context, in *ec2.DeleteRouteTableInpu
 }
 func (t *tfEC2) DeleteLaunchTemplate(_ context.Context, in *ec2.DeleteLaunchTemplateInput, _ ...func(*ec2.Options)) (*ec2.DeleteLaunchTemplateOutput, error) {
 	return &ec2.DeleteLaunchTemplateOutput{}, t.del("DeleteLaunchTemplate", kLT, aws.ToString(in.LaunchTemplateId), "InvalidLaunchTemplateId.NotFound", func(*tdObj) string {
-		// Test-only rule: a node group still launches from it.
-		if t.any("nodegroup", func(*tdObj) bool { return true }) {
+		// Test-only rule: a node group or Auto Scaling group still launches from it.
+		if t.any("nodegroup", func(*tdObj) bool { return true }) || t.any("asg", func(*tdObj) bool { return true }) {
 			return "Fake.LaunchTemplateInUse"
 		}
 		return ""
@@ -1064,4 +1085,172 @@ func (t *tfEC2) DeleteVolume(_ context.Context, in *ec2.DeleteVolumeInput, _ ...
 		}
 		return ""
 	})
+}
+
+// ---- self-managed node groups ---------------------------------------------------
+
+// An "access entry" is keyed by its principal ARN, a "profile" by its name
+// (its roles are the roles that list it in profiles), an "asg" by its name.
+
+func (t *tfEKS) DescribeAccessEntry(_ context.Context, in *eks.DescribeAccessEntryInput, _ ...func(*eks.Options)) (*eks.DescribeAccessEntryOutput, error) {
+	f := t.f()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deny["DescribeAccessEntry"] {
+		return nil, apiErr("AccessDeniedException")
+	}
+	if c := f.objs["cluster|"+aws.ToString(in.ClusterName)]; c != nil && c.authMode == string(ekstypes.AuthenticationModeConfigMap) {
+		return nil, apiErr("InvalidRequestException")
+	}
+	o := f.get("access entry", aws.ToString(in.PrincipalArn))
+	if o == nil || f.objs["cluster|"+aws.ToString(in.ClusterName)] == nil {
+		return nil, apiErr("ResourceNotFoundException")
+	}
+	return &eks.DescribeAccessEntryOutput{AccessEntry: &ekstypes.AccessEntry{PrincipalArn: in.PrincipalArn, Type: aws.String("EC2_LINUX"), Tags: o.tags}}, nil
+}
+func (t *tfEKS) DeleteAccessEntry(_ context.Context, in *eks.DeleteAccessEntryInput, _ ...func(*eks.Options)) (*eks.DeleteAccessEntryOutput, error) {
+	f := t.f()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := aws.ToString(in.PrincipalArn)
+	if err := f.write("DeleteAccessEntry", id, "access entry", "ResourceNotFoundException"); err != nil {
+		return nil, err
+	}
+	o := f.objs["access entry|"+id]
+	if o == nil {
+		return nil, apiErr("ResourceNotFoundException")
+	}
+	f.remove(o)
+	return &eks.DeleteAccessEntryOutput{}, nil
+}
+
+func (t *tfIAM) profile(name string) (*tdObj, []string, error) {
+	o := t.f().get("profile", name)
+	if o == nil {
+		return nil, nil, apiErr("NoSuchEntity")
+	}
+	var roles []string
+	for _, r := range t.f().list("role") {
+		if contains(r.profiles, name) {
+			roles = append(roles, r.id)
+		}
+	}
+	return o, roles, nil
+}
+func (t *tfIAM) GetInstanceProfile(_ context.Context, in *iam.GetInstanceProfileInput, _ ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error) {
+	t.f().mu.Lock()
+	defer t.f().mu.Unlock()
+	if t.f().deny["GetInstanceProfile"] {
+		return nil, apiErr("AccessDenied")
+	}
+	o, roles, err := t.profile(aws.ToString(in.InstanceProfileName))
+	if err != nil {
+		return nil, err
+	}
+	ip := &iamtypes.InstanceProfile{InstanceProfileName: aws.String(o.id)}
+	for _, r := range roles {
+		ip.Roles = append(ip.Roles, iamtypes.Role{RoleName: aws.String(r)})
+	}
+	for _, k := range sortedKeys(o.tags) {
+		ip.Tags = append(ip.Tags, iamtypes.Tag{Key: aws.String(k), Value: aws.String(o.tags[k])})
+	}
+	return &iam.GetInstanceProfileOutput{InstanceProfile: ip}, nil
+}
+func (t *tfIAM) ListInstanceProfileTags(_ context.Context, in *iam.ListInstanceProfileTagsInput, _ ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error) {
+	t.f().mu.Lock()
+	defer t.f().mu.Unlock()
+	o, _, err := t.profile(aws.ToString(in.InstanceProfileName))
+	if err != nil {
+		return nil, err
+	}
+	out := &iam.ListInstanceProfileTagsOutput{}
+	for _, k := range sortedKeys(o.tags) {
+		out.Tags = append(out.Tags, iamtypes.Tag{Key: aws.String(k), Value: aws.String(o.tags[k])})
+	}
+	return out, nil
+}
+func (t *tfIAM) DeleteInstanceProfile(_ context.Context, in *iam.DeleteInstanceProfileInput, _ ...func(*iam.Options)) (*iam.DeleteInstanceProfileOutput, error) {
+	t.f().mu.Lock()
+	defer t.f().mu.Unlock()
+	name := aws.ToString(in.InstanceProfileName)
+	if err := t.f().write("DeleteInstanceProfile", name, "profile", "NoSuchEntity"); err != nil {
+		return nil, err
+	}
+	o, roles, err := t.profile(name)
+	if err != nil {
+		return nil, err
+	}
+	if len(roles) > 0 {
+		return nil, apiErr("DeleteConflict")
+	}
+	if o.conflicts > 0 {
+		o.conflicts--
+		return nil, apiErr("DeleteConflict")
+	}
+	t.f().remove(o)
+	return &iam.DeleteInstanceProfileOutput{}, nil
+}
+
+type tfASG tdFake
+
+func (t *tfASG) f() *tdFake { return (*tdFake)(t) }
+
+func (t *tfASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+	f := t.f()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deny["DescribeAutoScalingGroups"] {
+		return nil, apiErr("AccessDenied")
+	}
+	if len(in.AutoScalingGroupNames) == 0 && len(in.Filters) == 0 {
+		panic("fake: DescribeAutoScalingGroups with no names or filters")
+	}
+	out := &autoscaling.DescribeAutoScalingGroupsOutput{}
+	for _, o := range f.list("asg") {
+		if len(in.AutoScalingGroupNames) > 0 && !contains(in.AutoScalingGroupNames, o.id) {
+			continue
+		}
+		hit := true
+		for _, fl := range in.Filters {
+			k, ok := strings.CutPrefix(aws.ToString(fl.Name), "tag:")
+			if !ok {
+				panic("fake: unknown Auto Scaling filter " + aws.ToString(fl.Name))
+			}
+			hit = hit && contains(fl.Values, o.tags[k])
+		}
+		if !hit {
+			continue
+		}
+		a := asgtypes.AutoScalingGroup{AutoScalingGroupName: aws.String(o.id)}
+		if o.deleting {
+			a.Status = aws.String("Delete in progress")
+		}
+		for _, k := range sortedKeys(o.tags) {
+			a.Tags = append(a.Tags, asgtypes.TagDescription{Key: aws.String(k), Value: aws.String(o.tags[k])})
+		}
+		out.AutoScalingGroups = append(out.AutoScalingGroups, a)
+	}
+	return out, nil
+}
+func (t *tfASG) DeleteAutoScalingGroup(_ context.Context, in *autoscaling.DeleteAutoScalingGroupInput, _ ...func(*autoscaling.Options)) (*autoscaling.DeleteAutoScalingGroupOutput, error) {
+	f := t.f()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := aws.ToString(in.AutoScalingGroupName)
+	notFound := &smithy.GenericAPIError{Code: "ValidationError", Message: "AutoScalingGroup name not found - AutoScalingGroup " + id + " not found"}
+	if err := f.write("DeleteAutoScalingGroup", id, "asg", "ValidationError"); err != nil {
+		if hasCode(err, "ValidationError") {
+			return nil, notFound
+		}
+		return nil, err
+	}
+	o := f.objs["asg|"+id]
+	if o == nil {
+		return nil, notFound
+	}
+	if !aws.ToBool(in.ForceDelete) && f.count(kInstance, func(x *tdObj) bool { return x.parent == "asg|"+id }) > 0 {
+		return nil, apiErr("ResourceInUse")
+	}
+	o.deleting, o.pending = true, 1
+	return &autoscaling.DeleteAutoScalingGroupOutput{}, nil
 }

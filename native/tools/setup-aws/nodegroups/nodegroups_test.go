@@ -103,3 +103,15 @@ func TestParseAndFormat(t *testing.T) {
 		t.Errorf("Format: %q %q %q", Format(nil), Format([]string{System, GVisor}), Default)
 	}
 }
+
+// CheckType takes the two types as setup-aws spells them, and nothing else.
+func TestCheckType(t *testing.T) {
+	for typ, ok := range map[string]bool{Managed: true, SelfManaged: true, "": false, "Managed": false, "self_managed": false, "fargate": false} {
+		if err := CheckType(typ); (err == nil) != ok {
+			t.Errorf("CheckType(%q) = %v, want ok=%v", typ, err, ok)
+		}
+	}
+	if Default != "system,gvisor,microvm" || Types[0] != Managed {
+		t.Errorf("Default %q, Types %q", Default, Types)
+	}
+}

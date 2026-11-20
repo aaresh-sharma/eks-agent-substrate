@@ -36,8 +36,9 @@ type fieldKind int
 const (
 	fText fieldKind = iota
 	fToggle
-	fClass    // one sandbox class, on or off
-	fDatabase // RDS or the bundled PostgreSQL
+	fClass         // one sandbox class, on or off
+	fDatabase      // RDS or the bundled PostgreSQL
+	fNodeGroupType // NODE_GROUP_TYPE, managed or self-managed
 )
 
 // The values that are not edited as text: the classes (config.env's
@@ -66,7 +67,8 @@ func settingsFields(newCluster bool, groups []string) []field {
 			field{kind: fText, key: "KUBERNETES_VERSION", label: "Kubernetes version", section: "New cluster"},
 			field{kind: fToggle, key: "AUTO_MODE", label: "EKS Auto Mode", section: "New cluster"},
 			field{kind: fText, key: "EKS_PUBLIC_ACCESS_CIDRS", label: "API access CIDRs", section: "New cluster"},
-			field{kind: fText, key: "NODE_AMI_ID", label: "Node AMI", section: "New cluster"})
+			field{kind: fText, key: "NODE_AMI_ID", label: "Node AMI", section: "New cluster"},
+			field{kind: fNodeGroupType, key: "NODE_GROUP_TYPE", label: "Node group type", section: "New cluster"})
 	}
 	for _, c := range state.Classes {
 		f = append(f, field{kind: fClass, key: c, label: state.ClassTitle(c), section: "Sandbox classes"})
@@ -101,6 +103,7 @@ var help = map[string]string{
 	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the node groups. Fixed when the cluster is created. The AWS Nitro sandbox class needs it.",
 	"EKS_PUBLIC_ACCESS_CIDRS": "Address ranges allowed to reach the Kubernetes API endpoint, space-separated. Requests are still authenticated by IAM.",
 	"NODE_AMI_ID":             "The AMI of the node groups. Empty: the Amazon EKS optimized Amazon Linux 2023 AMI, which EKS picks. An AMI you bring must join the cluster with nodeadm (Amazon Linux 2023).",
+	"NODE_GROUP_TYPE":         "managed: EKS managed node groups. self-managed: an Auto Scaling group per node group, which you own, whose nodes join with the NodeConfig in their launch template. A cluster has one type.",
 	"TAGS":                    "Space-separated key=value tags on every AWS resource the install creates. The owner tag agent-substrate-on-eks/deployment=<cluster>.<region> is always added.",
 	"SUBSTRATE_TAG":           "The Agent Substrate release to install, such as v1.0.0. An install runs one release: with the AWS Nitro sandbox class (or the mode 3 plugin) it is the fork's release that class installs, and this one is kept for a run without it.",
 	"SUBSTRATE_IMAGE_REPO":    "Where the release's images come from.",
@@ -258,20 +261,21 @@ func (m *Model) clearGroupPlugins() []string {
 }
 
 // checkSettings validates every value, for the screen and for n: the config
-// keys (only the node groups shown, the ones the cluster gets), each class
+// keys that have a row (only the node groups the cluster gets), each class
 // against the cluster, and the node group rule.
 func (m *Model) checkSettings() {
 	st := m.set
 	st.errs = state.ValidateConfig(st.values)
-	shown := map[string]bool{}
+	// A key with no row (a connected cluster's cluster keys, the node
+	// groups the cluster does not get) is not used, so it cannot need a fix.
+	// The classes have a row each.
+	shown := map[string]bool{classKey: true}
 	for _, f := range st.fields {
 		shown[f.key] = true
 	}
-	for _, g := range nodegroups.All {
-		for _, k := range []string{strings.ToUpper(g) + "_INSTANCE_TYPE", strings.ToUpper(g) + "_NODES"} {
-			if !shown[k] {
-				delete(st.errs, k)
-			}
+	for k := range st.errs {
+		if !shown[k] {
+			delete(st.errs, k)
 		}
 	}
 	if _, bad := st.errs[classKey]; bad {
@@ -320,7 +324,7 @@ func (m *Model) applySettings() {
 		{"KUBERNETES_VERSION", &c.KubernetesVersion}, {"AUTO_MODE", &c.AutoMode}, {"EKS_PUBLIC_ACCESS_CIDRS", &c.PublicAccessCIDRs},
 		{"SYSTEM_INSTANCE_TYPE", &c.SystemInstanceType}, {"GVISOR_INSTANCE_TYPE", &c.GVisorInstanceType}, {"MICROVM_INSTANCE_TYPE", &c.MicroVMInstanceType},
 		{"SYSTEM_NODES", &c.SystemNodes}, {"GVISOR_NODES", &c.GVisorNodes}, {"MICROVM_NODES", &c.MicroVMNodes},
-		{"NODE_AMI_ID", &c.NodeAMIID},
+		{"NODE_AMI_ID", &c.NodeAMIID}, {"NODE_GROUP_TYPE", &c.NodeGroupType},
 		{"TAGS", &m.s.Tags}, {"SUBSTRATE_TAG", &m.s.SubstrateTag}, {"SUBSTRATE_IMAGE_REPO", &m.s.ImageRepo},
 		{classKey, &m.s.SandboxClasses}, {dbKey, &m.s.Database},
 	} {
@@ -383,6 +387,12 @@ func (m *Model) settingsKey(msg tea.KeyMsg) tea.Cmd {
 				st.values[dbKey] = state.DatabaseBundled
 			} else {
 				st.values[dbKey] = state.DatabaseRDS
+			}
+		case fNodeGroupType:
+			if st.values[f.key] == nodegroups.SelfManaged {
+				st.values[f.key] = nodegroups.Managed
+			} else {
+				st.values[f.key] = nodegroups.SelfManaged
 			}
 		default:
 			if rel, by := m.settingsRelease(); f.key == "SUBSTRATE_TAG" && by != "" {
@@ -553,7 +563,7 @@ func (m Model) settingsView() string {
 	}
 	para := lipgloss.NewStyle().Width(rightW)
 	right = append(right, theme.Subtle.Render(para.Render(joinParagraphs(text))))
-	if f.kind == fText || f.kind == fToggle {
+	if f.kind == fText || f.kind == fToggle || f.kind == fNodeGroupType {
 		right = append(right, "", theme.Fainted.Render(para.Render("Now: "+f.key+"="+st.values[f.key])))
 		if def, ok := m.d.Config.Defaults.Get(f.key); ok {
 			right = append(right, theme.Fainted.Render(para.Render("config.env: "+f.key+"="+def)))

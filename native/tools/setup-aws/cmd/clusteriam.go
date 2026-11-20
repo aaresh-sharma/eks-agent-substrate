@@ -153,7 +153,7 @@ func (r *clusterRun) neededRoles() []clusterRole {
 		}
 	}
 	for _, g := range r.groups() {
-		if r.nodegroups[g.Name] == nil {
+		if !r.groupExists(g.Name) {
 			out = append(out, clusterRole{name: r.nodeRoleName(), trust: ec2TrustPolicy,
 				policies: []string{"AmazonEKSWorkerNodePolicy", "AmazonEKS_CNI_Policy", "AmazonEC2ContainerRegistryPullOnly"}})
 			break
@@ -175,6 +175,9 @@ func (r *clusterRun) ensureRoles(ctx context.Context) error {
 		if err := r.ensureRole(ctx, role); err != nil {
 			return fmt.Errorf("IAM role %s: %w", role.name, err)
 		}
+	}
+	if err := r.ensureInstanceProfile(ctx); err != nil {
+		return err
 	}
 	return r.reconcileClusterRole(ctx)
 }

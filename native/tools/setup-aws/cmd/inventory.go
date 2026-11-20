@@ -11,6 +11,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
@@ -30,6 +32,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 	"github.com/spf13/cobra"
+
+	"github.com/csantanapr/eks-agent-substrate/native/tools/setup-aws/nodegroups"
 )
 
 // Tag keys inventory and teardown read besides OwnerTagKey.
@@ -92,6 +96,8 @@ type (
 		DeletePodIdentityAssociation(context.Context, *eks.DeletePodIdentityAssociationInput, ...func(*eks.Options)) (*eks.DeletePodIdentityAssociationOutput, error)
 		DeleteNodegroup(context.Context, *eks.DeleteNodegroupInput, ...func(*eks.Options)) (*eks.DeleteNodegroupOutput, error)
 		DeleteCluster(context.Context, *eks.DeleteClusterInput, ...func(*eks.Options)) (*eks.DeleteClusterOutput, error)
+		DescribeAccessEntry(context.Context, *eks.DescribeAccessEntryInput, ...func(*eks.Options)) (*eks.DescribeAccessEntryOutput, error)
+		DeleteAccessEntry(context.Context, *eks.DeleteAccessEntryInput, ...func(*eks.Options)) (*eks.DeleteAccessEntryOutput, error)
 	}
 	tdIAMAPI interface {
 		GetRole(context.Context, *iam.GetRoleInput, ...func(*iam.Options)) (*iam.GetRoleOutput, error)
@@ -103,6 +109,15 @@ type (
 		ListInstanceProfilesForRole(context.Context, *iam.ListInstanceProfilesForRoleInput, ...func(*iam.Options)) (*iam.ListInstanceProfilesForRoleOutput, error)
 		RemoveRoleFromInstanceProfile(context.Context, *iam.RemoveRoleFromInstanceProfileInput, ...func(*iam.Options)) (*iam.RemoveRoleFromInstanceProfileOutput, error)
 		DeleteRole(context.Context, *iam.DeleteRoleInput, ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
+		GetInstanceProfile(context.Context, *iam.GetInstanceProfileInput, ...func(*iam.Options)) (*iam.GetInstanceProfileOutput, error)
+		ListInstanceProfileTags(context.Context, *iam.ListInstanceProfileTagsInput, ...func(*iam.Options)) (*iam.ListInstanceProfileTagsOutput, error)
+		DeleteInstanceProfile(context.Context, *iam.DeleteInstanceProfileInput, ...func(*iam.Options)) (*iam.DeleteInstanceProfileOutput, error)
+	}
+	// tdASGAPI reads and deletes the Auto Scaling groups of self-managed
+	// node groups.
+	tdASGAPI interface {
+		DescribeAutoScalingGroups(context.Context, *autoscaling.DescribeAutoScalingGroupsInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error)
+		DeleteAutoScalingGroup(context.Context, *autoscaling.DeleteAutoScalingGroupInput, ...func(*autoscaling.Options)) (*autoscaling.DeleteAutoScalingGroupOutput, error)
 	}
 	tdRDSAPI interface {
 		DescribeDBInstances(context.Context, *rds.DescribeDBInstancesInput, ...func(*rds.Options)) (*rds.DescribeDBInstancesOutput, error)
@@ -142,6 +157,7 @@ type tdClients struct {
 	SM  tdSecretsAPI
 	S3  tdS3API
 	ECR tdECRAPI
+	ASG tdASGAPI
 }
 
 var newTDClients = func(ctx context.Context, c Config) (*tdClients, error) {
@@ -153,6 +169,7 @@ var newTDClients = func(ctx context.Context, c Config) (*tdClients, error) {
 		STS: sts.NewFromConfig(ac), Tag: rgt.NewFromConfig(ac), EC2: ec2.NewFromConfig(ac),
 		EKS: eks.NewFromConfig(ac), IAM: iam.NewFromConfig(ac), RDS: rds.NewFromConfig(ac),
 		SM: secretsmanager.NewFromConfig(ac), S3: s3.NewFromConfig(ac), ECR: ecr.NewFromConfig(ac),
+		ASG: autoscaling.NewFromConfig(ac),
 	}, nil
 }
 
@@ -209,6 +226,24 @@ func (e *tdEnv) ltNames() []string {
 	c := e.n.Cluster
 	return []string{c + "-microvm-nested-virt", c + "-system-nodes", c + "-gvisor-nodes"}
 }
+
+// asgNames are the Auto Scaling groups of self-managed node groups, one per
+// node group name create cluster knows.
+func (e *tdEnv) asgNames() []string {
+	var out []string
+	for _, g := range nodegroups.All {
+		out = append(out, e.n.Cluster+"-"+g)
+	}
+	return out
+}
+
+// nodeRole is the node groups' IAM role, whose name its instance profile
+// has too; nodeRoleARN is its ARN, the principal of its access entry.
+func (e *tdEnv) nodeRole() string { return e.n.IAMPrefix + "-eks-node" }
+func (e *tdEnv) nodeRoleARN() string {
+	return fmt.Sprintf("arn:%s:iam::%s:role/%s", e.n.Partition, e.n.Account, e.nodeRole())
+}
+
 func (e *tdEnv) secretNames() []string {
 	return []string{e.n.Cluster + "/ate-owner", e.n.Cluster + "/ate-readwrite"}
 }
@@ -789,6 +824,95 @@ func (e *tdEnv) dbSnapshotExists(ctx context.Context, id string) (bool, error) {
 	return false, nil
 }
 
+// The kinds of a self-managed deployment's cluster resources.
+const (
+	kASG         = "Auto Scaling group"
+	kProfile     = "IAM instance profile"
+	kAccessEntry = "EKS access entry"
+)
+
+// nodeAccessEntry is the tags of the node role's access entry on cluster cl,
+// or nil when it has none. A cluster that authenticates with the aws-auth
+// ConfigMap only has no access entries, and EKS refuses to read one there.
+func (e *tdEnv) nodeAccessEntry(ctx context.Context, cl *ekstypes.Cluster) (map[string]string, error) {
+	if cl.AccessConfig != nil && cl.AccessConfig.AuthenticationMode == ekstypes.AuthenticationModeConfigMap {
+		return nil, nil
+	}
+	out, err := e.c.EKS.DescribeAccessEntry(ctx, &eks.DescribeAccessEntryInput{ClusterName: aws.String(e.n.Cluster), PrincipalArn: aws.String(e.nodeRoleARN())})
+	if tdGone(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("describe the access entry of %s: %w", e.nodeRoleARN(), err)
+	}
+	if out.AccessEntry.Tags == nil {
+		return map[string]string{}, nil
+	}
+	return out.AccessEntry.Tags, nil
+}
+
+// asgItem is one Auto Scaling group; status is set while it is deleted.
+type asgItem struct {
+	name, status string
+	tags         map[string]string
+}
+
+// autoScalingGroups are the Auto Scaling groups of self-managed node
+// groups: those with the derived names, whatever their tags, and every
+// other one with the owner tag but EKS's own for a managed node group,
+// which create cluster tags too and which goes with its node group.
+func (e *tdEnv) autoScalingGroups(ctx context.Context) ([]asgItem, error) {
+	var out []asgItem
+	seen := map[string]bool{}
+	read := func(in *autoscaling.DescribeAutoScalingGroupsInput, eksOwn bool) error {
+		p := autoscaling.NewDescribeAutoScalingGroupsPaginator(e.c.ASG, in)
+		for p.HasMorePages() {
+			page, err := p.NextPage(ctx)
+			if err != nil {
+				return fmt.Errorf("describe Auto Scaling groups: %w", err)
+			}
+			for _, a := range page.AutoScalingGroups {
+				it := asgItem{name: aws.ToString(a.AutoScalingGroupName), status: aws.ToString(a.Status), tags: asgTagMap(a.Tags)}
+				if seen[it.name] || (!eksOwn && it.tags["eks:nodegroup-name"] != "") {
+					continue
+				}
+				seen[it.name] = true
+				out = append(out, it)
+			}
+		}
+		return nil
+	}
+	if err := read(&autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: e.asgNames()}, true); err != nil {
+		return nil, err
+	}
+	owner := []asgtypes.Filter{{Name: aws.String("tag:" + OwnerTagKey), Values: []string{e.n.OwnerValue}}}
+	if err := read(&autoscaling.DescribeAutoScalingGroupsInput{Filters: owner}, false); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// autoScalingGroup is Auto Scaling group name, or nil when it is gone.
+func (e *tdEnv) autoScalingGroup(ctx context.Context, name string) (*asgItem, error) {
+	out, err := e.c.ASG.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{name}})
+	if err != nil {
+		return nil, fmt.Errorf("describe Auto Scaling group %s: %w", name, err)
+	}
+	for _, a := range out.AutoScalingGroups {
+		if aws.ToString(a.AutoScalingGroupName) == name {
+			return &asgItem{name: name, status: aws.ToString(a.Status), tags: asgTagMap(a.Tags)}, nil
+		}
+	}
+	return nil, nil
+}
+
+// asgNotFound is Auto Scaling's answer for a group that does not exist: a
+// ValidationError, which tdGone cannot tell from a bad request.
+func asgNotFound(err error) bool {
+	var ae smithy.APIError
+	return errors.As(err, &ae) && ae.ErrorCode() == "ValidationError" && strings.Contains(strings.ToLower(ae.ErrorMessage()), "not found")
+}
+
 func isDBSnapshotNotFound(err error) bool {
 	var ae smithy.APIError
 	return errors.As(err, &ae) && (ae.ErrorCode() == "DBSnapshotNotFound" || ae.ErrorCode() == "DBSnapshotNotFoundFault")
@@ -814,8 +938,9 @@ var tdKnown = map[string]bool{
 	"ec2:launch-template": true, "ec2:network-interface": true, "ec2:volume": true, "ec2:instance": true,
 	// create cluster tags the VPC's default network ACL, which goes with the
 	// VPC (listed itself).
-	"ec2:network-acl": true,
-	"rds:db":          true, "rds:subgrp": true, "ecr:repository": true,
+	"ec2:network-acl":              true,
+	"autoscaling:autoScalingGroup": true,
+	"rds:db":                       true, "rds:subgrp": true, "ecr:repository": true,
 }
 
 // arnType splits an ARN into its service, resource type and id.
@@ -875,6 +1000,25 @@ func (e *tdEnv) inventory(ctx context.Context) ([]tdRow, error) {
 				add(tdRow{"Pod Identity association", assocLabel(a), a.Tags, aws.ToString(a.Namespace) != "ate-system"})
 			}
 		}
+		// The node role's access entry, when create cluster made it for
+		// self-managed nodes; EKS's own for managed groups goes with the
+		// cluster.
+		tags, err := e.nodeAccessEntry(ctx, cl)
+		if err != nil {
+			return nil, err
+		}
+		if e.owned(tags) {
+			add(tdRow{kAccessEntry, e.nodeRoleARN(), tags, true})
+		}
+	}
+	// Those of the derived names whatever their owner, as launch templates
+	// are, and every other one with the owner tag.
+	asgs, err := e.autoScalingGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range asgs {
+		add(tdRow{kASG, a.name, a.tags, true})
 	}
 
 	roles, err := e.roles(ctx)
@@ -885,6 +1029,13 @@ func (e *tdEnv) inventory(ctx context.Context) ([]tdRow, error) {
 		if e.owned(roles[name]) || e.isSubstrateRole(name) {
 			add(tdRow{"IAM role", name, roles[name], !e.isSubstrateRole(name)})
 		}
+	}
+	ip, ipTags, err := readInstanceProfile(ctx, e.c.IAM, e.nodeRole())
+	if err != nil {
+		return nil, err
+	}
+	if ip != nil && e.owned(ipTags) {
+		add(tdRow{kProfile, e.nodeRole(), ipTags, true})
 	}
 
 	db, err := e.dbInstance(ctx)

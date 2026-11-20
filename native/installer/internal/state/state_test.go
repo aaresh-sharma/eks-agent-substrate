@@ -2,6 +2,7 @@ package state
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -50,6 +51,29 @@ func TestClusterConfigFromEnv(t *testing.T) {
 	}
 	if !slices.Contains(c.Env(), "AUTO_MODE=") || !slices.Contains(c.Env(), "EKS_PUBLIC_ACCESS_CIDRS=auto") {
 		t.Errorf("env %v", c.Env())
+	}
+}
+
+// NODE_GROUP_TYPE defaults to managed and reaches setup-aws's environment;
+// the summary says self-managed only when it is, and only with node groups.
+func TestClusterConfigNodeGroupType(t *testing.T) {
+	c := ClusterConfigFromEnv(func(string) (string, bool) { return "", false })
+	if c.NodeGroupType != "managed" || !slices.Contains(c.Env(), "NODE_GROUP_TYPE=managed") {
+		t.Errorf("default: %q, env %v", c.NodeGroupType, c.Env())
+	}
+	groups := []string{"system", "gvisor"}
+	if got := c.Summary(groups); strings.Contains(got, "self-managed") {
+		t.Errorf("managed summary %q", got)
+	}
+	c = ClusterConfigFromEnv(func(k string) (string, bool) { return "self-managed", k == "NODE_GROUP_TYPE" })
+	if got := c.Summary(groups); !strings.HasSuffix(got, " · self-managed node groups") {
+		t.Errorf("self-managed summary %q", got)
+	}
+	if got := c.Summary(nil); strings.Contains(got, "self-managed") {
+		t.Errorf("self-managed with no node group: %q", got)
+	}
+	if !slices.Contains(ManagedKeys, "NODE_GROUP_TYPE") {
+		t.Error("Settings does not write NODE_GROUP_TYPE")
 	}
 }
 
