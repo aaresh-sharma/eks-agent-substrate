@@ -383,16 +383,17 @@ there.
 
 On a cluster you connect, `NITRO_COMPUTE=node-group` needs nodes labeled
 `ate.dev/pool=nitro` and `eks.amazonaws.com/nitro-sandbox=true`, of a Nitro
-Sandbox AMI. Without Auto Mode, Settings sets `node-group` when you turn on
-the AWS Nitro sandbox, as on a new cluster; without such nodes the class is
-refused, and `NITRO_COMPUTE` stays as it was. Settings does the same when it opens with the class already on,
-for example after you go back and connect another cluster, or from
-`config.local.env`. Step by step, from `native/` with `C`, `R` and `P` as in
-[Run each step yourself](#run-each-step-yourself), name the group and pass
-the setting to each installer step. The control plane step carries
-`mode3-iso` for the `nitro` class; without it the plugin step is refused.
-Add `AUTO_MODE=` to `create cluster` for a cluster without Auto Mode, where
-the control plane step also needs `--nitro-compute node-group`:
+Sandbox AMI. Without Auto Mode, when the cluster has such nodes, turning on
+the AWS Nitro sandbox sets `node-group`, as on a new cluster. When it has
+none, the class is refused, and a refused change sets nothing:
+`NITRO_COMPUTE` stays as it was. Settings does the same when it opens with
+the class already on, for example after you go back and connect another
+cluster, or from `config.local.env`. Step by step, from `native/` with `C`,
+`R` and `P` as in [Run each step yourself](#run-each-step-yourself), name
+the group and pass the setting to each installer step. The control plane
+step carries `mode3-iso` for the `nitro` class; without it the plugin step
+is refused. Add `AUTO_MODE=` to `create cluster` for a cluster without Auto
+Mode, where the control plane step also needs `--nitro-compute node-group`:
 
 ```bash
 NODE_GROUPS=system,gvisor,microvm,nitro NITRO_AMI_ID=ami-0123456789abcdef0 CLUSTER_NAME=$C AWS_REGION=$R AWS_PROFILE=$P go -C tools/setup-aws run . create cluster
