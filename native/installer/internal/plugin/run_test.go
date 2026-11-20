@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +20,59 @@ import (
 // fakeCluster is Exec for Run's tests: it keeps the record ConfigMap and
 // logs every child and plugin hook in order.
 type fakeCluster struct {
-	record string // the data value; "" is no ConfigMap
-	log    []string
+	// record, pending and nitro are the data values of the record's
+	// plugins, pending and nitro-compute keys; all "" is no ConfigMap.
+	record, pending, nitro string
+	// extra, when set, is the value of a data key this installer does not
+	// know, as a newer installer would write it.
+	extra string
+	log   []string
+	// applies is the stdin of every record apply, byte for byte.
+	applies []string
 	// refuse makes `setup-aws plugin <id> --delete`, with or without
 	// --plan, fail as a refusal does.
 	refuse bool
+	// readErr, when set, fails every read of the record.
+	readErr error
+	// reads counts the reads of the record.
+	reads int
 }
 
-var recordValue = regexp.MustCompile(`(?m)^  plugins: "([^"]*)"$`)
+var recordLine = regexp.MustCompile(`(?m)^  (plugins|pending|nitro-compute): "([^"]*)"$`)
+
+// recordJSON is the record as `kubectl get configmap -o json` prints it, or
+// nothing when there is none: only the keys that hold something, besides
+// plugins, as WriteRecord writes them.
+func (f *fakeCluster) recordJSON() string {
+	if f.record == "" && f.pending == "" && f.nitro == "" && f.extra == "" {
+		return ""
+	}
+	data := map[string]string{RecordKey: f.record}
+	for k, v := range map[string]string{PendingKey: f.pending, NitroComputeKey: f.nitro, "future-key": f.extra} {
+		if v != "" {
+			data[k] = v
+		}
+	}
+	b, err := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": RecordName, "namespace": RecordNamespace}, "data": data})
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// state is the record as the log shows it: the plugins, then the other keys
+// that hold something.
+func (f *fakeCluster) state() string {
+	s := "record=" + f.record
+	if f.pending != "" {
+		s += " pending=" + f.pending
+	}
+	if f.nitro != "" {
+		s += " nitro-compute=" + f.nitro
+	}
+	return s
+}
 
 func (f *fakeCluster) exec(_ context.Context, _ io.Writer, c Cmd) error {
 	argv := strings.Join(c.Argv, " ")
@@ -36,17 +82,32 @@ func (f *fakeCluster) exec(_ context.Context, _ io.Writer, c Cmd) error {
 		}
 	}
 	switch {
-	case strings.HasPrefix(argv, "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins"):
-		io.WriteString(c.Stdout, f.record)
+	case argv == "kubectl --kubeconfig /kc -n kube-system get configmap substrate-eks-plugins --ignore-not-found -o json":
+		f.reads++
+		if f.readErr != nil {
+			return f.readErr
+		}
+		io.WriteString(c.Stdout, f.recordJSON())
 	case argv == "kubectl --kubeconfig /kc apply -f -":
-		m := recordValue.FindSubmatch(c.Stdin)
-		if m == nil {
+		ms := recordLine.FindAllSubmatch(c.Stdin, -1)
+		if !bytes.Contains(c.Stdin, []byte("  name: substrate-eks-plugins\n")) || len(ms) == 0 || string(ms[0][1]) != RecordKey {
 			return fmt.Errorf("apply of something else:\n%s", c.Stdin)
 		}
-		f.record = string(m[1])
-		f.log = append(f.log, "record="+f.record)
+		f.record, f.pending, f.nitro = "", "", ""
+		for _, m := range ms {
+			switch string(m[1]) {
+			case RecordKey:
+				f.record = string(m[2])
+			case PendingKey:
+				f.pending = string(m[2])
+			case NitroComputeKey:
+				f.nitro = string(m[2])
+			}
+		}
+		f.applies = append(f.applies, string(c.Stdin))
+		f.log = append(f.log, f.state())
 	case argv == "kubectl --kubeconfig /kc -n kube-system delete configmap substrate-eks-plugins --ignore-not-found":
-		f.record = ""
+		f.record, f.pending, f.nitro = "", "", ""
 		f.log = append(f.log, "record deleted")
 	case strings.HasPrefix(argv, "go -C /setup-aws run . plugin "):
 		if !slices.Contains(c.Env, "CLUSTER_NAME=demo") || !slices.Contains(c.Env, "PLAN=false") || !slices.Contains(c.Env, "TAGS=auto-delete=no") {

@@ -323,6 +323,13 @@ func Deploy(ctx context.Context, w io.Writer, o Options) error {
 			return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, why, o.Cluster)
 		}
 	}
+	// So does a chosen plugin whose own deploy would refuse this run's
+	// NITRO_COMPUTE (another than the record holds for it, as on a wizard
+	// rerun with another one). The record is read again only for such a
+	// plugin; one that is only recorded is not deployed, so not checked.
+	if err := checkNitroRecord(ctx, w, po, o.Plugins); err != nil {
+		return err
+	}
 	// Before anything changes: an installed control plane keeps its release.
 	if err := SameRelease(ctx, kc, o.Cluster, po.Release); err != nil {
 		return err
@@ -350,13 +357,14 @@ func Deploy(ctx context.Context, w io.Writer, o Options) error {
 
 // Seams replaced in tests (with describeCluster and deleteRun in delete.go).
 var (
-	writeKubeconfig = awsx.WriteKubeconfig
-	fetchTree       = FetchTree
-	applyOverlay    = eksoverlay.Apply
-	overlayDigest   = eksoverlay.Digest
-	readRecord      = plugin.ReadRecord
-	recordPlugins   = plugin.AddToRecord
-	removePlugins   = plugin.Run
+	writeKubeconfig  = awsx.WriteKubeconfig
+	fetchTree        = FetchTree
+	applyOverlay     = eksoverlay.Apply
+	overlayDigest    = eksoverlay.Digest
+	readRecord       = plugin.ReadRecord
+	checkNitroRecord = plugin.CheckNitroRecord
+	recordPlugins    = plugin.AddToRecord
+	removePlugins    = plugin.Run
 )
 
 // pluginOptions is what plugin code gets for this install, on o's release.
