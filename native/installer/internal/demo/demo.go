@@ -48,6 +48,10 @@ type Options struct {
 	ImageRepo string
 	// SandboxClasses are the classes to deploy and check, e.g. "gvisor,microvm".
 	SandboxClasses string
+	// PoolArchs are, by pool, the CPU architectures of the pools that have
+	// a Karpenter NodePool and no node yet (plugin.Options.PoolArchs): the
+	// architecture of the nodes Karpenter will make for the demo's Pods.
+	PoolArchs map[string][]string
 }
 
 // PoolLabel is the node label of the gvisor and microvm node groups, the only
@@ -203,7 +207,7 @@ func (e *env) deploy(ctx context.Context, w io.Writer, o Options) error {
 // demoImages builds and pushes the counter image and pins every class's
 // release worker image, keyed by the ko package the templates name.
 func (e *env) demoImages(ctx context.Context, w io.Writer, o Options, tree, dir string, kubectl func(...string) []string, cls []class) (map[string]string, error) {
-	arch, err := e.nodeArch(ctx, kubectl, cls)
+	arch, err := e.nodeArch(ctx, kubectl, cls, o.PoolArchs)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +238,10 @@ func (e *env) demoImages(ctx context.Context, w io.Writer, o Options, tree, dir 
 }
 
 // nodeArch is the CPU architecture of the classes' node groups, which the
-// counter image is built for.
-func (e *env) nodeArch(ctx context.Context, kubectl func(...string) []string, cls []class) (string, error) {
+// counter image is built for: their nodes', and for a class whose pool has
+// no node yet, the one its Karpenter NodePool requires (nodeless,
+// Options.PoolArchs).
+func (e *env) nodeArch(ctx context.Context, kubectl func(...string) []string, cls []class, nodeless map[string][]string) (string, error) {
 	names := make([]string, len(cls))
 	for i, c := range cls {
 		names[i] = c.name
@@ -245,7 +251,11 @@ func (e *env) nodeArch(ctx context.Context, kubectl func(...string) []string, cl
 	if err != nil {
 		return "", err
 	}
-	archs := slices.Compact(slices.Sorted(slices.Values(strings.Fields(string(out)))))
+	archs := strings.Fields(string(out))
+	for _, n := range names {
+		archs = append(archs, nodeless[n]...)
+	}
+	archs = slices.Compact(slices.Sorted(slices.Values(archs)))
 	switch len(archs) {
 	case 0:
 		return "", fmt.Errorf("no node labeled %s to run the counter demo on", sel)

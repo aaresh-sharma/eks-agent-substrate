@@ -293,14 +293,16 @@ func renderPolicy(account, region string) (string, error) {
 }
 
 // nodeArch is the one CPU architecture of the system and gvisor nodes, where
-// the provider and the probe actors run.
+// the provider and the probe actors run: the nodes', and for a pool with no
+// node yet, the one its Karpenter NodePool requires (o.PoolArchs).
 func nodeArch(ctx context.Context, w io.Writer, o plugin.Options) (string, error) {
 	var out bytes.Buffer
 	sel := poolLabel + " in (system,gvisor)"
 	if err := plugin.Kubectl(ctx, w, o, nil, &out, "get", "nodes", "-l", sel, "-o", `jsonpath={.items[*].metadata.labels.kubernetes\.io/arch}`); err != nil {
 		return "", err
 	}
-	archs := slices.Compact(slices.Sorted(slices.Values(strings.Fields(out.String()))))
+	archs := append(strings.Fields(out.String()), plugin.ArchsOf(o.PoolArchs, "system", "gvisor")...)
+	archs = slices.Compact(slices.Sorted(slices.Values(archs)))
 	switch len(archs) {
 	case 0:
 		return "", fmt.Errorf("no node labeled %s", sel)
