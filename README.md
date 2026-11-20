@@ -385,7 +385,7 @@ On a cluster you connect, `NITRO_COMPUTE=node-group` needs nodes labeled
 `ate.dev/pool=nitro` and `eks.amazonaws.com/nitro-sandbox=true`, of a Nitro
 Sandbox AMI. Without Auto Mode, Settings sets `node-group` when you turn on
 the AWS Nitro sandbox, as on a new cluster; without such nodes the class is
-refused. Settings does the same when it opens with the class already on,
+refused, and `NITRO_COMPUTE` stays as it was. Settings does the same when it opens with the class already on,
 for example after you go back and connect another cluster, or from
 `config.local.env`. Step by step, from `native/` with `C`, `R` and `P` as in
 [Run each step yourself](#run-each-step-yourself), name the group and pass

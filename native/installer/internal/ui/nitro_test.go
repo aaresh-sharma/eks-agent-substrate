@@ -233,6 +233,9 @@ func TestConnectedClusterNitroNodeGroup(t *testing.T) {
 		{"new", "system,gvisor,nitro", plugin.NitroNodeGroup, true, "", plugin.NitroNodeGroup, false},
 		{"team-partial", "system,gvisor", plugin.NitroNodeGroup, false, noGroup, plugin.NitroNodeGroup, false},
 		{"team-partial", "system,gvisor,nitro", plugin.NitroAutoMode, true, "", plugin.NitroNodeGroup, true},
+		// No Auto Mode and no nitro group: the press is refused for the
+		// missing group, and a refused press changes nothing, so
+		// NITRO_COMPUTE keeps the value the operator had.
 		{"team-partial", "system,gvisor", plugin.NitroAutoMode, false, noGroup, plugin.NitroAutoMode, false},
 		{"new", "system,gvisor", plugin.NitroAutoMode, true, "", plugin.NitroAutoMode, false},
 	} {

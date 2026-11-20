@@ -122,7 +122,7 @@ const classesHelp = " The classes decide a new cluster's node groups: gVisor and
 // help is a setting's explanation when config.env has no comment above it.
 var help = map[string]string{
 	"KUBERNETES_VERSION":      "The EKS version of the new cluster. Substrate needs 1.37 or newer (the PodCertificate APIs).",
-	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the node groups. Fixed when the cluster is created. The AWS Nitro sandbox class needs it.",
+	"AUTO_MODE":               "EKS Auto Mode, with its general-purpose and system NodePools next to the node groups. Fixed when the cluster is created. The AWS Nitro sandbox class needs it, unless it runs on the nitro node group (NITRO_COMPUTE=node-group).",
 	"EKS_PUBLIC_ACCESS_CIDRS": "Address ranges allowed to reach the Kubernetes API endpoint, space-separated. Requests are still authenticated by IAM.",
 	"NODE_AMI_ID":             "The AMI of the node groups. Empty: the Amazon EKS optimized Amazon Linux 2023 AMI, which EKS picks. An AMI you bring must join the cluster with nodeadm (Amazon Linux 2023).",
 	"NODE_GROUP_TYPE":         "managed: EKS managed node groups. self-managed: an Auto Scaling group per node group, which you own, whose nodes join with the NodeConfig in their launch template. A cluster has one type.",
