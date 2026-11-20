@@ -298,7 +298,10 @@ installed plugins. A plugin that follows `NITRO_COMPUTE`
 (`Plugin.FollowsNitroCompute`, only `mode3-iso`) also gets two keys:
 `pending` and `nitro-compute`. Its deploy writes both just before its first
 write: before its AWS half, or when `Deploy` calls `Options.BeforeWrite`
-after its read-only checks, so a refusal there writes nothing. `pending`
+after its read-only checks, so a refusal there writes nothing. That write
+alone is conditional (`kubectl create`, or `kubectl replace` with the
+`resourceVersion` read): when another run wrote the record in between, it
+reads and checks the record again, up to three tries. `pending`
 moves to `plugins` once its deploy and check pass, and also when a control
 plane deploy that carries it records it. A plugin that the control plane
 deploy recorded first (the wizard's order) is in both keys while its own

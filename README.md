@@ -584,10 +584,17 @@ A removal of every plugin (the teardown, `--remove-control-plane`, or
 `--plugin-action remove` with no `--plugins`) removes the pending ones too,
 so a deploy that failed halfway is cleaned up.
 
-Run one installer at a time on a cluster. Two runs at the same time can
-each write the record over the other. A deploy of `mode3-iso` reads the
-record again just before its first write, and stops if another run recorded
-it with the other `NITRO_COMPUTE` in the meantime.
+The `pending` write is conditional. A deploy of `mode3-iso` reads the
+record just before its first write, then writes its entry with `kubectl
+create` when there is no record, or with `kubectl replace` and the
+`resourceVersion` it read. If another run wrote the record in between, the
+API server refuses the write, and the deploy reads the record again and
+checks it again, up to three tries. So of two deploys of `mode3-iso` with
+opposite `NITRO_COMPUTE`, the second one to write finds the first one's
+entry and stops, unless another run's write of the record lands in between
+and drops that entry. Every other record write is a `kubectl apply`, or a
+`kubectl delete` when nothing is left, as before. Runs at the same time are
+still not supported: run one installer at a time on a cluster.
 
 | ID | Plugin | What it adds |
 |---|---|---|

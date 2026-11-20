@@ -579,7 +579,8 @@ func Merge(ps []Plugin) (Needs, error) {
 //   - PendingKey lists, the same way, each plugin that follows NITRO_COMPUTE
 //     (Plugin.FollowsNitroCompute) whose deploy has started and not
 //     finished: Run's deploy writes it just before the plugin's first
-//     write, and AddToRecord moves it to RecordKey, after Run's deploy and
+//     write, only while the record is as it read it (markPending), and
+//     AddToRecord moves it to RecordKey, after Run's deploy and
 //     check, or in the control plane deploy's record. A plugin the control
 //     plane deploy recorded first is in both keys while its own deploy
 //     runs, and after it fails. A failed deploy leaves it there, and a
@@ -625,6 +626,11 @@ type Record struct {
 	// NitroCompute is NitroComputeKey: "" when the record has none (one an
 	// older installer wrote, or with no plugin that follows NITRO_COMPUTE).
 	NitroCompute string
+	// ResourceVersion is the ConfigMap's metadata.resourceVersion as it was
+	// read: "" when there is no ConfigMap (the API server gives every object
+	// one). Only the pending write uses it, as its precondition
+	// (markPending); Equal ignores it and Manifest does not write it.
+	ResourceVersion string
 }
 
 // RecordArgs are the kubectl arguments that print the record ConfigMap as
@@ -639,13 +645,16 @@ func ParseRecordJSON(js []byte) (Record, error) {
 		return Record{}, nil
 	}
 	var cm struct {
+		Metadata struct {
+			ResourceVersion string `json:"resourceVersion"`
+		} `json:"metadata"`
 		Data map[string]string `json:"data"`
 	}
 	if err := json.Unmarshal(js, &cm); err != nil {
 		return Record{}, fmt.Errorf("read ConfigMap %s/%s: %w", RecordNamespace, RecordName, err)
 	}
 	return Record{Plugins: ParseRecord(cm.Data[RecordKey]), Pending: ParseRecord(cm.Data[PendingKey]),
-		NitroCompute: strings.TrimSpace(cm.Data[NitroComputeKey])}, nil
+		NitroCompute: strings.TrimSpace(cm.Data[NitroComputeKey]), ResourceVersion: cm.Metadata.ResourceVersion}, nil
 }
 
 // All are the installed and the pending plugins, sorted, once each: what a
@@ -658,7 +667,7 @@ func (r Record) All() []string {
 // WriteRecord deletes.
 func (r Record) Empty() bool { return len(r.Plugins) == 0 && len(r.Pending) == 0 }
 
-// Equal reports that r and s hold the same.
+// Equal reports that r and s hold the same, whatever their ResourceVersion.
 func (r Record) Equal(s Record) bool {
 	return slices.Equal(r.Plugins, s.Plugins) && slices.Equal(r.Pending, s.Pending) && r.NitroCompute == s.NitroCompute
 }
@@ -674,8 +683,13 @@ func (r Record) NitroComputeOf(p Plugin) string {
 
 // Manifest is the ConfigMap that holds r. It always has RecordKey, and the
 // other keys only when they hold something, so with only Plugins it is the
-// ConfigMap older installers write, byte for byte.
-func (r Record) Manifest() []byte {
+// ConfigMap older installers write, byte for byte. It has no
+// resourceVersion, so a write of it has no precondition.
+func (r Record) Manifest() []byte { return r.manifest("") }
+
+// manifest is Manifest with metadata.resourceVersion rv when rv is not "":
+// a replace of it then succeeds only while the ConfigMap is at rv.
+func (r Record) manifest(rv string) []byte {
 	data := fmt.Sprintf("  %s: %q\n", RecordKey, FormatRecord(r.Plugins))
 	if len(r.Pending) > 0 {
 		data += fmt.Sprintf("  %s: %q\n", PendingKey, FormatRecord(r.Pending))
@@ -683,13 +697,17 @@ func (r Record) Manifest() []byte {
 	if r.NitroCompute != "" {
 		data += fmt.Sprintf("  %s: %q\n", NitroComputeKey, r.NitroCompute)
 	}
+	version := ""
+	if rv != "" {
+		version = fmt.Sprintf("  resourceVersion: %q\n", rv)
+	}
 	return []byte(fmt.Sprintf(`apiVersion: v1
 kind: ConfigMap
 metadata:
   name: %s
   namespace: %s
-  labels:
+%s  labels:
     app.kubernetes.io/managed-by: substrate-eks
 data:
-%s`, RecordName, RecordNamespace, data))
+%s`, RecordName, RecordNamespace, version, data))
 }

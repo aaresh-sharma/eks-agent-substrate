@@ -219,34 +219,86 @@ func without(ids []string, drop ...string) []string {
 // with it.
 const PendingLine = "Recording as pending before this deploy writes: "
 
+// pendingTries is how many times markPending writes the pending entry
+// while other runs change the record between its read and its write.
+const pendingTries = 3
+
+// RecordChangedLine is printed when the pending write is refused because
+// the record changed since it was read: markPending reads it again. It is
+// followed by the plugin ID.
+const RecordChangedLine = "The plugin record changed since it was read; reading it again to record as pending: "
+
+// errRecordChanged is the pending write's refusal: the record is not the one
+// it was written from (kubectl create found one, or kubectl replace another
+// resourceVersion).
+var errRecordChanged = errors.New("the plugin record changed since it was read")
+
 // markPending records p as pending with o's NITRO_COMPUTE (a plugin that
 // follows it, Plugin.FollowsNitroCompute), so a deploy that fails leaves
 // it where a removal finds it, and the removal runs with the NITRO_COMPUTE
 // the deploy ran with. Any other plugin is not recorded until it is checked.
-// It writes, and says so, only when that changes the record.
+// It writes, and says so, only when that changes the record, and only while
+// the record is the one it read (writePending): when another run changed it
+// in between, it reads it again, checks it again and writes again, at most
+// pendingTries times. So of two deploys with opposite NITRO_COMPUTE at the
+// same time, the second to write reads the first one's entry and is refused,
+// unless another run's plain apply of the record lands in between and drops
+// that entry: runs at the same time stay unsupported.
 func markPending(ctx context.Context, w io.Writer, o Options, p Plugin) error {
 	if !p.FollowsNitroCompute {
 		return nil
 	}
-	rec, err := LoadRecord(ctx, w, o)
-	if err != nil {
-		return err
+	for try := 1; ; try++ {
+		rec, err := LoadRecord(ctx, w, o)
+		if err != nil {
+			return err
+		}
+		// Checked again on this fresh read: another run may have recorded p
+		// with the other NITRO_COMPUTE since this deploy's checks.
+		if err := checkRecordedNitroCompute(rec, p, o); err != nil {
+			return fmt.Errorf("another run recorded %s meanwhile: %w", p.ID, err)
+		}
+		next := rec
+		next.Pending = ParseRecord(FormatRecord(append(slices.Clone(rec.Pending), p.ID)))
+		next.NitroCompute = o.nitroCompute()
+		if next.Equal(rec) {
+			return nil
+		}
+		fmt.Fprintf(w, "%s%s with NITRO_COMPUTE=%s (%s/%s)\n", PendingLine, p.ID, o.nitroCompute(), RecordNamespace, RecordName)
+		err = writePending(ctx, w, o, next)
+		if !errors.Is(err, errRecordChanged) {
+			return err
+		}
+		if try == pendingTries {
+			return fmt.Errorf("%s/%s changed between the read and the write on each of %d tries to record %s as pending: "+
+				"another run is writing it; let it finish, then deploy again: %w", RecordNamespace, RecordName, pendingTries, p.ID, err)
+		}
+		fmt.Fprintln(w, RecordChangedLine+p.ID)
 	}
-	// Checked again on this fresh read: another run may have recorded p
-	// with the other NITRO_COMPUTE since this deploy's checks. Runs on one
-	// cluster at the same time are not supported; this only narrows the
-	// window, since the record write has no precondition.
-	if err := checkRecordedNitroCompute(rec, p, o); err != nil {
-		return fmt.Errorf("another run recorded %s meanwhile: %w", p.ID, err)
+}
+
+// writePending writes r, the record with a pending entry, only while the
+// ConfigMap is the one r was read from: with no ConfigMap read (no
+// ResourceVersion) a kubectl create, which fails with AlreadyExists when
+// one was made since; else a kubectl replace of a manifest that carries
+// r.ResourceVersion, which fails with Conflict when it was written since,
+// or NotFound when it was deleted since. Each refusal, as kubectl says it
+// on stderr, is errRecordChanged; any
+// other error is returned as it is. --save-config keeps the
+// last-applied-configuration annotation that the record's later writes
+// (kubectl apply, WriteRecord) merge with, so they still drop the pending
+// entry.
+func writePending(ctx context.Context, w io.Writer, o Options, r Record) error {
+	verb, refusals := "create", []string{"(AlreadyExists)"}
+	if r.ResourceVersion != "" {
+		verb, refusals = "replace", []string{"(Conflict)", "(NotFound)"}
 	}
-	next := rec
-	next.Pending = ParseRecord(FormatRecord(append(slices.Clone(rec.Pending), p.ID)))
-	next.NitroCompute = o.nitroCompute()
-	if next.Equal(rec) {
-		return nil
+	var said bytes.Buffer
+	err := Kubectl(ctx, io.MultiWriter(w, &said), o, r.manifest(r.ResourceVersion), nil, verb, "--save-config", "-f", "-")
+	if err != nil && slices.ContainsFunc(refusals, func(s string) bool { return strings.Contains(said.String(), s) }) {
+		return fmt.Errorf("%w: %w", errRecordChanged, err)
 	}
-	fmt.Fprintf(w, "%s%s with NITRO_COMPUTE=%s (%s/%s)\n", PendingLine, p.ID, o.nitroCompute(), RecordNamespace, RecordName)
-	return WriteRecord(ctx, w, o, next)
+	return err
 }
 
 // checkRecordedNitroCompute refuses to deploy p, a plugin that follows
@@ -361,7 +413,8 @@ func (n Needs) carries(m Needs) bool {
 //     again. A plugin that follows NITRO_COMPUTE (Plugin.FollowsNitroCompute)
 //     is recorded as pending, with its NITRO_COMPUTE, just before its first
 //     write (Options.BeforeWrite), and is refused with another
-//     NITRO_COMPUTE than the one recorded for it.
+//     NITRO_COMPUTE than the one recorded for it, there too: the pending
+//     write succeeds only while the record is as it was read (markPending).
 //   - verify: Verify for ids and what they require. A plugin that follows
 //     NITRO_COMPUTE is checked with the recorded one when there is one.
 //   - remove: ids (every recorded plugin, installed or pending, when ids is

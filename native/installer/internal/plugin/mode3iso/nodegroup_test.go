@@ -770,9 +770,18 @@ func TestFailedReadsStop(t *testing.T) {
 	}
 }
 
+// recordRV is the resourceVersion recordAnswer gives the record.
+const recordRV = "41"
+
+// pendingWrite is the pending write of r: a replace of the record read at
+// recordRV, so its manifest carries that resourceVersion.
+func pendingWrite(r plugin.Record) string {
+	return strings.Replace(string(r.Manifest()), "  namespace: kube-system\n", "  namespace: kube-system\n  resourceVersion: \""+recordRV+"\"\n", 1)
+}
+
 // recordAnswer is the plugin record r as kubectl prints it
-// (plugin.RecordArgs): the plugins key, and the others when they hold
-// something.
+// (plugin.RecordArgs): the plugins key, the others when they hold
+// something, and its resourceVersion (recordRV).
 func recordAnswer(r plugin.Record) string {
 	data := map[string]string{plugin.RecordKey: plugin.FormatRecord(r.Plugins)}
 	if len(r.Pending) > 0 {
@@ -781,7 +790,7 @@ func recordAnswer(r plugin.Record) string {
 	if r.NitroCompute != "" {
 		data[plugin.NitroComputeKey] = r.NitroCompute
 	}
-	b, err := json.Marshal(map[string]any{"kind": "ConfigMap", "data": data})
+	b, err := json.Marshal(map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"resourceVersion": recordRV}, "data": data})
 	if err != nil {
 		panic(err)
 	}
@@ -860,14 +869,16 @@ func TestNodeGroupDeployThatFailsStaysPendingAndIsRemoved(t *testing.T) {
 	if err := plugin.Run(context.Background(), io.Discard, plugin.ActionDeploy, []string{ID}, o); !errors.Is(err, denied) {
 		t.Fatalf("want the failure, got %v", err)
 	}
-	pending := string(plugin.Record{Plugins: []string{ID}, Pending: []string{ID}, NitroCompute: plugin.NitroNodeGroup}.Manifest())
-	if len(f.applies) != 1 || f.applies[0] != pending {
-		t.Errorf("record writes:\n%s\nwant only\n%s", strings.Join(f.applies, "---\n"), pending)
+	// The pending entry is a replace of the record that was read (the
+	// control plane step's), conditional on its resourceVersion.
+	pending := pendingWrite(plugin.Record{Plugins: []string{ID}, Pending: []string{ID}, NitroCompute: plugin.NitroNodeGroup})
+	if len(f.replaces) != 1 || f.replaces[0] != pending || len(f.applies) != 0 {
+		t.Errorf("record writes:\n%s\nwant only\n%s", strings.Join(append(f.replaces, f.applies...), "---\n"), pending)
 	}
 	// The pending entry just before the first write: after the reads of
 	// the RuntimeClass and the nodes, before the RuntimeClass is made.
 	if err := f.has("kubectl -n kube-system get configmap", "kubectl get runtimeclass isolated-sandbox", "kubectl get nodes -l ate.dev/pool=nitro",
-		"kubectl -n kube-system get configmap", "kubectl apply -f -", "kubectl create -f -", "kubectl -n ate-system get ds atelet"); err != nil {
+		"kubectl -n kube-system get configmap", "kubectl replace --save-config -f -", "kubectl create -f -", "kubectl -n ate-system get ds atelet"); err != nil {
 		t.Error(err)
 	}
 
@@ -921,14 +932,17 @@ func TestNodeGroupRefusalLeavesTheRecordSoAutoModeDeploys(t *testing.T) {
 	if err := plugin.Run(context.Background(), &out, plugin.ActionDeploy, []string{ID}, o); err != nil {
 		t.Fatalf("the auto-mode deploy after the refusal: %v\n%s", err, out.String())
 	}
-	pending := string(plugin.Record{Plugins: []string{ID}, Pending: []string{ID}, NitroCompute: plugin.NitroAutoMode}.Manifest())
+	// The pending entry is a replace conditional on the record's
+	// resourceVersion; the move once the deploy passes is an apply.
+	pending := pendingWrite(plugin.Record{Plugins: []string{ID}, Pending: []string{ID}, NitroCompute: plugin.NitroAutoMode})
 	done := string(plugin.Record{Plugins: []string{ID}, NitroCompute: plugin.NitroAutoMode}.Manifest())
-	if len(f.applies) < 3 || f.applies[0] != pending || !strings.Contains(f.applies[1], `"kind":"NodeClass"`) || f.applies[len(f.applies)-1] != done || len(f.creates) != 0 {
-		t.Errorf("applies:\n%s", strings.Join(f.applies, "\n---\n"))
+	if len(f.replaces) != 1 || f.replaces[0] != pending || len(f.applies) < 2 || !strings.Contains(f.applies[0], `"kind":"NodeClass"`) ||
+		f.applies[len(f.applies)-1] != done || len(f.creates) != 0 {
+		t.Errorf("replaces:\n%s\napplies:\n%s", strings.Join(f.replaces, "\n---\n"), strings.Join(f.applies, "\n---\n"))
 	}
 	if err := f.has("kubectl -n kube-system get configmap", "kubectl get runtimeclass isolated-sandbox --ignore-not-found", "kubectl get nodes -l ate.dev/pool=nitro",
 		"kubectl -n kube-system get configmap", "kubectl get runtimeclass isolated-sandbox -o jsonpath", "kubectl get nodepool general-purpose",
-		"kubectl get nodeclass default", "kubectl -n kube-system get configmap", "kubectl apply -f -", "kubectl apply -f -", "golden",
+		"kubectl get nodeclass default", "kubectl -n kube-system get configmap", "kubectl replace --save-config -f -", "kubectl apply -f -", "golden",
 		"kubectl -n kube-system get configmap", "kubectl apply -f -"); err != nil {
 		t.Error(err)
 	}

@@ -105,7 +105,8 @@ func nitroFixture(t *testing.T, f *fakeCluster, deployErr, verifyErr error) Opti
 // Deploy records a plugin that follows NITRO_COMPUTE as pending, with the
 // run's NITRO_COMPUTE (auto-mode for an empty one), before its first write
 // (its AWS half, then Deploy); once Deploy and Verify pass it moves to the
-// installed plugins, and the NITRO_COMPUTE stays.
+// installed plugins, and the NITRO_COMPUTE stays. With no record the pending
+// write is a create, and the move an apply, as every other record write.
 func TestRunDeployRecordsPendingAndTheModeBeforeTheFirstWrite(t *testing.T) {
 	for run, recorded := range map[string]string{NitroNodeGroup: NitroNodeGroup, NitroAutoMode: NitroAutoMode, "": NitroAutoMode} {
 		f := &fakeCluster{}
@@ -115,7 +116,7 @@ func TestRunDeployRecordsPendingAndTheModeBeforeTheFirstWrite(t *testing.T) {
 		if err := Run(context.Background(), &out, ActionDeploy, []string{"iso"}, o); err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"record= pending=iso nitro-compute=" + recorded, "setup-aws iso", "deploy iso NITRO_COMPUTE=" + run,
+		want := []string{"create record= pending=iso nitro-compute=" + recorded, "setup-aws iso", "deploy iso NITRO_COMPUTE=" + run,
 			"verify iso NITRO_COMPUTE=" + run, "record=iso nitro-compute=" + recorded}
 		if !slices.Equal(f.log, want) {
 			t.Errorf("NITRO_COMPUTE %q: log = %q\nwant  %q", run, f.log, want)
@@ -469,6 +470,251 @@ func TestRunPendingRechecksTheRecordedNitroCompute(t *testing.T) {
 	}
 }
 
+// The record read keeps the ConfigMap's resourceVersion ("" with none), for
+// the pending write alone: Equal ignores it, and Manifest, which every other
+// write sends, never carries it, so with only plugins it is still the
+// record older installers write. The pending write's manifest carries it
+// in metadata.
+func TestRecordResourceVersion(t *testing.T) {
+	js := `{"metadata":{"name":"substrate-eks-plugins","resourceVersion":"812"},"data":{"plugins":"efs","pending":"mode3-iso","nitro-compute":"node-group"}}`
+	r, err := ParseRecordJSON([]byte(js))
+	if err != nil || r.ResourceVersion != "812" {
+		t.Fatalf("%+v, %v", r, err)
+	}
+	if !r.Equal(Record{Plugins: []string{"efs"}, Pending: []string{"mode3-iso"}, NitroCompute: NitroNodeGroup}) {
+		t.Errorf("Equal minds the resourceVersion: %+v", r)
+	}
+	if r, err := ParseRecordJSON([]byte(`{"data":{"plugins":"efs"}}`)); err != nil || r.ResourceVersion != "" {
+		t.Errorf("no metadata: %+v, %v", r, err)
+	}
+	if got := string(Record{Plugins: []string{"efs"}, ResourceVersion: "812"}.Manifest()); got != mainRecord("efs") {
+		t.Errorf("Manifest with a resourceVersion read:\n%s\nwant\n%s", got, mainRecord("efs"))
+	}
+	want := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: substrate-eks-plugins\n  namespace: kube-system\n  resourceVersion: \"812\"\n" +
+		"  labels:\n    app.kubernetes.io/managed-by: substrate-eks\ndata:\n  plugins: \"efs\"\n  pending: \"mode3-iso\"\n  nitro-compute: \"node-group\"\n"
+	if got := string(r.manifest(r.ResourceVersion)); got != want {
+		t.Errorf("the pending write's manifest:\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The pending write is conditional both ways, with nothing in between: with
+// no record it is a create, and with one a replace that carries the
+// resourceVersion read, byte for byte; each then goes through.
+func TestRunPendingWriteIsCreateOrReplace(t *testing.T) {
+	for _, c := range []struct {
+		record, write string
+	}{
+		{"", "create record= pending=iso nitro-compute=node-group"},
+		{"solo", "replace record=solo pending=iso nitro-compute=node-group"},
+	} {
+		f := &fakeCluster{record: c.record}
+		o := nitroFixture(t, f, nil, nil)
+		o.NitroCompute = NitroNodeGroup
+		rv := f.resourceVersion()
+		if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"iso"}, o); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.log) == 0 || f.log[0] != c.write || len(f.conditional) != 1 {
+			t.Errorf("%s: log %q", c.write, f.log)
+			continue
+		}
+		pending := Record{Plugins: ParseRecord(c.record), Pending: []string{"iso"}, NitroCompute: NitroNodeGroup}
+		if want := string(pending.manifest(rv)); strings.HasPrefix(c.write, "replace") && f.conditional[0] != want {
+			t.Errorf("replace:\n%s\nwant\n%s", f.conditional[0], want)
+		}
+		if want := string(pending.Manifest()); strings.HasPrefix(c.write, "create") && f.conditional[0] != want {
+			t.Errorf("create:\n%s\nwant\n%s", f.conditional[0], want)
+		}
+	}
+}
+
+// (a) Another run's deploy with the opposite NITRO_COMPUTE writes its
+// pending entry between this deploy's read and its pending write: the write
+// is refused (AlreadyExists when none was read, Conflict when one was), the
+// record is read again, and the check refuses this deploy. Nothing else is
+// written or run: the other run's entry stays as it wrote it.
+func TestRunPendingWriteConflictsWithAnOppositeModeDeploy(t *testing.T) {
+	for _, c := range []struct {
+		record, refused string
+	}{
+		{"", "create refused: AlreadyExists"},
+		{"solo", "replace refused: Conflict"},
+	} {
+		f := &fakeCluster{record: c.record}
+		o := nitroFixture(t, f, nil, nil)
+		o.NitroCompute = NitroNodeGroup
+		f.meanwhile = func(try int) {
+			if try == 1 {
+				f.pending, f.nitro = "iso", NitroAutoMode
+				f.rv++
+			}
+		}
+		var out bytes.Buffer
+		err := Run(context.Background(), &out, ActionDeploy, []string{"iso"}, o)
+		if err == nil || !strings.Contains(err.Error(), "plugin iso: another run recorded iso meanwhile: plugin iso was deployed with NITRO_COMPUTE=auto-mode") {
+			t.Errorf("%s: want the refusal, got %v", c.refused, err)
+		}
+		if !slices.Equal(f.log, []string{c.refused}) || len(f.writes) != 1 || len(f.conditional)+len(f.applies) != 0 || f.reads != 3 {
+			t.Errorf("%s: log %q, writes %q, %d reads (Run's, the pending write's, the one after the refusal)", c.refused, f.log, f.writes, f.reads)
+		}
+		if want := "record=" + c.record + " pending=iso nitro-compute=auto-mode"; f.state() != want {
+			t.Errorf("%s: %s, want the other run's %s", c.refused, f.state(), want)
+		}
+		if !strings.Contains(out.String(), RecordChangedLine+"iso\n") {
+			t.Errorf("%s: output:\n%s", c.refused, out.String())
+		}
+	}
+}
+
+// (b) Another run makes the record between this deploy's read, which found
+// none, and its create: the create fails with AlreadyExists, the record is
+// read again, and the deploy goes on with the same NITRO_COMPUTE. Over the
+// other run's control plane record (solo) it replaces it, conditional on
+// the resourceVersion now read, keeping solo; over its pending entry with
+// the same NITRO_COMPUTE there is nothing left to write.
+func TestRunPendingCreateMeetsARecordMadeMeanwhile(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		other    func(f *fakeCluster)
+		log      []string
+		writes   []string
+		finalRec string
+	}{
+		{"the control plane step's record", func(f *fakeCluster) { f.record = "solo" },
+			[]string{"create refused: AlreadyExists", "replace record=solo pending=iso nitro-compute=node-group", "setup-aws iso",
+				"deploy iso NITRO_COMPUTE=node-group", "verify iso NITRO_COMPUTE=node-group", "record=iso,solo nitro-compute=node-group"},
+			[]string{"create", "replace", "apply"}, "record=iso,solo nitro-compute=node-group"},
+		{"a pending entry with the same NITRO_COMPUTE", func(f *fakeCluster) { f.pending, f.nitro = "iso", NitroNodeGroup },
+			[]string{"create refused: AlreadyExists", "setup-aws iso", "deploy iso NITRO_COMPUTE=node-group", "verify iso NITRO_COMPUTE=node-group",
+				"record=iso nitro-compute=node-group"},
+			[]string{"create", "apply"}, "record=iso nitro-compute=node-group"},
+	} {
+		f := &fakeCluster{}
+		o := nitroFixture(t, f, nil, nil)
+		o.NitroCompute = NitroNodeGroup
+		f.meanwhile = func(try int) {
+			if try == 1 {
+				c.other(f)
+				f.rv++
+			}
+		}
+		if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"iso"}, o); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !slices.Equal(f.log, c.log) || !slices.Equal(f.writes, c.writes) || f.state() != c.finalRec {
+			t.Errorf("%s: log = %q\nwant  %q\nwrites %q, %s", c.name, f.log, c.log, f.writes, f.state())
+		}
+	}
+}
+
+// (c) The record changes between every read and the write after it (other
+// runs deploy and remove base over and over): the pending write stops after
+// three tries with an error that says so, before the plugin writes
+// anything.
+func TestRunPendingWriteStopsAfterThreeConflicts(t *testing.T) {
+	f := &fakeCluster{record: "solo"}
+	o := nitroFixture(t, f, nil, nil)
+	o.NitroCompute = NitroNodeGroup
+	f.meanwhile = func(try int) {
+		f.record = []string{"solo", "base,solo"}[try%2]
+		f.rv++
+	}
+	var out bytes.Buffer
+	err := Run(context.Background(), &out, ActionDeploy, []string{"iso"}, o)
+	if !errors.Is(err, errRecordChanged) || !strings.Contains(err.Error(),
+		"plugin iso: kube-system/substrate-eks-plugins changed between the read and the write on each of 3 tries to record iso as pending: another run is writing it; let it finish, then deploy again") {
+		t.Errorf("want the error after 3 tries, got %v", err)
+	}
+	want := []string{"replace refused: Conflict", "replace refused: Conflict", "replace refused: Conflict"}
+	if !slices.Equal(f.log, want) || !slices.Equal(f.writes, []string{"replace", "replace", "replace"}) || f.reads != 4 {
+		t.Errorf("log = %q, writes %q, %d reads\nwant  %q, 4 reads", f.log, f.writes, f.reads, want)
+	}
+	if n := strings.Count(out.String(), RecordChangedLine+"iso\n"); n != 2 {
+		t.Errorf("read again %d times, want 2:\n%s", n, out.String())
+	}
+}
+
+// A replace after another run deleted the record (NotFound) counts as the
+// record changed: the next try reads none and creates it. Any other failure
+// of the pending write is returned as it is, with no second read or try.
+func TestRunPendingWriteReturnsOtherErrors(t *testing.T) {
+	f := &fakeCluster{record: "solo"}
+	o := nitroFixture(t, f, nil, nil)
+	o.NitroCompute = NitroNodeGroup
+	gone := false
+	f.meanwhile = func(int) {
+		if !gone {
+			gone, f.record = true, ""
+		}
+	}
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"iso"}, o); err != nil {
+		t.Errorf("a replace that finds the record deleted: %v", err)
+	}
+	if len(f.log) == 0 || f.log[0] != "replace refused: NotFound" || !slices.Contains(f.writes, "create") {
+		t.Errorf("log %q, writes %q", f.log, f.writes)
+	}
+
+	prev := Exec
+	t.Cleanup(func() { Exec = prev })
+	denied := errors.New("exit status 1")
+	tries := 0
+	Exec = func(ctx context.Context, w io.Writer, c Cmd) error {
+		if slices.Contains(c.Argv, "create") {
+			tries++
+			io.WriteString(w, `Error from server (Forbidden): configmaps is forbidden: User "x" cannot create resource "configmaps"`+"\n")
+			return denied
+		}
+		return f.exec(ctx, w, c)
+	}
+	f = &fakeCluster{}
+	o.NitroCompute = NitroNodeGroup
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"iso"}, o); !errors.Is(err, denied) || errors.Is(err, errRecordChanged) || tries != 1 {
+		t.Errorf("a denied create: %v, %d tries", err, tries)
+	}
+}
+
+// (d) Only the pending write is conditional. A deploy, the control plane's
+// record and a removal of plugins that do not follow NITRO_COMPUTE make
+// only kubectl apply (and delete) calls, as before; so do the move of a
+// pending plugin, the control plane's record of it and its removal.
+func TestRecordWritesOtherThanPendingAreApply(t *testing.T) {
+	f := &fakeCluster{}
+	o := runFixture(t, f, nil)
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"solo"}, o); err != nil {
+		t.Fatal(err)
+	}
+	f.record = "top"
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"top"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddToRecord(context.Background(), io.Discard, o, "base", "solo", "top"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), io.Discard, ActionRemove, nil, o); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"apply", "apply", "apply", "apply", "apply", "delete"}; !slices.Equal(f.writes, want) || len(f.conditional) != 0 {
+		t.Errorf("the default path wrote with %q, want %q", f.writes, want)
+	}
+
+	f = &fakeCluster{record: "solo"}
+	o = nitroFixture(t, f, nil, nil)
+	o.NitroCompute = NitroNodeGroup
+	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"iso"}, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddToRecord(context.Background(), io.Discard, o, "base", "iso", "solo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), io.Discard, ActionRemove, nil, o); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"replace", "apply", "apply", "apply", "apply", "delete"}; !slices.Equal(f.writes, want) {
+		t.Errorf("with iso: wrote with %q, want %q", f.writes, want)
+	}
+}
+
 // The pending entry is written just before the plugin's first write, when
 // Deploy calls o.BeforeWrite after its reads: a Deploy that refuses after
 // its reads leaves the record as it was, so a deploy with another
@@ -492,7 +738,7 @@ func TestRunPendingJustBeforeTheFirstWrite(t *testing.T) {
 	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"lazy"}, o); err != nil {
 		t.Fatalf("the auto-mode deploy after the refusal: %v", err)
 	}
-	if want := []string{"read lazy", "record= pending=lazy nitro-compute=auto-mode", "write lazy", "verify lazy NITRO_COMPUTE=auto-mode", "record=lazy nitro-compute=auto-mode"}; !slices.Equal(f.log, want) {
+	if want := []string{"read lazy", "create record= pending=lazy nitro-compute=auto-mode", "write lazy", "verify lazy NITRO_COMPUTE=auto-mode", "record=lazy nitro-compute=auto-mode"}; !slices.Equal(f.log, want) {
 		t.Errorf("log = %q\nwant  %q", f.log, want)
 	}
 
@@ -502,7 +748,7 @@ func TestRunPendingJustBeforeTheFirstWrite(t *testing.T) {
 	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"lazy"}, o); err == nil || !strings.Contains(err.Error(), "plugin lazy: boom") {
 		t.Fatalf("want the failure, got %v", err)
 	}
-	if want := []string{"read lazy", "record= pending=lazy nitro-compute=node-group", "write lazy"}; !slices.Equal(f.log, want) || f.reads != 2 {
+	if want := []string{"read lazy", "create record= pending=lazy nitro-compute=node-group", "write lazy"}; !slices.Equal(f.log, want) || f.reads != 2 {
 		t.Errorf("called twice: log = %q, %d reads (Run's and one for the pending entry)\nwant  %q", f.log, f.reads, want)
 	}
 
@@ -512,7 +758,7 @@ func TestRunPendingJustBeforeTheFirstWrite(t *testing.T) {
 	if err := Run(context.Background(), io.Discard, ActionDeploy, []string{"lazy"}, o); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"read lazy", "write lazy", "record= pending=lazy nitro-compute=node-group", "verify lazy NITRO_COMPUTE=node-group",
+	if want := []string{"read lazy", "write lazy", "create record= pending=lazy nitro-compute=node-group", "verify lazy NITRO_COMPUTE=node-group",
 		"record=lazy nitro-compute=node-group"}; !slices.Equal(f.log, want) {
 		t.Errorf("never called: log = %q\nwant  %q", f.log, want)
 	}
