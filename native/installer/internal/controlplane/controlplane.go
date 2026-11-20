@@ -313,22 +313,25 @@ func Deploy(ctx context.Context, w io.Writer, o Options) error {
 	if err != nil {
 		return err
 	}
-	// Before anything is fetched or applied: a control plane carrying a
-	// plugin that cannot run here (the AWS Nitro sandbox class's, off Auto
-	// Mode) would install its release for nothing. Only a deploy refuses:
-	// Delete shares resolvePlugins, and a removal is always the way out.
+	// Before anything is fetched or applied: a chosen plugin whose own
+	// deploy would refuse this run's NITRO_COMPUTE (another than the record
+	// holds for it, as on a wizard rerun with another one) is refused with
+	// the ways out. It comes first, so on a cluster without Auto Mode a
+	// node-group record run with auto-mode gets this, not the Auto Mode
+	// refusal below. The record is read only for such a plugin; one that is
+	// only recorded is not deployed, so not checked.
+	if err := checkNitroRecord(ctx, w, po, o.Plugins); err != nil {
+		return err
+	}
+	// So does a control plane carrying a plugin that cannot run here (the
+	// AWS Nitro sandbox class's, off Auto Mode), which would install its
+	// release for nothing. Only a deploy refuses: Delete shares
+	// resolvePlugins, and a removal is always the way out.
 	for _, id := range ids {
 		p, _ := plugin.Get(id)
 		if why := p.AutoModeProblem(po); why != "" {
 			return fmt.Errorf("plugin %s %s; %s has EKS Auto Mode off", p.ID, why, o.Cluster)
 		}
-	}
-	// So does a chosen plugin whose own deploy would refuse this run's
-	// NITRO_COMPUTE (another than the record holds for it, as on a wizard
-	// rerun with another one). The record is read again only for such a
-	// plugin; one that is only recorded is not deployed, so not checked.
-	if err := checkNitroRecord(ctx, w, po, o.Plugins); err != nil {
-		return err
 	}
 	// Before anything changes: an installed control plane keeps its release.
 	if err := SameRelease(ctx, kc, o.Cluster, po.Release); err != nil {

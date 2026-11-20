@@ -232,6 +232,13 @@ func markPending(ctx context.Context, w io.Writer, o Options, p Plugin) error {
 	if err != nil {
 		return err
 	}
+	// Checked again on this fresh read: another run may have recorded p
+	// with the other NITRO_COMPUTE since this deploy's checks. Runs on one
+	// cluster at the same time are not supported; this only narrows the
+	// window, since the record write has no precondition.
+	if err := checkRecordedNitroCompute(rec, p, o); err != nil {
+		return fmt.Errorf("another run recorded %s meanwhile: %w", p.ID, err)
+	}
 	next := rec
 	next.Pending = ParseRecord(FormatRecord(append(slices.Clone(rec.Pending), p.ID)))
 	next.NitroCompute = o.nitroCompute()

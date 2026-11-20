@@ -584,6 +584,11 @@ A removal of every plugin (the teardown, `--remove-control-plane`, or
 `--plugin-action remove` with no `--plugins`) removes the pending ones too,
 so a deploy that failed halfway is cleaned up.
 
+Run one installer at a time on a cluster. Two runs at the same time can
+each write the record over the other. A deploy of `mode3-iso` reads the
+record again just before its first write, and stops if another run recorded
+it with the other `NITRO_COMPUTE` in the meantime.
+
 | ID | Plugin | What it adds |
 |---|---|---|
 | `llm-gateway` | LLM gateway (default) | agentgateway on Amazon Bedrock with EKS Pod Identity. Actors ask for `claude`, `claude-haiku`, `claude-sonnet` or `claude-opus` and hold no AWS credentials. |

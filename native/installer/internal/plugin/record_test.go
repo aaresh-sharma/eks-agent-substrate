@@ -444,6 +444,31 @@ func lazyFixture(t *testing.T, f *fakeCluster, refuse *bool, calls int, deployEr
 	return o
 }
 
+// A deploy whose record changed between its checks and its first write
+// (another run recorded the plugin with the other NITRO_COMPUTE) stops at
+// the pending write, before it writes anything.
+func TestRunPendingRechecksTheRecordedNitroCompute(t *testing.T) {
+	f := &fakeCluster{}
+	o := nitroFixture(t, f, nil, nil)
+	Register(Plugin{ID: "racer", Order: 6, FollowsNitroCompute: true,
+		Deploy: func(_ context.Context, _ io.Writer, o Options) error {
+			// Another run's auto-mode deploy, between this one's reads and
+			// its first write.
+			f.pending, f.nitro = "racer", NitroAutoMode
+			if err := o.BeforeWrite(); err != nil {
+				return err
+			}
+			f.log = append(f.log, "write racer")
+			return nil
+		}})
+	o.NitroCompute = NitroNodeGroup
+	err := Run(context.Background(), io.Discard, ActionDeploy, []string{"racer"}, o)
+	if err == nil || !strings.Contains(err.Error(), "another run recorded racer meanwhile") ||
+		!strings.Contains(err.Error(), "was deployed with NITRO_COMPUTE=auto-mode") || slices.Contains(f.log, "write racer") || len(f.applies) != 0 {
+		t.Errorf("err %v, log %q, writes %q", err, f.log, f.applies)
+	}
+}
+
 // The pending entry is written just before the plugin's first write, when
 // Deploy calls o.BeforeWrite after its reads: a Deploy that refuses after
 // its reads leaves the record as it was, so a deploy with another
